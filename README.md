@@ -1,0 +1,72 @@
+# Compass
+
+**A constraint-based, parametric graphic design tool built in Flutter.**
+
+---
+
+### The Manifesto
+Modern graphic design software is broken. 
+
+When you use Illustrator, Inkscape, or Figma, the software treats you like a painter holding a digital brush. The paradigm is **Direct Manipulation**. You are given a "cursor" and asked to move Bézier handles manually. 
+
+But high-level design is not about *drawing*; it is about establishing **rules, systems, constraints, and relationships**. 
+
+Consider the Apple logo. It is famously constructed using the Golden Ratio and intersecting circles. If you try to recreate this in traditional vector software, you have to manually overlap circles and use a "Shape Builder" to cut out the final shape. **The moment you do that, the circles are destroyed.** They become dead, static paths. If you realize one curve needs to be 5% wider, you have to start over. The structural relationship was lost the moment you clicked "merge." 
+
+Traditional graphic design tools use "Smart Guides." But Smart Guides are *transient*. They help you place something once, and then they vanish, leaving behind dead pixels. 
+
+**Compass** is built on a different philosophy: **Persistent Mathematical Truth.**
+
+In Compass, you do not draw lines or circles. You establish relationships. You state rules: *"Draw Point A. Draw Point B. Make a line between them. Now draw a circle anchored to Point A, and force its radius to always equal the exact distance to Point B."*
+
+If you drag Point A, the line moves, and the circle moves. If you drag Point B, the line stretches, and the circle scales perfectly. You are not pushing dead pixels; you are rigging a 2D system. 
+
+Just as LaTeX replaced WYSIWYG word processors for complex academic documents by relying on structural rules, Compass aims to replace the "digital canvas" with a geometric engine.
+
+---
+
+### Core Concepts
+
+1. **Points are the Source of Truth:** Shapes do not own their own coordinates. Every shape is merely a visual manifestation of the relationships between underlying mathematical Points.
+2. **Constraints over Clicks:** Objects are bound together by unbreakable rules. A radius isn't "100 pixels"—it is a live formula driven by the canvas state.
+3. **Parent/Child Relativity:** Moving an anchor point calculates a mathematical delta and pushes that movement down to all dependent geometries, ensuring complex structures move as a single rigid body without ever "grouping" them.
+4. **Pure Geometry:** Toggle off the scaffolding to hide the points and rules, revealing only the mathematically perfect design you have constructed.
+
+---
+
+### ✨ Current Features
+
+Compass is rapidly evolving into a desktop-grade parametric engine. It currently supports:
+
+* **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines (Catmull-Rom with interactive tension nodes).
+* **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, or `Shift+Drag` to translate complex shape groupings.
+* **Infinite Mathematical Canvas:** Pan infinitely using the middle mouse button and zoom seamlessly without breaking underlying coordinate math.
+* **Reference Imagery:** Load, scale, position, and lock underlying raster sketches to trace over with perfect mathematics.
+* **Hierarchical Z-Layers:** Create layers, reorder shapes, and assign independent Fill Colors, Stroke Colors, and Stroke Widths to isolated mathematical groups.
+* **Live Boolean Engine:** Assign Union, Subtract, Intersect, or "Construction" (invisible guide) rules to any shape, recalculating the master path at 60fps.
+* **Scaffolding Toggle:** Right-click the canvas (or use the View menu) to instantly hide all points, rules, and wireframes, leaving only your pure, clean vector geometry.
+* **Native `.compass` Serialization:** Save and Open projects directly to your local file system, preserving every mathematical constraint.
+* **Advanced SVG Compiler:** Export pure XML-based SVG files. Compass calculates complex bounding boxes and utilizes native SVG `<mask...>` tags to perfectly replicate dynamic Boolean Subtractions for external image viewers.
+* **Desktop UI & Themes:** Complete with a native desktop Menu Bar, floating toolbars, contextual right-click menus, and dynamic Light/Dark modes.
+
+---
+
+### 🏗️ Project Architecture
+
+Compass uses a highly decoupled, feature-driven architecture to ensure scalable mathematics and 60fps rendering:
+* `models/geometry/`: The pure data models representing shapes, splines, and points.
+* `constraints.dart`: The mathematical rule engine enforcing logic (e.g., Point-on-Circle, Distance-Radius).
+* `engine.dart`: The centralized state holder that cascades updates from the models to the UI.
+* `io/`: Standalone `.compass` serializers and SVG XML compilers.
+* `ui/`: Modular UI panels, dynamic HUDs, and the interactive `CustomPainter` canvas.
+
+---
+
+### Getting Started
+
+Compass is built entirely in **Flutter**, utilizing the reactive UI framework to instantly cascade mathematical updates to the `CustomPainter` canvas.
+
+**To run the application:**
+```bash
+flutter pub get
+flutter run -d linux
