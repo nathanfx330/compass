@@ -7,9 +7,11 @@
 ### The Manifesto
 Modern graphic design software is broken. 
 
-When you use Illustrator or any of its inspirations, the software treats you like a painter holding a digital brush. The paradigm is **Direct Manipulation**. You are given a "cursor" and asked to move Bézier handles manually. 
+When you use Illustrator or any of its inspirations, the software treats you like a painter holding a digital brush. The paradigm is **Direct Manipulation**. But it isn't just Illustrator—it is the mindset of almost all digital software. We build human interfaces around a mouse, interacting through a cursor or Bézier handles. This is great for detail work, but we fail to provide the scaffolding to move from the abstract to the specific. 
 
-But high-level design is not about *drawing*; it is about establishing **rules, systems, constraints, and relationships**. 
+The cursor represents the specific: making micro-changes to tiny fragments of a project, much like editing a word document character by character. Traditional software makes it incredibly difficult to orchestrate large, structural moves without tedious, manual UI selections. Compass was built to reverse this: abstracting from high-level hierarchical transformations all the way down to specific vertex edits.
+
+High-level design is not about *drawing*; it is about establishing **rules, systems, constraints, and relationships**. 
 
 Consider the Apple logo. It is famously speculated to be constructed using the Golden Ratio and intersecting circles. If you try to recreate this in traditional vector software, you have to manually overlap circles and use a "Shape Builder" to cut out the final shape. **The moment you do that, the circles are destroyed.** They become dead, static paths. If you realize one curve needs to be 5% wider, you have to start over. The structural relationship was lost the moment you clicked "merge." 
 
