@@ -7,21 +7,19 @@
 ### The Manifesto
 Modern graphic design software is broken. 
 
-When you use Illustrator, Inkscape, or Figma, the software treats you like a painter holding a digital brush. The paradigm is **Direct Manipulation**. You are given a "cursor" and asked to move Bézier handles manually. 
+When you use Illustrator or any of its inspirations, the software treats you like a painter holding a digital brush. The paradigm is **Direct Manipulation**. You are given a "cursor" and asked to move Bézier handles manually. 
 
 But high-level design is not about *drawing*; it is about establishing **rules, systems, constraints, and relationships**. 
 
-Consider the Apple logo. It is famously constructed using the Golden Ratio and intersecting circles. If you try to recreate this in traditional vector software, you have to manually overlap circles and use a "Shape Builder" to cut out the final shape. **The moment you do that, the circles are destroyed.** They become dead, static paths. If you realize one curve needs to be 5% wider, you have to start over. The structural relationship was lost the moment you clicked "merge." 
+Consider the Apple logo. It is famously speculated to be constructed using the Golden Ratio and intersecting circles. If you try to recreate this in traditional vector software, you have to manually overlap circles and use a "Shape Builder" to cut out the final shape. **The moment you do that, the circles are destroyed.** They become dead, static paths. If you realize one curve needs to be 5% wider, you have to start over. The structural relationship was lost the moment you clicked "merge." 
 
 Traditional graphic design tools use "Smart Guides." But Smart Guides are *transient*. They help you place something once, and then they vanish, leaving behind dead pixels. 
 
-**Compass** is built on a different philosophy: **Persistent Mathematical Truth.**
+**Compass** is built on a different philosophy: Design is built upon rules, and Compass should respect that with a **Persistent Mathematical Truth.**
 
 In Compass, you do not draw lines or circles. You establish relationships. You state rules: *"Draw Point A. Draw Point B. Make a line between them. Now draw a circle anchored to Point A, and force its radius to always equal the exact distance to Point B."*
 
 If you drag Point A, the line moves, and the circle moves. If you drag Point B, the line stretches, and the circle scales perfectly. You are not pushing dead pixels; you are rigging a 2D system. 
-
-Just as LaTeX replaced WYSIWYG word processors for complex academic documents by relying on structural rules, Compass aims to replace the "digital canvas" with a geometric engine.
 
 ---
 
