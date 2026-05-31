@@ -13,7 +13,7 @@ But high-level design is not about *drawing*; it is about establishing **rules, 
 
 Consider the Apple logo. It is famously speculated to be constructed using the Golden Ratio and intersecting circles. If you try to recreate this in traditional vector software, you have to manually overlap circles and use a "Shape Builder" to cut out the final shape. **The moment you do that, the circles are destroyed.** They become dead, static paths. If you realize one curve needs to be 5% wider, you have to start over. The structural relationship was lost the moment you clicked "merge." 
 
-Traditional graphic design tools use "Smart Guides." But Smart Guides are *transient*. They help you place something once, and then they vanish, leaving behind dead pixels. 
+Traditional graphic design tools use "Smart Guides." But Smart Guides are *transient*. They help you place something once, but they are absent of meaningful relational rules. You can't establish any meaningful relative relationships with the rest of your splines.
 
 **Compass** is built on a different philosophy: Design is built upon rules, and Compass should respect that with a **Persistent Mathematical Truth.**
 
