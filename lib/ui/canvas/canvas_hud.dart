@@ -1,3 +1,4 @@
+// lib/ui/canvas/canvas_hud.dart
 import 'package:flutter/material.dart';
 import '../../engine.dart';
 import '../../models/geometry/spiral.dart';
@@ -13,6 +14,7 @@ class CanvasHUD extends StatelessWidget {
   final bool isRPressed;
   final bool isShiftRPressed;
   final bool isShiftPressed;
+  final bool isAPressed;
 
   // Viewport transforms for positioning the spiral HUD
   final Offset panOffset;
@@ -27,6 +29,7 @@ class CanvasHUD extends StatelessWidget {
     required this.isRPressed,
     required this.isShiftRPressed,
     required this.isShiftPressed,
+    required this.isAPressed,
     required this.panOffset,
     required this.canvasScale,
   });
@@ -46,6 +49,9 @@ class CanvasHUD extends StatelessWidget {
     } else if (isRPressed) {
       overlayText = 'R : ROTATE LOCAL';
       overlayColor = Colors.orangeAccent;
+    } else if (isAPressed) {
+      overlayText = 'A : VERTEX TENSION';
+      overlayColor = Colors.orangeAccent; // CHANGED to match rotational modifiers
     } else if (isShiftPressed && currentTool == CompassTool.select) {
       overlayText = 'SHIFT : PAN SHAPE';
       overlayColor = Colors.blueAccent;

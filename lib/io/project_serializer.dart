@@ -1,3 +1,5 @@
+// lib/io/project_serializer.dart
+
 import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
@@ -24,7 +26,8 @@ class ProjectSerializer {
     }
 
     for (var layer in engine.layers) {
-      buffer.writeln('LAYER,${layer.id},${layer.name},${layer.isVisible},${layer.isExpanded},${layer.color.value},${layer.strokeColor.value},${layer.strokeWidth}');
+      // NEW: Added layer.isLocked to the serialization string
+      buffer.writeln('LAYER,${layer.id},${layer.name},${layer.isVisible},${layer.isExpanded},${layer.color.value},${layer.strokeColor.value},${layer.strokeWidth},${layer.isLocked}');
       for (var shape in layer.shapes) {
         if (shape is CompassLine) {
           buffer.writeln('SHAPE,LINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.start.id},${shape.end.id}');
@@ -92,6 +95,12 @@ class ProjectSerializer {
         );
         layer.isVisible = parts[3] == 'true';
         layer.isExpanded = parts[4] == 'true';
+        
+        // NEW: Load the locked state safely (defaulting to false for old files)
+        if (parts.length >= 9) {
+          layer.isLocked = parts[8] == 'true';
+        }
+
         layerMap[layer.id] = layer;
         engine.layers.add(layer);
       }
@@ -213,7 +222,13 @@ class ProjectSerializer {
     }
 
     if (engine.layers.isNotEmpty) {
-      engine.activeLayer = engine.layers.first;
+      // Don't set the active layer to a locked layer on startup
+      for (var l in engine.layers) {
+        if (!l.isLocked) {
+           engine.activeLayer = l;
+           break;
+        }
+      }
     }
     
     onUpdate();

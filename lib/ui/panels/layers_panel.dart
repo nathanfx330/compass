@@ -1,3 +1,5 @@
+// lib/ui/panels/layers_panel.dart
+
 import 'package:flutter/material.dart';
 
 import '../../engine.dart';
@@ -137,11 +139,27 @@ class LayersPanel extends StatelessWidget {
                                     layer.name,
                                     style: TextStyle(
                                       fontWeight: isActiveLayer ? FontWeight.bold : FontWeight.w500,
-                                      color: isActiveLayer ? theme.colorScheme.primary : null,
+                                      color: isActiveLayer ? theme.colorScheme.primary : (layer.isLocked ? theme.disabledColor : null),
                                     ),
                                   ),
                                 ),
                                 
+                                // --- NEW: Layer Lock Button ---
+                                IconButton(
+                                  iconSize: 16,
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(),
+                                  icon: Icon(
+                                    layer.isLocked ? Icons.lock : Icons.lock_open,
+                                    color: layer.isLocked ? theme.disabledColor : Colors.orange,
+                                  ),
+                                  tooltip: layer.isLocked ? 'Unlock Layer' : 'Lock Layer',
+                                  onPressed: () {
+                                    engine.toggleLayerLock(layer);
+                                  },
+                                ),
+                                const SizedBox(width: 4),
+
                                 IconButton(
                                   iconSize: 16,
                                   padding: EdgeInsets.zero,
@@ -190,13 +208,13 @@ class LayersPanel extends StatelessWidget {
                               leading: Icon(
                                 shapeIcon, 
                                 size: 16,
-                                color: shape.isVisible ? null : theme.disabledColor,
+                                color: (shape.isVisible && !layer.isLocked) ? null : theme.disabledColor,
                               ),
                               title: Text(
                                 shapeName, 
                                 style: TextStyle(
                                   fontSize: 13,
-                                  color: shape.isVisible ? null : theme.disabledColor,
+                                  color: (shape.isVisible && !layer.isLocked) ? null : theme.disabledColor,
                                 ),
                               ),
                               subtitle: Text(
@@ -205,11 +223,11 @@ class LayersPanel extends StatelessWidget {
                                   fontSize: 10,
                                   color: isSelectedShape 
                                       ? theme.colorScheme.primary 
-                                      : (shape.isVisible ? _getOpColor(shape.operation) : theme.disabledColor),
+                                      : (shape.isVisible && !layer.isLocked ? _getOpColor(shape.operation) : theme.disabledColor),
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
-                              trailing: Row(
+                              trailing: layer.isLocked ? const SizedBox.shrink() : Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   // Visibility Toggle
@@ -261,6 +279,7 @@ class LayersPanel extends StatelessWidget {
                               contentPadding: const EdgeInsets.symmetric(horizontal: 16.0),
                               visualDensity: VisualDensity.compact,
                               onTap: () {
+                                // Delegate to engine to handle locked check
                                 engine.selectShape(shape);
                               },
                             ),

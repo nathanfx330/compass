@@ -1,3 +1,5 @@
+// lib/models/geometry/spline.dart
+
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'point.dart';
@@ -207,8 +209,9 @@ class CompassXSpline extends CompassShape {
         canvas.drawRect(handleRect, boxStrokePaint);
         
         // Fill indicates how "smooth" (tension) it is
+        // BUG FIX: Clamped the opacity between 0.0 and 1.0 to prevent silent Flutter crashes
         final tensionFillPaint = Paint()
-          ..color = Colors.blue.withOpacity(node.tension.value)
+          ..color = Colors.blue.withOpacity(node.tension.value.clamp(0.0, 1.0))
           ..style = PaintingStyle.fill;
         canvas.drawRect(handleRect, tensionFillPaint);
       }

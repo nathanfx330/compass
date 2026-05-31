@@ -1,3 +1,5 @@
+// lib/models/layer.dart
+
 import 'package:flutter/material.dart';
 import 'geometry/shape.dart';
 
@@ -7,6 +9,7 @@ class CompassLayer {
   String name;
   bool isVisible = true;
   bool isExpanded = true; 
+  bool isLocked = false; // <-- NEW: Added lock state
   Color color; 
   Color strokeColor;
   double strokeWidth;

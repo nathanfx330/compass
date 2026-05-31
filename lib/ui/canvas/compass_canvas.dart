@@ -1,3 +1,5 @@
+// lib/ui/canvas/compass_canvas.dart
+
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; 
@@ -50,7 +52,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
   
   // X-Spline active state
   CompassXSpline? _activeSpline;
-  CompassSplineNode? _activeTensionNode; // The node whose tension we are currently adjusting
+  CompassSplineNode? _activeTensionNode; // The node whose tension we are currently dragging
+  CompassSplineNode? _targetTensionNode; // The node targeted by holding the 'A' key (pre-drag)
 
   // Canvas Transform State
   Offset _panOffset = Offset.zero;
@@ -61,6 +64,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
   bool _isRPressed = false;
   bool _isShiftRPressed = false;
   bool _isShiftPressed = false;
+  bool _isAPressed = false; 
   
   bool _isRotating = false;
   bool _isPanningShape = false;
@@ -86,16 +90,18 @@ class _CompassCanvasState extends State<CompassCanvas> {
     final isR = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.keyR);
     final isShift = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftLeft) ||
                     HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftRight);
+    final isA = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.keyA);
 
     final bool shiftR = isR && isShift;
     final bool justR = isR && !isShift;
-    final bool justShift = isShift && !isR;
+    final bool justShift = isShift && !isR && !isA; 
 
-    if (_isRPressed != justR || _isShiftRPressed != shiftR || _isShiftPressed != justShift) {
+    if (_isRPressed != justR || _isShiftRPressed != shiftR || _isShiftPressed != justShift || _isAPressed != isA) {
       setState(() {
         _isRPressed = justR;
         _isShiftRPressed = shiftR;
         _isShiftPressed = justShift;
+        _isAPressed = isA; 
 
         if (justR || shiftR) {
           _setupRotationState(hierarchy: shiftR);
@@ -104,9 +110,35 @@ class _CompassCanvasState extends State<CompassCanvas> {
           _transformingPoints.clear();
           _isRotating = false; 
         }
+
+        if (isA) {
+          _setupTensionState();
+        } else {
+          _targetTensionNode = null;
+        }
       });
     }
     return false; // Do not swallow the event
+  }
+
+  void _setupTensionState() {
+    CompassPoint? explicitPoint = _selectedPoint ?? _hoveredPoint;
+    if (explicitPoint != null) {
+      for (var layer in widget.engine.layers) {
+        if (!layer.isVisible || layer.isLocked) continue; // Skip locked
+        for (var shape in layer.shapes) {
+          if (!shape.isVisible) continue;
+          if (shape is CompassXSpline) {
+            for (var node in shape.nodes) {
+              if (node.point == explicitPoint) {
+                _targetTensionNode = node;
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   List<CompassPoint> _getPointsOfShape(CompassShape shape) {
@@ -145,6 +177,39 @@ class _CompassCanvasState extends State<CompassCanvas> {
     return null;
   }
 
+  // --- NEW: Helper to determine if a point is strictly bound to locked layers ---
+  bool _isPointLocked(CompassPoint p) {
+    bool usedInUnlocked = false;
+    bool usedInLocked = false;
+
+    for (var layer in widget.engine.layers) {
+      if (!layer.isVisible) continue; 
+      
+      for (var shape in layer.shapes) {
+        if (!shape.isVisible) continue;
+
+        bool hasPoint = false;
+        if (shape is CompassLine && (shape.start == p || shape.end == p)) hasPoint = true;
+        else if (shape is CompassCircle && (shape.center == p || shape.radiusPoint == p)) hasPoint = true;
+        else if (shape is CompassSpiral && (shape.center == p || shape.startPoint == p)) hasPoint = true;
+        else if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == p) || shape.anchorPoint == p)) hasPoint = true;
+
+        if (hasPoint) {
+          if (layer.isLocked) {
+            usedInLocked = true;
+          } else {
+            usedInUnlocked = true;
+          }
+        }
+      }
+    }
+
+    // Free floating points are unlocked
+    if (!usedInLocked && !usedInUnlocked) return false;
+    // If it's used in at least one unlocked layer, we must allow interacting with it
+    return usedInLocked && !usedInUnlocked;
+  }
+
   Set<CompassPoint> _getRigidBody(CompassShape? shape, CompassPoint? explicitPoint, bool hierarchy) {
     Set<CompassPoint> rigidBody = {};
     
@@ -169,7 +234,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
         }
 
         for (var layer in widget.engine.layers) {
-          if (!layer.isVisible) continue;
+          if (!layer.isVisible || layer.isLocked) continue; // Skip locked layers for hierarchy gathering
           for (var s in layer.shapes) {
             if (!s.isVisible || visitedShapes.contains(s)) continue;
             
@@ -228,6 +293,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
     final scaledThreshold = _hitThreshold / _canvasScale; 
 
     for (var point in widget.engine.points) {
+      if (_isPointLocked(point)) continue; // SKIP LOCKED
+      
       final distance = sqrt(
         pow(point.x.value - logicalPosition.dx, 2) +
         pow(point.y.value - logicalPosition.dy, 2),
@@ -245,6 +312,10 @@ class _CompassCanvasState extends State<CompassCanvas> {
       
       if ((_isRPressed || _isShiftRPressed) && _rotationPivotOffset == null && foundPoint != null) {
         _setupRotationState(hierarchy: _isShiftRPressed);
+      }
+
+      if (_isAPressed && _targetTensionNode == null && foundPoint != null) {
+        _setupTensionState();
       }
     });
   }
@@ -267,6 +338,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
     final scaledThreshold = _hitThreshold / _canvasScale;
 
     for (var point in widget.engine.points) {
+      if (_isPointLocked(point)) continue; // SKIP LOCKED
+      
       final distance = sqrt(
         pow(point.x.value - logicalPosition.dx, 2) +
         pow(point.y.value - logicalPosition.dy, 2),
@@ -280,7 +353,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
 
     if (clickedPoint == null) {
       for (var layer in widget.engine.layers.reversed) {
-        if (!layer.isVisible) continue; 
+        if (!layer.isVisible || layer.isLocked) continue; // SKIP LOCKED
 
         for (var shape in layer.shapes.reversed) {
           if (!shape.isVisible) continue; 
@@ -355,6 +428,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
     if (clickedPoint != null) {
       CompassXSpline? parentSpline;
       for (var layer in widget.engine.layers) {
+        if (layer.isLocked) continue; // SKIP LOCKED
         for (var shape in layer.shapes) {
           if (shape is CompassXSpline && shape.nodes.any((n) => n.point == clickedPoint)) {
             parentSpline = shape;
@@ -519,6 +593,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
       CompassPoint? hitPoint;
       final scaledThreshold = _hitThreshold / _canvasScale; 
       for (var point in widget.engine.points) {
+        if (_isPointLocked(point)) continue; // SKIP LOCKED
+
         final distance = sqrt(
           pow(point.x.value - logicalPosition.dx, 2) +
           pow(point.y.value - logicalPosition.dy, 2),
@@ -536,7 +612,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
 
         CompassShape? ownerShape;
         for (var layer in widget.engine.layers.reversed) {
-          if (!layer.isVisible) continue;
+          if (!layer.isVisible || layer.isLocked) continue; // SKIP LOCKED
           for (var shape in layer.shapes.reversed) {
             if (!shape.isVisible) continue;
             if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) {
@@ -562,7 +638,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
 
       CompassShape? hitShape;
       for (var layer in widget.engine.layers.reversed) {
-        if (!layer.isVisible) continue;
+        if (!layer.isVisible || layer.isLocked) continue; // SKIP LOCKED
         for (var shape in layer.shapes.reversed) {
           if (!shape.isVisible) continue; 
 
@@ -609,7 +685,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
       double minDistance = _hitThreshold / _canvasScale;
 
       for (var layer in widget.engine.layers) {
-        if (!layer.isVisible) continue;
+        if (!layer.isVisible || layer.isLocked) continue; // SKIP LOCKED
 
         for (var shape in layer.shapes) {
           if (!shape.isVisible) continue; 
@@ -786,6 +862,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
       } else {
         final scaledThreshold = _hitThreshold / _canvasScale;
         for (var point in widget.engine.points) {
+          if (_isPointLocked(point)) continue; // SKIP LOCKED
+
           final distance = sqrt(
             pow(point.x.value - logicalPosition.dx, 2) +
             pow(point.y.value - logicalPosition.dy, 2),
@@ -862,7 +940,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
     }
 
     // 0.5 Check if we are initiating a Shape Pan (Shift)
-    if (_isShiftPressed && !_isRPressed && !_isShiftRPressed) {
+    if (_isShiftPressed && !_isRPressed && !_isShiftRPressed && !_isAPressed) {
       _transformingPoints = _getRigidBody(widget.engine.selectedShape, _selectedPoint ?? _hoveredPoint, true);
       if (_transformingPoints.isNotEmpty) {
         _isPanningShape = true;
@@ -871,12 +949,18 @@ class _CompassCanvasState extends State<CompassCanvas> {
       }
     }
 
+    // 0.75 NEW: Global Tension Edit
+    if (_isAPressed && _targetTensionNode != null) {
+      _activeTensionNode = _targetTensionNode;
+      return;
+    }
+
     // 1. Check for Mocha-style Tension Handle drag
     final selectedShape = widget.engine.selectedShape;
     if (selectedShape is CompassXSpline && widget.showScaffolding) {
        for (var node in selectedShape.nodes) {
           final pt = Offset(node.point.x.value, node.point.y.value);
-          final handlePt = pt + const Offset(20, -30) / _canvasScale; 
+          final handlePt = pt + const Offset(20, -30); 
           final dist = (logicalPosition - handlePt).distance;
           
           if (dist < (15.0 / _canvasScale)) {
@@ -889,6 +973,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
     // 2. Fall back to standard single point dragging
     final scaledThreshold = _hitThreshold / _canvasScale;
     for (var point in widget.engine.points) {
+      if (_isPointLocked(point)) continue; // SKIP LOCKED
+
       final distance = sqrt(
         pow(point.x.value - logicalPosition.dx, 2) +
         pow(point.y.value - logicalPosition.dy, 2),
@@ -950,12 +1036,25 @@ class _CompassCanvasState extends State<CompassCanvas> {
       return;
     }
 
-    // 1. If dragging a tension handle
+    // 1. If dragging a tension handle (or global tension with A key)
     if (_activeTensionNode != null) {
-       final tensionDelta = -dy * 0.01; 
-       double newTension = _activeTensionNode!.tension.value + tensionDelta;
-       newTension = newTension.clamp(0.0, 1.0); 
-       _activeTensionNode!.tension.value = newTension;
+       if (_isAPressed) {
+         // Absolute distance-based tension (like rotation)
+         final nodePos = Offset(_activeTensionNode!.point.x.value, _activeTensionNode!.point.y.value);
+         final dist = (logicalPosition - nodePos).distance;
+         
+         // 100 logical pixels = 1.0 tension (standard Catmull-Rom)
+         double newTension = dist * 0.01;
+         
+         _activeTensionNode!.tension.value = max(0.0, newTension);
+       } else {
+         // Local handle drag delta
+         final physicalDy = details.delta.dy; 
+         final tensionDelta = -physicalDy * 0.005; 
+         double newTension = _activeTensionNode!.tension.value + tensionDelta;
+         
+         _activeTensionNode!.tension.value = max(0.0, newTension);
+       }
     } 
     // 2. If dragging a single point (standard translation)
     else if (_activePoint != null) {
@@ -1059,9 +1158,11 @@ class _CompassCanvasState extends State<CompassCanvas> {
             }),
             cursor: _isPanningCanvas
                 ? SystemMouseCursors.move
-                : (_hoveredPoint != null 
-                    ? SystemMouseCursors.precise 
-                    : SystemMouseCursors.basic),
+                : (_targetTensionNode != null && _isAPressed
+                    ? SystemMouseCursors.resizeUpRight
+                    : (_hoveredPoint != null 
+                        ? SystemMouseCursors.precise 
+                        : SystemMouseCursors.basic)),
             child: GestureDetector(
               onTapDown: _onTapDown,
               onSecondaryTapDown: _onSecondaryTapDown, 
@@ -1080,6 +1181,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
                     rotationPivotOffset: _rotationPivotOffset,     
                     isRPressed: _isRPressed,           
                     isShiftRPressed: _isShiftRPressed,
+                    isAPressed: _isAPressed, // NEW
+                    tensionTargetPoint: _targetTensionNode?.point, // NEW
                     shapeStartPoint: _shapeStartPoint, 
                     hoveredPoint: _hoveredPoint,
                     hoverPosition: _hoverPosition,
@@ -1096,7 +1199,6 @@ class _CompassCanvasState extends State<CompassCanvas> {
         ),
 
         // --- HUD / UI OVERLAYS ---
-        // ADDED Positioned.fill right here so it doesn't collapse to 0x0
         Positioned.fill(
           child: CanvasHUD(
             engine: widget.engine,
@@ -1114,6 +1216,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
             isRPressed: _isRPressed,
             isShiftRPressed: _isShiftRPressed,
             isShiftPressed: _isShiftPressed,
+            isAPressed: _isAPressed, 
             panOffset: _panOffset,
             canvasScale: _canvasScale,
           ),

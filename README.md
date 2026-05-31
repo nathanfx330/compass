@@ -1,3 +1,4 @@
+```markdown
 # Compass
 
 **A constraint-based, parametric graphic design tool built in Flutter.**
@@ -38,16 +39,35 @@ Just as LaTeX replaced WYSIWYG word processors for complex academic documents by
 
 Compass is rapidly evolving into a desktop-grade parametric engine. It currently supports:
 
-* **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines (Catmull-Rom with interactive tension nodes).
-* **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, or `Shift+Drag` to translate complex shape groupings.
+* **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines (Catmull-Rom). Use the `A` key to fluidly adjust vertex tension via a global distance tether.
+* **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, `R` to rotate a shape locally, or `Shift+Drag` to translate complex shape groupings.
 * **Infinite Mathematical Canvas:** Pan infinitely using the middle mouse button and zoom seamlessly without breaking underlying coordinate math.
 * **Reference Imagery:** Load, scale, position, and lock underlying raster sketches to trace over with perfect mathematics.
-* **Hierarchical Z-Layers:** Create layers, reorder shapes, and assign independent Fill Colors, Stroke Colors, and Stroke Widths to isolated mathematical groups.
+* **Hierarchical Z-Layers:** Create layers, reorder shapes, and assign independent Fill Colors, Stroke Colors, and Stroke Widths. **Lock layers** to freeze underlying scaffolding and safely work on top of complex construction geometry.
 * **Live Boolean Engine:** Assign Union, Subtract, Intersect, or "Construction" (invisible guide) rules to any shape, recalculating the master path at 60fps.
 * **Scaffolding Toggle:** Right-click the canvas (or use the View menu) to instantly hide all points, rules, and wireframes, leaving only your pure, clean vector geometry.
 * **Native `.compass` Serialization:** Save and Open projects directly to your local file system, preserving every mathematical constraint.
 * **Advanced SVG Compiler:** Export pure XML-based SVG files. Compass calculates complex bounding boxes and utilizes native SVG `<mask...>` tags to perfectly replicate dynamic Boolean Subtractions for external image viewers.
 * **Desktop UI & Themes:** Complete with a native desktop Menu Bar, floating toolbars, contextual right-click menus, and dynamic Light/Dark modes.
+
+---
+
+### ⌨️ Controls & Hotkeys
+
+Compass heavily utilizes keyboard modifiers to keep the UI clean while providing complex mathematical transformations.
+
+**Mouse Controls:**
+* **Left Click:** Select shapes, drag points.
+* **Right Click:** Context menu for Boolean operations, layer manipulation, converting geometry to splines, and hiding scaffolding.
+* **Middle Click & Drag:** Pan the infinite canvas.
+* **Scroll Wheel:** Zoom the infinite canvas.
+
+**Keyboard Modifiers:**
+* **`Shift + Drag`**: Pan a rigid-body shape hierarchy.
+* **`R + Drag`**: Rotate a selected shape or point locally around its centroid.
+* **`Shift + R + Drag`**: Rotate an entire hierarchical rigid-body system around the targeted centroid.
+* **`A + Drag`**: Target an X-Spline vertex and drag anywhere on the screen to fluidly adjust its Catmull-Rom curve tension.
+* **`Ctrl/Cmd + Z`**: Undo mathematical and geometric state changes.
 
 ---
 
@@ -70,3 +90,14 @@ Compass is built entirely in **Flutter**, utilizing the reactive UI framework to
 ```bash
 flutter pub get
 flutter run -d linux
+```
+
+---
+
+### License
+
+Compass is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. 
+
+This means you are free to use, study, share, and modify the software. However, if you modify the code and distribute it—or offer it as a service over a network (like a web app)—you **must** make your modified source code available to the public under the same AGPL-3.0 license. 
+
+For full terms, see the [LICENSE](LICENSE) file. Copyright (C) 2026 Nathaniel Westveer.

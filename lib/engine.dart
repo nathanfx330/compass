@@ -1,3 +1,4 @@
+// lib/engine.dart
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'dart:math';
@@ -142,9 +143,13 @@ class CompassEngine extends ChangeNotifier {
   }
 
   void selectLayer(CompassLayer layer) {
-    activeLayer = layer;
-    _selectedShape = null; 
-    notifyListeners();
+    // Cannot explicitly select a locked layer, but we can tap it in the UI to expand/collapse.
+    // If it's locked, we just won't make it the 'activeLayer' for adding new shapes.
+    if (!layer.isLocked) {
+      activeLayer = layer;
+      _selectedShape = null; 
+      notifyListeners();
+    }
   }
   
   void toggleLayerExpanded(CompassLayer layer) {
@@ -152,17 +157,45 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
+  // --- NEW: Toggle Layer Lock ---
+  void toggleLayerLock(CompassLayer layer) {
+    layer.isLocked = !layer.isLocked;
+    
+    // If we lock the active layer, try to find an unlocked one to make active
+    if (layer.isLocked && activeLayer == layer) {
+       _selectedShape = null;
+       activeLayer = null;
+       for (var l in layers) {
+         if (!l.isLocked) {
+           activeLayer = l;
+           break;
+         }
+       }
+    }
+    
+    // If we lock a layer that has the selected shape, deselect it
+    if (layer.isLocked && _selectedShape != null && layer.shapes.contains(_selectedShape)) {
+      _selectedShape = null;
+    }
+    
+    _saveSnapshot();
+    notifyListeners();
+  }
+
   void selectShape(CompassShape? shape) {
-    _selectedShape = shape;
     if (shape != null) {
+      // Prevent selecting a shape if its parent layer is locked
       for (var layer in layers) {
         if (layer.shapes.contains(shape)) {
+          if (layer.isLocked) return; 
+          
           activeLayer = layer;
           layer.isExpanded = true; 
           break;
         }
       }
     }
+    _selectedShape = shape;
     notifyListeners();
   }
 
