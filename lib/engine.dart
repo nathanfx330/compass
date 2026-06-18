@@ -321,26 +321,6 @@ class CompassEngine extends ChangeNotifier {
   }
 
   // --- Convert Rectangle to Spline (exact circular-arc corners) ---
-  //
-  // A rounded rectangle is built from four straight edges and four
-  // quarter-circle corners. Pure positional Catmull-Rom cannot represent this
-  // exactly: at an edge<->arc junction the arc must leave tangent to the edge
-  // (perfectly horizontal or vertical), but a neighbor-derived tangent is
-  // always diagonal there. So instead we emit 8 nodes -- the entry and exit of
-  // every corner arc, each sitting exactly on a straight edge -- and give each
-  // an EXPLICIT Bezier handle.
-  //
-  // The magic constant is kappa = 4/3 * (sqrt(2) - 1) ~= 0.55228, the canonical
-  // factor for approximating a quarter circle with a single cubic. With a
-  // handle of length kappa*r pointing along the edge direction, every corner
-  // becomes a mathematically exact circular arc and every edge stays dead
-  // straight -- zero bunching, only 8 editable nodes.
-  //
-  // NOTE: explicit handles are stored as fixed offsets, so they translate with
-  // the shape but do NOT auto-rotate under Shift+R rigid-body rotation (the
-  // node points rotate, the handles stay axis-aligned). Rotating a converted
-  // rounded rect will therefore distort the corners until handle-aware rotation
-  // is added. Straight (sharp) rectangles are unaffected.
   void convertRectangleToSpline(CompassRectangle rect) {
     CompassLayer? targetLayer;
     int shapeIndex = -1;
@@ -375,22 +355,19 @@ class CompassEngine extends ChangeNotifier {
     final maxR = min(width / 2, height / 2);
     final r = rect.cornerRadius.value.clamp(0.0, maxR);
 
-    // Helper: spawn a point, wire it into the engine + anchor, and append a
-    // node carrying the given tension / explicit handle.
-    void addNodeAt(Offset pos, {required double tension, Offset? handle}) {
+    void addNodeAt(Offset pos, {required double tension, Offset? handleIn, Offset? handleOut}) {
       final p = CompassPoint(x: pos.dx, y: pos.dy);
       points.add(p);
       p.x.addListener(notifyListeners);
       p.y.addListener(notifyListeners);
       anchor.attach(p);
 
-      final node = CompassSplineNode(point: p, tension: tension, handle: handle);
+      final node = CompassSplineNode(point: p, tension: tension, handleIn: handleIn, handleOut: handleOut);
       node.tension.addListener(notifyListeners);
       spline.addNode(node);
     }
 
     if (r <= 0.1) {
-      // Sharp rectangle: 4 corners, zero tension => straight segments.
       final corners = [
         Offset(left, top),
         Offset(right, top),
@@ -401,26 +378,22 @@ class CompassEngine extends ChangeNotifier {
         addNodeAt(c, tension: 0.0);
       }
     } else {
-      // Rounded rectangle: 8 arc-endpoint nodes with kappa*r axis-aligned
-      // handles. Order is clockwise (screen space, +y down) starting at the
-      // top edge. The handle is the symmetric control-point offset; the
-      // spline mirrors it for the incoming side, giving a smooth G1 junction.
-      final k = 0.5522847498307936 * r; // 4/3 * (sqrt(2) - 1) * r
+      final k = 0.5522847498307936 * r; 
 
-      // (node position, handle vector)
       final spec = <(Offset, Offset)>[
-        (Offset(left + r, top),     Offset(k, 0)),   // top edge start   / TL arc exit
-        (Offset(right - r, top),    Offset(k, 0)),   // top edge end     / TR arc entry
-        (Offset(right, top + r),    Offset(0, k)),   // right edge start / TR arc exit
-        (Offset(right, bottom - r), Offset(0, k)),   // right edge end   / BR arc entry
-        (Offset(right - r, bottom), Offset(-k, 0)),  // bottom edge start/ BR arc exit
-        (Offset(left + r, bottom),  Offset(-k, 0)),  // bottom edge end  / BL arc entry
-        (Offset(left, bottom - r),  Offset(0, -k)),  // left edge start  / BL arc exit
-        (Offset(left, top + r),     Offset(0, -k)),  // left edge end    / TL arc entry
+        (Offset(left + r, top),     Offset(k, 0)),   
+        (Offset(right - r, top),    Offset(k, 0)),   
+        (Offset(right, top + r),    Offset(0, k)),   
+        (Offset(right, bottom - r), Offset(0, k)),   
+        (Offset(right - r, bottom), Offset(-k, 0)),  
+        (Offset(left + r, bottom),  Offset(-k, 0)),  
+        (Offset(left, bottom - r),  Offset(0, -k)),  
+        (Offset(left, top + r),     Offset(0, -k)),  
       ];
 
-      for (final (pos, handle) in spec) {
-        addNodeAt(pos, tension: 1.0, handle: handle);
+      for (final (pos, hOut) in spec) {
+        // Because the corner arcs are perfectly symmetric, HandleIn is always -HandleOut
+        addNodeAt(pos, tension: 1.0, handleOut: hOut, handleIn: Offset(-hOut.dx, -hOut.dy));
       }
     }
 
@@ -496,10 +469,63 @@ class CompassEngine extends ChangeNotifier {
 
   void insertPointIntoSpline(CompassPoint p, CompassXSpline spline) {
     final tap = Offset(p.x.value, p.y.value);
-    final index = spline.getInsertIndexForOffset(tap);
+    final details = spline.getInsertDetailsForOffset(tap);
+    final index = details.$1;
+    final t = details.$2;
+
     final node = CompassSplineNode(point: p);
     node.tension.addListener(notifyListeners);
     
+    // De Casteljau exact subdivision for Bezier curves
+    if ((index > 0 && index < spline.nodes.length) || (spline.isClosed && index == spline.nodes.length)) {
+      final prevIdx = index - 1;
+      final nextIdx = index == spline.nodes.length ? 0 : index;
+      
+      final prevNode = spline.nodes[prevIdx];
+      final nextNode = spline.nodes[nextIdx];
+      
+      final controls = spline.getEvaluatedControls();
+      final hOut = controls[prevIdx].$1;
+      final hIn = controls[nextIdx].$2;
+
+      final p0 = Offset(prevNode.point.x.value, prevNode.point.y.value);
+      final p3 = Offset(nextNode.point.x.value, nextNode.point.y.value);
+
+      final p1 = p0 + hOut;
+      final p2 = p3 + hIn;
+
+      // 1st order
+      final m0 = Offset.lerp(p0, p1, t)!;
+      final m1 = Offset.lerp(p1, p2, t)!;
+      final m2 = Offset.lerp(p2, p3, t)!;
+      // 2nd order
+      final r0 = Offset.lerp(m0, m1, t)!;
+      final r1 = Offset.lerp(m1, m2, t)!;
+      // 3rd order (Point on curve)
+      final b = Offset.lerp(r0, r1, t)!;
+
+      // Force user's dropped point to snap exactly to the mathematical split
+      p.x.value = b.dx;
+      p.y.value = b.dy;
+
+      // Safely divide by tension to prevent double-scaling when saving back to explicit fields.
+      // (Because getEvaluatedControls() already applies the tension multiplier).
+      Offset safeDivide(Offset v, double tension) {
+        return tension > 0.001 ? Offset(v.dx / tension, v.dy / tension) : Offset.zero;
+      }
+
+      // Solidify and truncate neighbor handles (baking Catmull-Rom into Explicit if needed)
+      prevNode.handleIn ??= safeDivide(controls[prevIdx].$2, prevNode.tension.value);
+      prevNode.handleOut = safeDivide(m0 - p0, prevNode.tension.value);
+
+      nextNode.handleOut ??= safeDivide(controls[nextIdx].$1, nextNode.tension.value);
+      nextNode.handleIn = safeDivide(m2 - p3, nextNode.tension.value);
+
+      // Assign the new asymmetric handles to the inserted node
+      node.handleIn = safeDivide(r0 - b, node.tension.value);
+      node.handleOut = safeDivide(r1 - b, node.tension.value);
+    }
+
     if (index >= spline.nodes.length) {
       spline.nodes.add(node);
     } else {
@@ -521,6 +547,32 @@ class CompassEngine extends ChangeNotifier {
     spline.isClosed = !spline.isClosed;
     _saveSnapshot();
     notifyListeners();
+  }
+
+  // Escape hatch: clears explicit baked Bezier handles, restoring standard Catmull-Rom math.
+  void resetPointHandles(CompassPoint p) {
+    bool changed = false;
+    for (var layer in layers) {
+      if (layer.isLocked) continue;
+      for (var shape in layer.shapes) {
+        if (shape is CompassXSpline) {
+          for (var node in shape.nodes) {
+            if (node.point == p) {
+              if (node.handleIn != null || node.handleOut != null) {
+                node.handleIn = null;
+                node.handleOut = null;
+                changed = true;
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    if (changed) {
+      _saveSnapshot();
+      notifyListeners();
+    }
   }
 
   // -------------------------------------

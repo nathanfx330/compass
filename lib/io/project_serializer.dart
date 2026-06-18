@@ -40,16 +40,16 @@ class ProjectSerializer {
           // NEW: Added isSquare to the serialization string
           buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}');
         } else if (shape is CompassXSpline) {
-          // NEW: node token is id:tension, extended to id:tension:hx:hy when the
-          // node carries an explicit Bezier handle (e.g. exact-arc rounded-rect
-          // corners). The handle is omitted entirely when null, so legacy
-          // 2-field tokens are emitted unchanged and old files diff cleanly.
+          // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY 
+          // when the node carries explicit Bezier handles. The handles are omitted 
+          // entirely when null, so legacy 2-field tokens are emitted unchanged.
           // Note: double.toString() always uses '.' (locale-independent), so no
           // comma ever leaks into the CSV field.
           final nodesStr = shape.nodes.map((n) {
-            final h = n.handle;
-            if (h != null) {
-              return '${n.point.id}:${n.tension.value}:${h.dx}:${h.dy}';
+            if (n.handleIn != null || n.handleOut != null) {
+              final hI = n.handleIn ?? const Offset(0, 0);
+              final hO = n.handleOut ?? const Offset(0, 0);
+              return '${n.point.id}:${n.tension.value}:${hI.dx}:${hI.dy}:${hO.dx}:${hO.dy}';
             }
             return '${n.point.id}:${n.tension.value}';
           }).join('|');
@@ -238,25 +238,25 @@ class ProjectSerializer {
             final nodesData = nodesRawStr.split('|');
             for(var nd in nodesData) {
               if(nd.isEmpty) continue;
-              // NEW: tokens are id:tension (legacy, 2 fields) or id:tension:hx:hy
-              // (4 fields, with an explicit Bezier handle). Parse defensively so
-              // old .compass files -- and undo snapshots round-tripped through
-              // this same serializer -- keep loading. A partial/garbage handle
-              // degrades to null rather than dropping the node.
+              
               final np = nd.split(':');
               if(np.length >= 2) {
                 final pt = pointMap[np[0]];
                 final tension = double.tryParse(np[1]) ?? 1.0;
                 if (pt != null) {
-                  Offset? handle;
-                  if (np.length >= 4) {
-                    final hx = double.tryParse(np[2]);
-                    final hy = double.tryParse(np[3]);
-                    if (hx != null && hy != null) {
-                      handle = Offset(hx, hy);
-                    }
+                  Offset? hIn, hOut;
+                  
+                  if (np.length == 4) { // Legacy symmetric fallback
+                    final hx = double.tryParse(np[2]) ?? 0.0;
+                    final hy = double.tryParse(np[3]) ?? 0.0;
+                    hOut = Offset(hx, hy);
+                    hIn = Offset(-hx, -hy);
+                  } else if (np.length >= 6) { // New dual explicit handles
+                    hIn = Offset(double.tryParse(np[2]) ?? 0.0, double.tryParse(np[3]) ?? 0.0);
+                    hOut = Offset(double.tryParse(np[4]) ?? 0.0, double.tryParse(np[5]) ?? 0.0);
                   }
-                  final node = CompassSplineNode(point: pt, tension: tension, handle: handle);
+                  
+                  final node = CompassSplineNode(point: pt, tension: tension, handleIn: hIn, handleOut: hOut);
                   node.tension.addListener(onUpdate); 
                   spline.addNode(node);
                 } else {

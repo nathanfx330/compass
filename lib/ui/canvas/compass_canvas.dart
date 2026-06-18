@@ -461,13 +461,21 @@ class _CompassCanvasState extends State<CompassCanvas> {
 
     if (clickedPoint != null) {
       CompassXSpline? parentSpline;
+      CompassSplineNode? clickedNode;
+      
       for (var layer in widget.engine.layers) {
         if (layer.isLocked) continue; 
         for (var shape in layer.shapes) {
-          if (shape is CompassXSpline && shape.nodes.any((n) => n.point == clickedPoint)) {
-            parentSpline = shape;
-            break;
+          if (shape is CompassXSpline) {
+            for (var n in shape.nodes) {
+              if (n.point == clickedPoint) {
+                parentSpline = shape;
+                clickedNode = n;
+                break;
+              }
+            }
           }
+          if (parentSpline != null) break;
         }
         if (parentSpline != null) break;
       }
@@ -479,6 +487,15 @@ class _CompassCanvasState extends State<CompassCanvas> {
           value: 'toggle_closed',
           child: Text(parentSpline.isClosed ? 'Open Spline' : 'Close Spline (Connect Last to First)'),
         ));
+        
+        // Add Reset Handles (Escape Hatch) if this node is explicitly baked
+        if (clickedNode != null && (clickedNode.handleIn != null || clickedNode.handleOut != null)) {
+          pointMenuItems.add(const PopupMenuItem(
+            value: 'reset_handles',
+            child: Text('Reset Handles (Make Fluid)'),
+          ));
+        }
+        
         pointMenuItems.add(const PopupMenuDivider());
       }
 
@@ -508,6 +525,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
         if (_selectedPoints.contains(clickedPoint)) {
           setState(() => _selectedPoints.remove(clickedPoint));
         }
+      } else if (selectedAction == 'reset_handles') {
+        widget.engine.resetPointHandles(clickedPoint);
       } else if (selectedAction == 'toggle_closed' && parentSpline != null) {
         widget.engine.toggleSplineClosed(parentSpline);
       } else if (selectedAction == 'start_spline') {
@@ -1092,7 +1111,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
         for (var shape in layer.shapes) {
           if (shape is CompassXSpline) {
             for (var node in shape.nodes) {
-              if (node.handle != null && _transformingPoints.contains(node.point)) {
+              if ((node.handleIn != null || node.handleOut != null) && _transformingPoints.contains(node.point)) {
                 _rotatingHandleNodes.add(node);
               }
             }
@@ -1210,12 +1229,20 @@ class _CompassCanvasState extends State<CompassCanvas> {
       // point .value writes above already trigger the repaint, and the updated
       // handle is read during paint via _calculateTangents.
       for (var node in _rotatingHandleNodes) {
-        final h = node.handle;
-        if (h == null) continue;
-        node.handle = Offset(
-          h.dx * cosA - h.dy * sinA,
-          h.dx * sinA + h.dy * cosA,
-        );
+        if (node.handleIn != null) {
+          final h = node.handleIn!;
+          node.handleIn = Offset(
+            h.dx * cosA - h.dy * sinA,
+            h.dx * sinA + h.dy * cosA,
+          );
+        }
+        if (node.handleOut != null) {
+          final h = node.handleOut!;
+          node.handleOut = Offset(
+            h.dx * cosA - h.dy * sinA,
+            h.dx * sinA + h.dy * cosA,
+          );
+        }
       }
       
       _lastPanPosition = logicalPosition;

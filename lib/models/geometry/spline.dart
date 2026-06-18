@@ -8,26 +8,24 @@ import 'shape.dart';
 class CompassSplineNode {
   final CompassPoint point;
   // 0.0 means a perfectly sharp linear corner. 1.0 means a fully smooth Catmull-Rom curve.
-  // NOTE: tension only drives the curve when [handle] is null.
+  // NOTE: tension acts as a master multiplier for ALL handles (Catmull-Rom AND Explicit).
   final ValueNotifier<double> tension;
 
-  // Optional explicit symmetric Bezier handle.
+  // Dual independent handles. 
+  // handleIn is the offset FROM the point TO the incoming control point.
+  // handleOut is the offset FROM the point TO the outgoing control point.
   //
-  // When set, this is the offset vector FROM this node's point TO its outgoing
-  // cubic control point. The incoming control point is mirrored automatically
-  // (point - handle), giving a smooth G1 junction with handles of equal length.
-  //
-  // A non-null handle OVERRIDES the neighbor-derived Catmull-Rom tangent for
-  // this node, letting us express mathematically exact geometry (e.g. true
-  // circular-arc corners on a rounded rectangle) that pure positional
-  // Catmull-Rom physically cannot represent.
-  //
-  // Null => fall back to the classic neighbor + tension behavior. This keeps
-  // every previously-authored spline 100% unchanged.
-  Offset? handle;
+  // Explicit handles OVERRIDE the neighbor-derived Catmull-Rom tangent, letting us 
+  // express mathematically exact geometry (e.g. true circular-arc subdivisions).
+  Offset? handleIn;
+  Offset? handleOut;
 
-  CompassSplineNode({required this.point, double tension = 1.0, this.handle})
-      : tension = ValueNotifier(tension);
+  CompassSplineNode({
+    required this.point, 
+    double tension = 1.0, 
+    this.handleIn, 
+    this.handleOut,
+  }) : tension = ValueNotifier(tension);
 }
 
 class CompassXSpline extends CompassShape {
@@ -43,12 +41,13 @@ class CompassXSpline extends CompassShape {
     nodes.add(node);
   }
 
-  // Figure out which segment of the line the new point was dropped on
-  int getInsertIndexForOffset(Offset tap) {
-    if (nodes.length < 2) return nodes.length;
+  // Returns the (insertIndex, t_value) for the closest segment
+  (int, double) getInsertDetailsForOffset(Offset tap) {
+    if (nodes.length < 2) return (nodes.length, 0.0);
     
     double minDist = double.infinity;
-    int bestIndex = 1; // Default to inserting after the first point
+    int bestIndex = 1; 
+    double bestT = 0.5;
     
     int loopCount = isClosed ? nodes.length : nodes.length - 1;
     
@@ -56,12 +55,13 @@ class CompassXSpline extends CompassShape {
       final p1 = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
       final p2 = Offset(nodes[(i + 1) % nodes.length].point.x.value, nodes[(i + 1) % nodes.length].point.y.value);
       
-      // Calculate point-to-line-segment distance
+      // Calculate point-to-line-segment distance to find the closest segment mathematically
       final l2 = (p2.dx - p1.dx) * (p2.dx - p1.dx) + (p2.dy - p1.dy) * (p2.dy - p1.dy);
       double t = 0;
       if (l2 != 0) {
         t = ((tap.dx - p1.dx) * (p2.dx - p1.dx) + (tap.dy - p1.dy) * (p2.dy - p1.dy)) / l2;
-        t = max(0, min(1, t));
+        // Clamp t slightly inward to prevent degenerate stacking exactly on top of an existing node
+        t = max(0.001, min(0.999, t)); 
       }
       final proj = Offset(p1.dx + t * (p2.dx - p1.dx), p1.dy + t * (p2.dy - p1.dy));
       final dist = (tap - proj).distance;
@@ -69,35 +69,32 @@ class CompassXSpline extends CompassShape {
       if (dist < minDist) {
         minDist = dist;
         bestIndex = (i + 1) % nodes.length;
-        if (bestIndex == 0 && !isClosed) bestIndex = nodes.length; // Append to end if open
+        if (bestIndex == 0 && !isClosed) bestIndex = nodes.length; 
+        bestT = t;
       }
     }
     
     // If closed and best index wrapped to 0, it means insert at the very end of the list
-    if (bestIndex == 0 && isClosed) return nodes.length;
-    return bestIndex;
+    if (bestIndex == 0 && isClosed) return (nodes.length, bestT);
+    return (bestIndex, bestT);
   }
 
-  // Calculates the tangents based on tension and neighbors
-  List<Offset> _calculateTangents() {
-    List<Offset> tangents = [];
+  // Resolves the actual control point offsets (handleOut, handleIn) for every node.
+  List<(Offset, Offset)> getEvaluatedControls() {
+    List<(Offset, Offset)> controls = [];
     for (int i = 0; i < nodes.length; i++) {
       final current = nodes[i];
+      final tension = current.tension.value;
+      
+      Offset? hOut = current.handleOut;
+      Offset? hIn = current.handleIn;
 
-      // --- EXPLICIT HANDLE OVERRIDE ---
-      // If this node carries an explicit Bezier handle, it wins outright. We
-      // store the handle as the control-point offset (cp = pt + handle), but
-      // the cubic emitters work in Hermite tangent units (cp = pt + tangent/3),
-      // so convert by multiplying by 3. No neighbor lookup, no tension, no
-      // endpoint special-casing -- the handle fully defines this node's tangent.
-      final h = current.handle;
-      if (h != null) {
-        tangents.add(Offset(h.dx * 3, h.dy * 3));
+      // If both explicit handles exist, we just scale them by the tension multiplier
+      if (hOut != null && hIn != null) {
+        controls.add((hOut * tension, hIn * tension));
         continue;
       }
 
-      final tension = current.tension.value;
-      
       Offset prev, next;
       
       if (isClosed) {
@@ -116,26 +113,35 @@ class CompassXSpline extends CompassShape {
       final dx = (next.dx - prev.dx) * 0.5 * tension;
       final dy = (next.dy - prev.dy) * 0.5 * tension;
       
+      Offset tangent;
       if (!isClosed) {
         if (i == 0) {
-          tangents.add(Offset((next.dx - current.point.x.value) * tension, (next.dy - current.point.y.value) * tension));
+          tangent = Offset((next.dx - current.point.x.value) * tension, (next.dy - current.point.y.value) * tension);
         } else if (i == nodes.length - 1) {
-          tangents.add(Offset((current.point.x.value - prev.dx) * tension, (current.point.y.value - prev.dy) * tension));
+          tangent = Offset((current.point.x.value - prev.dx) * tension, (current.point.y.value - prev.dy) * tension);
         } else {
-          tangents.add(Offset(dx, dy));
+          tangent = Offset(dx, dy);
         }
       } else {
-        tangents.add(Offset(dx, dy));
+        tangent = Offset(dx, dy);
       }
+
+      // Fallback: Catmull-Rom tangent converted to cubic Bezier handle length (/ 3).
+      // Since explicit handles scale above by tension, we also scale the explicit fallback here
+      // if one handle is explicit and the other is Catmull-Rom (rare but possible).
+      controls.add((
+        hOut != null ? hOut * tension : Offset(tangent.dx / 3, tangent.dy / 3),
+        hIn != null ? hIn * tension : Offset(-tangent.dx / 3, -tangent.dy / 3)
+      ));
     }
-    return tangents;
+    return controls;
   }
 
   @override
   Path getPath() {
     final path = Path();
     // Setting fillType to evenOdd explicitly solves winding rule issues 
-    // when Catmull-Rom nodes loop tightly or are used in boolean subtractions
+    // when nodes loop tightly or are used in boolean subtractions
     path.fillType = PathFillType.evenOdd;
     
     if (nodes.isEmpty) return path;
@@ -145,22 +151,19 @@ class CompassXSpline extends CompassShape {
 
     if (nodes.length == 1) return path;
 
-    final tangents = _calculateTangents();
+    final controls = getEvaluatedControls();
     int loopCount = isClosed ? nodes.length : nodes.length - 1;
 
     for (int i = 0; i < loopCount; i++) {
-      final p0 = nodes[i];
-      final p1 = nodes[(i + 1) % nodes.length];
+      final pt0 = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
+      final pt1 = Offset(nodes[(i + 1) % nodes.length].point.x.value, nodes[(i + 1) % nodes.length].point.y.value);
       
-      final pt0 = Offset(p0.point.x.value, p0.point.y.value);
-      final pt1 = Offset(p1.point.x.value, p1.point.y.value);
-      
-      final t0 = tangents[i];
-      final t1 = tangents[(i + 1) % nodes.length];
+      final hOut = controls[i].$1;
+      final hIn = controls[(i + 1) % nodes.length].$2;
 
-      // Convert Catmull-Rom/Hermite tangents to standard Cubic Bezier control points
-      final cp1 = Offset(pt0.dx + t0.dx / 3, pt0.dy + t0.dy / 3);
-      final cp2 = Offset(pt1.dx - t1.dx / 3, pt1.dy - t1.dy / 3);
+      // Convert offsets to absolute standard Cubic Bezier control points
+      final cp1 = pt0 + hOut;
+      final cp2 = pt1 + hIn;
 
       path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, pt1.dx, pt1.dy);
     }
@@ -182,21 +185,15 @@ class CompassXSpline extends CompassShape {
     buffer.write('M ${start.dx} ${start.dy} ');
 
     if (nodes.length > 1) {
-      final tangents = _calculateTangents();
+      final controls = getEvaluatedControls();
       int loopCount = isClosed ? nodes.length : nodes.length - 1;
 
       for (int i = 0; i < loopCount; i++) {
-        final p0 = nodes[i];
-        final p1 = nodes[(i + 1) % nodes.length];
+        final pt0 = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
+        final pt1 = Offset(nodes[(i + 1) % nodes.length].point.x.value, nodes[(i + 1) % nodes.length].point.y.value);
         
-        final pt0 = Offset(p0.point.x.value, p0.point.y.value);
-        final pt1 = Offset(p1.point.x.value, p1.point.y.value);
-        
-        final t0 = tangents[i];
-        final t1 = tangents[(i + 1) % nodes.length];
-
-        final cp1 = Offset(pt0.dx + t0.dx / 3, pt0.dy + t0.dy / 3);
-        final cp2 = Offset(pt1.dx - t1.dx / 3, pt1.dy - t1.dy / 3);
+        final cp1 = pt0 + controls[i].$1;
+        final cp2 = pt1 + controls[(i + 1) % nodes.length].$2;
 
         buffer.write('C ${cp1.dx} ${cp1.dy}, ${cp2.dx} ${cp2.dy}, ${pt1.dx} ${pt1.dy} ');
       }
@@ -238,7 +235,6 @@ class CompassXSpline extends CompassShape {
         canvas.drawRect(handleRect, boxStrokePaint);
         
         // Fill indicates how "smooth" (tension) it is
-        // BUG FIX: Clamped the opacity between 0.0 and 1.0 to prevent silent Flutter crashes
         final tensionFillPaint = Paint()
           ..color = Colors.blue.withOpacity(node.tension.value.clamp(0.0, 1.0))
           ..style = PaintingStyle.fill;
