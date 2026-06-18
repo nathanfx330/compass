@@ -194,6 +194,9 @@ class LayersPanel extends StatelessWidget {
                           } else if (shape.runtimeType.toString() == 'CompassSpiral') {
                             shapeName = 'Spiral';
                             shapeIcon = Icons.cyclone;
+                          } else if (shape.runtimeType.toString() == 'CompassRectangle') { // <--- ADDED
+                            shapeName = 'Rectangle';
+                            shapeIcon = Icons.crop_square;
                           } else if (shape.runtimeType.toString() == 'CompassXSpline') {
                             shapeName = 'X-Spline';
                             shapeIcon = Icons.draw;

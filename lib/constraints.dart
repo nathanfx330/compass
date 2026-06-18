@@ -1,3 +1,5 @@
+// lib/constraints.dart
+
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'engine.dart'; // Keep this, as it might be needed for anything that touches Engine state directly
@@ -7,6 +9,7 @@ import 'models/geometry/point.dart';
 import 'models/geometry/line.dart';
 import 'models/geometry/circle.dart';
 import 'models/geometry/spiral.dart';
+import 'models/geometry/rectangle.dart'; // <--- ADDED
 
 /// The base class for all rules in the system.
 abstract class CompassConstraint {
@@ -308,5 +311,83 @@ class PointOnSpiralConstraint extends CompassConstraint {
     
     point.x.addListener(listener);
     point.y.addListener(listener);
+  }
+}
+
+// --- NEW: Rectangle Square Constraint ---
+/// A rule that forces the diagonal of a rectangle to always be a perfect 45 degrees,
+/// maintaining a 1:1 aspect ratio (a square) no matter which point is dragged.
+class SquareConstraint extends CompassConstraint {
+  final CompassRectangle rect;
+  bool _isEnforcing = false;
+
+  SquareConstraint({required this.rect}) {
+    bind();
+    enforce();
+  }
+
+  @override
+  void enforce() {
+    if (_isEnforcing) return;
+    if (!rect.isSquare) return; // Only enforce if the toggle is on
+
+    _isEnforcing = true;
+
+    final p1 = rect.p1;
+    final p2 = rect.p2;
+
+    // Calculate current width and height
+    final dx = p2.x.value - p1.x.value;
+    final dy = p2.y.value - p1.y.value;
+
+    // Use the largest axis as the target size to prevent shrinking during drags
+    final size = max(dx.abs(), dy.abs());
+
+    // Preserve the current quadrant / drag direction
+    final signX = dx < 0 ? -1 : 1;
+    final signY = dy < 0 ? -1 : 1;
+
+    // If P2 is actively being dragged by the user, we modify P2's coordinates to snap to P1
+    if (p2.isBeingDragged) {
+      final targetX = p1.x.value + (size * signX);
+      final targetY = p1.y.value + (size * signY);
+      
+      final diffX = targetX - p2.x.value;
+      final diffY = targetY - p2.y.value;
+      
+      if (diffX.abs() > 0.0001 || diffY.abs() > 0.0001) {
+        p2.moveBy(diffX, diffY);
+      }
+    } 
+    // If P1 is actively being dragged by the user, we modify P1's coordinates to snap to P2
+    else if (p1.isBeingDragged) {
+      final targetX = p2.x.value - (size * signX);
+      final targetY = p2.y.value - (size * signY);
+      
+      final diffX = targetX - p1.x.value;
+      final diffY = targetY - p1.y.value;
+      
+      if (diffX.abs() > 0.0001 || diffY.abs() > 0.0001) {
+        p1.moveBy(diffX, diffY);
+      }
+    } 
+    // If neither is being dragged (e.g. standard rule initialization), default to moving P2
+    else {
+      final targetX = p1.x.value + (size * signX);
+      final targetY = p1.y.value + (size * signY);
+      p2.moveBy(targetX - p2.x.value, targetY - p2.y.value);
+    }
+
+    _isEnforcing = false;
+  }
+
+  @override
+  void bind() {
+    void listener() => enforce();
+    
+    rect.p1.x.addListener(listener);
+    rect.p1.y.addListener(listener);
+    rect.p2.x.addListener(listener);
+    rect.p2.y.addListener(listener);
   }
 }

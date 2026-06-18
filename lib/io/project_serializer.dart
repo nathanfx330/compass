@@ -5,12 +5,14 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import '../engine.dart';
+import '../constraints.dart'; // <--- ADDED to instantiate SquareConstraint on load
 import '../models/geometry/point.dart';
 import '../models/geometry/shape.dart';
 import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
+import '../models/geometry/rectangle.dart';
 import '../models/layer.dart';
 
 class ProjectSerializer {
@@ -26,7 +28,6 @@ class ProjectSerializer {
     }
 
     for (var layer in engine.layers) {
-      // NEW: Added layer.isLocked to the serialization string
       buffer.writeln('LAYER,${layer.id},${layer.name},${layer.isVisible},${layer.isExpanded},${layer.color.value},${layer.strokeColor.value},${layer.strokeWidth},${layer.isLocked}');
       for (var shape in layer.shapes) {
         if (shape is CompassLine) {
@@ -35,8 +36,23 @@ class ProjectSerializer {
           buffer.writeln('SHAPE,CIRCLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.radiusPoint?.id ?? ""}');
         } else if (shape is CompassSpiral) {
           buffer.writeln('SHAPE,SPIRAL,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.startPoint.id},${shape.isClockwise},${shape.revolutions}');
+        } else if (shape is CompassRectangle) {
+          // NEW: Added isSquare to the serialization string
+          buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}');
         } else if (shape is CompassXSpline) {
-          final nodesStr = shape.nodes.map((n) => '${n.point.id}:${n.tension.value}').join('|');
+          // NEW: node token is id:tension, extended to id:tension:hx:hy when the
+          // node carries an explicit Bezier handle (e.g. exact-arc rounded-rect
+          // corners). The handle is omitted entirely when null, so legacy
+          // 2-field tokens are emitted unchanged and old files diff cleanly.
+          // Note: double.toString() always uses '.' (locale-independent), so no
+          // comma ever leaks into the CSV field.
+          final nodesStr = shape.nodes.map((n) {
+            final h = n.handle;
+            if (h != null) {
+              return '${n.point.id}:${n.tension.value}:${h.dx}:${h.dy}';
+            }
+            return '${n.point.id}:${n.tension.value}';
+          }).join('|');
           buffer.writeln('SHAPE,XSPLINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.isClosed},${shape.anchorPoint?.id ?? ""},$nodesStr');
         }
       }
@@ -96,7 +112,6 @@ class ProjectSerializer {
         layer.isVisible = parts[3] == 'true';
         layer.isExpanded = parts[4] == 'true';
         
-        // NEW: Load the locked state safely (defaulting to false for old files)
         if (parts.length >= 9) {
           layer.isLocked = parts[8] == 'true';
         }
@@ -125,7 +140,7 @@ class ProjectSerializer {
               isVisible = parts[4] == 'true';
               argOffset = 5;
             }
-          } else if (shapeType == 'SPIRAL') {
+          } else if (shapeType == 'SPIRAL' || shapeType == 'RECTANGLE') {
             if (parts.length >= 9) {
               isVisible = parts[4] == 'true';
               argOffset = 5;
@@ -180,6 +195,29 @@ class ProjectSerializer {
               center.attach(startPoint);
               layer.shapes.add(spiral);
             }
+          } else if (shapeType == 'RECTANGLE') {
+            final p1 = pointMap[parts[argOffset]];
+            final p2 = pointMap[parts[argOffset + 1]];
+            final radius = double.tryParse(parts[argOffset + 2]) ?? 0.0;
+            
+            // NEW: Load the isSquare boolean correctly
+            bool isSquare = false;
+            if (parts.length > argOffset + 3) {
+              isSquare = parts[argOffset + 3] == 'true';
+            }
+            
+            if (p1 != null && p2 != null) {
+              final rect = CompassRectangle(p1: p1, p2: p2, radius: radius, isSquare: isSquare)
+                ..operation = op
+                ..isVisible = isVisible;
+                
+              // If it's saved as a square, bind the constraint immediately upon loading
+              if (isSquare) {
+                SquareConstraint(rect: rect);
+              }
+                
+              layer.shapes.add(rect);
+            }
           } else if (shapeType == 'XSPLINE') {
             final isClosed = parts[argOffset] == 'true';
             
@@ -200,12 +238,25 @@ class ProjectSerializer {
             final nodesData = nodesRawStr.split('|');
             for(var nd in nodesData) {
               if(nd.isEmpty) continue;
+              // NEW: tokens are id:tension (legacy, 2 fields) or id:tension:hx:hy
+              // (4 fields, with an explicit Bezier handle). Parse defensively so
+              // old .compass files -- and undo snapshots round-tripped through
+              // this same serializer -- keep loading. A partial/garbage handle
+              // degrades to null rather than dropping the node.
               final np = nd.split(':');
-              if(np.length == 2) {
+              if(np.length >= 2) {
                 final pt = pointMap[np[0]];
                 final tension = double.tryParse(np[1]) ?? 1.0;
                 if (pt != null) {
-                  final node = CompassSplineNode(point: pt, tension: tension);
+                  Offset? handle;
+                  if (np.length >= 4) {
+                    final hx = double.tryParse(np[2]);
+                    final hy = double.tryParse(np[3]);
+                    if (hx != null && hy != null) {
+                      handle = Offset(hx, hy);
+                    }
+                  }
+                  final node = CompassSplineNode(point: pt, tension: tension, handle: handle);
                   node.tension.addListener(onUpdate); 
                   spline.addNode(node);
                 } else {

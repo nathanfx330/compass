@@ -10,13 +10,15 @@ import '../../models/geometry/line.dart';
 import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
+import '../../models/geometry/rectangle.dart';
 
 // Import CompassTool from the canvas file
 import 'compass_canvas.dart';
 
 class CompassRenderer extends CustomPainter {
   final CompassEngine engine;
-  final CompassPoint? selectedPoint; 
+  final CompassPoint? selectedPoint; // Kept so the compiler doesn't break
+  final Set<CompassPoint>? selectedPoints; // --- NEW: Multi-selection support ---
   final Offset? rotationPivotOffset;
   final bool isRPressed;
   final bool isShiftRPressed;
@@ -34,6 +36,7 @@ class CompassRenderer extends CustomPainter {
   CompassRenderer({
     required this.engine, 
     this.selectedPoint,
+    this.selectedPoints,
     this.rotationPivotOffset,
     this.isRPressed = false,
     this.isShiftRPressed = false,
@@ -117,7 +120,7 @@ class CompassRenderer extends CustomPainter {
         ..style = PaintingStyle.stroke;
 
       for (var layer in engine.layers) {
-        if (!layer.isVisible || layer.isLocked) continue; // NEW: Do not draw scaffolding for locked layers!
+        if (!layer.isVisible || layer.isLocked) continue; 
         
         for (var shape in layer.shapes) {
           if (!shape.isVisible) continue; 
@@ -130,6 +133,8 @@ class CompassRenderer extends CustomPainter {
               final scaffoldPaint = Paint()..color = Colors.blue.withOpacity(0.5)..strokeWidth = 1.5 * invScale..style = PaintingStyle.stroke;
               _drawDashedLine(canvas, Offset(shape.center.x.value, shape.center.y.value), Offset(shape.radiusPoint!.x.value, shape.radiusPoint!.y.value), scaffoldPaint, invScale);
             }
+          } else if (shape is CompassRectangle) {
+            shape.paint(canvas, isSelected ? selectedWireframePaint : wireframePaint, showScaffolding: true, isSelected: isSelected);
           } else if (shape is CompassLine) {
             canvas.drawLine(Offset(shape.start.x.value, shape.start.y.value), Offset(shape.end.x.value, shape.end.y.value), isSelected ? selectedWireframePaint : wireframePaint);
           } else if (shape is CompassSpiral) {
@@ -144,7 +149,6 @@ class CompassRenderer extends CustomPainter {
              // --- Draw Centroid Box for selected X-Spline ---
              if (isSelected) {
                double cx = 0, cy = 0;
-               // Use anchorPoint visually if it exists
                if (shape.anchorPoint != null) {
                  cx = shape.anchorPoint!.x.value;
                  cy = shape.anchorPoint!.y.value;
@@ -167,7 +171,6 @@ class CompassRenderer extends CustomPainter {
                  centerBoxPaint,
                );
                
-               // Draw a tether to show it controls the shape
                if (shape.anchorPoint != null && shape.nodes.isNotEmpty) {
                  final scaffoldPaint = Paint()..color = Colors.orangeAccent.withOpacity(0.3)..strokeWidth = 1.0 * invScale..style = PaintingStyle.stroke;
                  _drawDashedLine(canvas, Offset(cx, cy), Offset(shape.nodes.first.point.x.value, shape.nodes.first.point.y.value), scaffoldPaint, invScale);
@@ -177,16 +180,24 @@ class CompassRenderer extends CustomPainter {
         }
       }
 
-      // --- EXPLICITLY SELECTED POINT HIGHLIGHT ---
-      if (selectedPoint != null) {
+      // --- EXPLICITLY SELECTED POINT(S) HIGHLIGHT ---
+      // Collect all points that should be highlighted (from the old single variable OR the new Set)
+      final highlightSet = <CompassPoint>{};
+      if (selectedPoint != null) highlightSet.add(selectedPoint!);
+      if (selectedPoints != null) highlightSet.addAll(selectedPoints!);
+
+      if (highlightSet.isNotEmpty) {
         final highlightPaint = Paint()
           ..color = Colors.blueAccent.withOpacity(0.4)
           ..style = PaintingStyle.fill;
-        canvas.drawCircle(
-          Offset(selectedPoint!.x.value, selectedPoint!.y.value),
-          14.0 * invScale,
-          highlightPaint,
-        );
+          
+        for (var pt in highlightSet) {
+          canvas.drawCircle(
+            Offset(pt.x.value, pt.y.value),
+            14.0 * invScale,
+            highlightPaint,
+          );
+        }
       }
 
       // --- TENSION GUIDE LINE (A KEY) ---
@@ -194,15 +205,14 @@ class CompassRenderer extends CustomPainter {
         final targetOffset = Offset(tensionTargetPoint!.x.value, tensionTargetPoint!.y.value);
         
         final tensionPaint = Paint()
-          ..color = Colors.orangeAccent // CHANGED: Changed to match rotation theme
+          ..color = Colors.orangeAccent 
           ..strokeWidth = 2.0 * invScale
           ..style = PaintingStyle.stroke;
           
         _drawDashedLine(canvas, targetOffset, hoverPosition!, tensionPaint, invScale);
-        
-        // Draw a small solid indicator ring at the target vertex
         canvas.drawCircle(targetOffset, 10.0 * invScale, tensionPaint);
       }
+      
       // --- ROTATION GUIDE LINE (R KEY) ---
       else if ((isRPressed || isShiftRPressed) && hoverPosition != null) {
         if (rotationPivotOffset != null) {
@@ -236,6 +246,10 @@ class CompassRenderer extends CustomPainter {
           final dummySpiral = CompassSpiral(center: shapeStartPoint!, startPoint: dummyPoint);
           canvas.drawPath(dummySpiral.getPath(), previewPaint);
           canvas.drawLine(startOffset, hoverPosition!, previewPaint);
+        } else if (currentTool == CompassTool.addRect) { 
+          final rect = Rect.fromPoints(startOffset, hoverPosition!);
+          canvas.drawRect(rect, previewPaint);
+          canvas.drawLine(startOffset, hoverPosition!, previewPaint); 
         }
       }
 
@@ -243,9 +257,7 @@ class CompassRenderer extends CustomPainter {
       if (currentTool == CompassTool.addPen && hoverPosition != null) {
         CompassXSpline? active;
         for(var layer in engine.layers) {
-           // Skip rendering live previews for layers that are locked
            if (layer.isLocked) continue; 
-           
            try {
              active = layer.shapes.firstWhere((s) => s is CompassXSpline && !s.isClosed) as CompassXSpline;
              break;
@@ -259,14 +271,12 @@ class CompassRenderer extends CustomPainter {
             ..strokeWidth = 2.0 * invScale
             ..style = PaintingStyle.stroke;
             
-           // Draw a solid blue line for Pen Tool preview so it isn't confused with rotation scaffolding
            canvas.drawLine(lastPt, hoverPosition!, previewPaint);
         }
       }
 
-
       // Hover Ring
-      if (hoveredPoint != null && hoveredPoint != shapeStartPoint && hoveredPoint != selectedPoint) {
+      if (hoveredPoint != null && hoveredPoint != shapeStartPoint && !highlightSet.contains(hoveredPoint)) {
         final hoverPaint = Paint()
           ..color = Colors.orangeAccent.withOpacity(0.5)
           ..style = PaintingStyle.fill;
@@ -300,7 +310,6 @@ class CompassRenderer extends CustomPainter {
         ..style = PaintingStyle.stroke;
 
       for (var point in engine.points) {
-        // NEW: Only draw the little blue dots if the point belongs to an UNLOCKED layer
         if (_isPointUnlocked(point)) {
           final offset = Offset(point.x.value, point.y.value);
           canvas.drawCircle(offset, 5.0 * invScale, pointPaint);
@@ -312,7 +321,6 @@ class CompassRenderer extends CustomPainter {
     canvas.restore();
   }
 
-  // NEW: Helper method to determine if a point should be drawn based on layer lock status
   bool _isPointUnlocked(CompassPoint p) {
     for (var layer in engine.layers) {
       if (!layer.isVisible || layer.isLocked) continue;
@@ -323,6 +331,7 @@ class CompassRenderer extends CustomPainter {
         if (shape is CompassLine && (shape.start == p || shape.end == p)) return true;
         if (shape is CompassCircle && (shape.center == p || shape.radiusPoint == p)) return true;
         if (shape is CompassSpiral && (shape.center == p || shape.startPoint == p)) return true;
+        if (shape is CompassRectangle && (shape.p1 == p || shape.p2 == p)) return true;
         if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == p) || shape.anchorPoint == p)) return true;
       }
     }

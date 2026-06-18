@@ -1,8 +1,11 @@
 // lib/ui/canvas/canvas_hud.dart
+import 'dart:math';
 import 'package:flutter/material.dart';
+
 import '../../engine.dart';
 import '../../models/geometry/spiral.dart';
-import 'compass_canvas.dart'; // To get CompassTool enum
+import '../../models/geometry/rectangle.dart';
+import 'compass_canvas.dart'; 
 
 class CanvasHUD extends StatelessWidget {
   final CompassEngine engine;
@@ -10,13 +13,11 @@ class CanvasHUD extends StatelessWidget {
   final CompassTool currentTool;
   final ValueChanged<CompassTool> onToolSelected;
   
-  // Modifiers state to display the top-right overlay
   final bool isRPressed;
   final bool isShiftRPressed;
   final bool isShiftPressed;
   final bool isAPressed;
 
-  // Viewport transforms for positioning the spiral HUD
   final Offset panOffset;
   final double canvasScale;
 
@@ -39,7 +40,6 @@ class CanvasHUD extends StatelessWidget {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
 
-    // Build HUD text based on current modifiers
     String overlayText = "";
     Color overlayColor = Colors.transparent;
     
@@ -51,7 +51,7 @@ class CanvasHUD extends StatelessWidget {
       overlayColor = Colors.orangeAccent;
     } else if (isAPressed) {
       overlayText = 'A : VERTEX TENSION';
-      overlayColor = Colors.orangeAccent; // CHANGED to match rotational modifiers
+      overlayColor = Colors.orangeAccent; 
     } else if (isShiftPressed && currentTool == CompassTool.select) {
       overlayText = 'SHIFT : PAN SHAPE';
       overlayColor = Colors.blueAccent;
@@ -91,7 +91,7 @@ class CanvasHUD extends StatelessWidget {
             ),
           ),
 
-        // --- ON-CANVAS HUD FOR SELECTED SPIRAL ---
+        // --- ON-CANVAS HUD FOR SELECTED SHAPES ---
         ListenableBuilder(
           listenable: engine,
           builder: (context, _) {
@@ -172,6 +172,88 @@ class CanvasHUD extends StatelessWidget {
                   ),
                 ),
               );
+            } else if (showScaffolding && selectedShape is CompassRectangle) { 
+              final logicalX = min(selectedShape.p1.x.value, selectedShape.p2.x.value);
+              final logicalY = min(selectedShape.p1.y.value, selectedShape.p2.y.value);
+              
+              final physicalX = logicalX * canvasScale + panOffset.dx;
+              final physicalY = logicalY * canvasScale + panOffset.dy;
+
+              final width = (selectedShape.p1.x.value - selectedShape.p2.x.value).abs();
+              final height = (selectedShape.p1.y.value - selectedShape.p2.y.value).abs();
+              final maxRadius = max(0.1, min(width, height) / 2);
+
+              return Positioned(
+                left: physicalX + 20, 
+                top: physicalY - 50,
+                child: Container(
+                  width: 220,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surface.withOpacity(0.9),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: theme.dividerColor),
+                    boxShadow: [
+                      BoxShadow(
+                        color: isDark ? Colors.black54 : Colors.black26,
+                        blurRadius: 8,
+                        offset: const Offset(0, 4),
+                      )
+                    ],
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Rectangle Properties', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                          IconButton(
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                            iconSize: 14,
+                            icon: const Icon(Icons.close),
+                            onPressed: () => engine.selectShape(null),
+                          )
+                        ],
+                      ),
+                      const Divider(),
+                      
+                      // --- NEW: SQUARE TOGGLE CHECKBOX ---
+                      Row(
+                        children: [
+                          SizedBox(
+                            height: 24,
+                            width: 24,
+                            child: Checkbox(
+                              value: selectedShape.isSquare,
+                              onChanged: (val) {
+                                if (val != null) {
+                                  engine.toggleRectangleSquare(selectedShape, val);
+                                }
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Text('Lock as Perfect Square', style: TextStyle(fontSize: 12)),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+
+                      Text('Corner Radius: ${selectedShape.cornerRadius.value.toStringAsFixed(1)}', style: const TextStyle(fontSize: 12)),
+                      Slider(
+                        value: selectedShape.cornerRadius.value.clamp(0.0, maxRadius),
+                        min: 0.0,
+                        max: maxRadius,
+                        onChanged: (val) {
+                          engine.updateRectangleRadius(selectedShape, val);
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              );
             }
             return const SizedBox.shrink();
           },
@@ -223,6 +305,13 @@ class CanvasHUD extends StatelessWidget {
                     icon: Icons.radio_button_unchecked,
                     tooltip: 'Draw Circle',
                     tool: CompassTool.addCircle,
+                    theme: theme,
+                  ),
+                  const SizedBox(width: 8),
+                  _buildToolButton(
+                    icon: Icons.crop_square,
+                    tooltip: 'Draw Rectangle',
+                    tool: CompassTool.addRect,
                     theme: theme,
                   ),
                   const SizedBox(width: 8),

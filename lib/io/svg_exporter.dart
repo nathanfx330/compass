@@ -1,3 +1,6 @@
+// lib/io/svg_exporter.dart
+
+import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../engine.dart';
@@ -6,6 +9,7 @@ import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
+import '../models/geometry/rectangle.dart'; // <--- ADDED
 
 class SVGExporter {
   static String sanitizeId(String rawId) {
@@ -38,6 +42,15 @@ class SVGExporter {
            if (cy - r < minY) minY = cy - r;
            if (cx + r > maxX) maxX = cx + r;
            if (cy + r > maxY) maxY = cy + r;
+        } else if (shape is CompassRectangle) { // <--- ADDED
+           double minXP = min(shape.p1.x.value, shape.p2.x.value);
+           double minYP = min(shape.p1.y.value, shape.p2.y.value);
+           double maxXP = max(shape.p1.x.value, shape.p2.x.value);
+           double maxYP = max(shape.p1.y.value, shape.p2.y.value);
+           if (minXP < minX) minX = minXP;
+           if (minYP < minY) minY = minYP;
+           if (maxXP > maxX) maxX = maxXP;
+           if (maxYP > maxY) maxY = maxYP;
         }
       }
     }
@@ -82,6 +95,9 @@ class SVGExporter {
         for (var shape in subShapes) {
           if (shape is CompassCircle) {
             buffer.writeln('      <circle cx="${shape.center.x.value}" cy="${shape.center.y.value}" r="${shape.radius.value}" fill="black" />');
+          } else if (shape is CompassRectangle) { // <--- ADDED
+            final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
+            buffer.writeln('      <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="black" />');
           } else if (shape is CompassXSpline) {
             buffer.writeln('      <path d="${shape.getSvgPathData()}" fill="black" fill-rule="evenodd" />');
           }
@@ -113,6 +129,9 @@ class SVGExporter {
              }
           }
           buffer.writeln('" fill="none" stroke="$strokeHex" stroke-width="$sWidth" />');
+        } else if (shape is CompassRectangle) { // <--- ADDED
+          final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
+          buffer.writeln('    <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="$fillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
         } else if (shape is CompassXSpline) {
           buffer.writeln('    <path d="${shape.getSvgPathData()}" fill="${shape.isClosed ? fillHex : 'none'}" fill-rule="evenodd" stroke="$strokeHex" stroke-width="$sWidth" />');
         }

@@ -11,6 +11,7 @@ import 'models/geometry/line.dart';
 import 'models/geometry/circle.dart';
 import 'models/geometry/spiral.dart';
 import 'models/geometry/spline.dart';
+import 'models/geometry/rectangle.dart';
 import 'models/layer.dart';
 import 'models/reference_layer.dart';
 
@@ -143,8 +144,6 @@ class CompassEngine extends ChangeNotifier {
   }
 
   void selectLayer(CompassLayer layer) {
-    // Cannot explicitly select a locked layer, but we can tap it in the UI to expand/collapse.
-    // If it's locked, we just won't make it the 'activeLayer' for adding new shapes.
     if (!layer.isLocked) {
       activeLayer = layer;
       _selectedShape = null; 
@@ -157,11 +156,9 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  // --- NEW: Toggle Layer Lock ---
   void toggleLayerLock(CompassLayer layer) {
     layer.isLocked = !layer.isLocked;
     
-    // If we lock the active layer, try to find an unlocked one to make active
     if (layer.isLocked && activeLayer == layer) {
        _selectedShape = null;
        activeLayer = null;
@@ -173,7 +170,6 @@ class CompassEngine extends ChangeNotifier {
        }
     }
     
-    // If we lock a layer that has the selected shape, deselect it
     if (layer.isLocked && _selectedShape != null && layer.shapes.contains(_selectedShape)) {
       _selectedShape = null;
     }
@@ -184,7 +180,6 @@ class CompassEngine extends ChangeNotifier {
 
   void selectShape(CompassShape? shape) {
     if (shape != null) {
-      // Prevent selecting a shape if its parent layer is locked
       for (var layer in layers) {
         if (layer.shapes.contains(shape)) {
           if (layer.isLocked) return; 
@@ -200,7 +195,6 @@ class CompassEngine extends ChangeNotifier {
   }
 
   void removeShape(CompassShape shape) {
-    // 1. Gather all points that belong to the shape being deleted
     List<CompassPoint> shapePoints = [];
     if (shape is CompassLine) {
       shapePoints = [shape.start, shape.end];
@@ -209,12 +203,13 @@ class CompassEngine extends ChangeNotifier {
       if (shape.radiusPoint != null) shapePoints.add(shape.radiusPoint!);
     } else if (shape is CompassSpiral) {
       shapePoints = [shape.center, shape.startPoint];
+    } else if (shape is CompassRectangle) { 
+      shapePoints = [shape.p1, shape.p2];
     } else if (shape is CompassXSpline) {
       shapePoints = shape.nodes.map((n) => n.point).toList();
       if (shape.anchorPoint != null) shapePoints.add(shape.anchorPoint!);
     }
 
-    // 2. Remove the shape from the layers
     bool removed = false;
     for (var layer in layers) {
       if (layer.shapes.remove(shape)) {
@@ -226,7 +221,6 @@ class CompassEngine extends ChangeNotifier {
       }
     }
 
-    // 3. Garbage Collect orphaned points safely
     if (removed) {
       for (var p in shapePoints) {
         _checkAndGCPoint(p);
@@ -237,8 +231,6 @@ class CompassEngine extends ChangeNotifier {
     }
   }
 
-  /// Safely destroys a point ONLY if no shapes are rendering it 
-  /// AND no other points are mathematically dependent on it.
   void _checkAndGCPoint(CompassPoint p) {
     bool isUsed = false;
     for (var layer in layers) {
@@ -246,6 +238,7 @@ class CompassEngine extends ChangeNotifier {
         if (s is CompassLine && (s.start == p || s.end == p)) isUsed = true;
         else if (s is CompassCircle && (s.center == p || s.radiusPoint == p)) isUsed = true;
         else if (s is CompassSpiral && (s.center == p || s.startPoint == p)) isUsed = true;
+        else if (s is CompassRectangle && (s.p1 == p || s.p2 == p)) isUsed = true; 
         else if (s is CompassXSpline && (s.nodes.any((n) => n.point == p) || s.anchorPoint == p)) isUsed = true;
         
         if (isUsed) break;
@@ -254,7 +247,6 @@ class CompassEngine extends ChangeNotifier {
     }
 
     if (!isUsed) {
-      // Don't delete if it is a parent or a child in a rigid body constraint
       bool hasDependencies = p.attachedPoints.isNotEmpty;
       for (var other in points) {
         if (other.attachedPoints.contains(p)) {
@@ -272,8 +264,6 @@ class CompassEngine extends ChangeNotifier {
     }
   }
 
-  /// Converts a parametric circle into an editable X-Spline, 
-  /// retaining its center point constraints and boolean ops.
   void convertCircleToSpline(CompassCircle circle) {
     CompassLayer? targetLayer;
     int shapeIndex = -1;
@@ -296,7 +286,6 @@ class CompassEngine extends ChangeNotifier {
     final r = circle.radius.value;
 
     const int numNodes = 8;
-    // Mathematically calculated tension to perfectly approximate a circle with 8 Catmull-Rom nodes
     const double circleTension = 1.124; 
 
     for (int i = 0; i < numNodes; i++) {
@@ -309,7 +298,6 @@ class CompassEngine extends ChangeNotifier {
       p.x.addListener(notifyListeners);
       p.y.addListener(notifyListeners);
       
-      // Attach to original center! If the user moves the center point, the new spline moves with it.
       circle.center.attach(p);
 
       final node = CompassSplineNode(point: p, tension: circleTension);
@@ -317,21 +305,133 @@ class CompassEngine extends ChangeNotifier {
       spline.addNode(node);
     }
 
-    // Swap the shape in the exact layer position
     targetLayer.shapes[shapeIndex] = spline;
     
     if (_selectedShape == circle) {
       _selectedShape = spline;
     }
 
-    // Attempt to garbage collect old points. 
-    // The center point will SURVIVE automatically because it now has 8 children attached to it!
     if (circle.radiusPoint != null) {
-      // FIX: Sever the specific parent-child relationship so the GC is allowed to delete it.
       circle.center.detach(circle.radiusPoint!);
       _checkAndGCPoint(circle.radiusPoint!);
     }
-    // We intentionally DO NOT check the center point for GC anymore, because we explicitly transferred it to the spline.
+
+    _saveSnapshot();
+    notifyListeners();
+  }
+
+  // --- Convert Rectangle to Spline (exact circular-arc corners) ---
+  //
+  // A rounded rectangle is built from four straight edges and four
+  // quarter-circle corners. Pure positional Catmull-Rom cannot represent this
+  // exactly: at an edge<->arc junction the arc must leave tangent to the edge
+  // (perfectly horizontal or vertical), but a neighbor-derived tangent is
+  // always diagonal there. So instead we emit 8 nodes -- the entry and exit of
+  // every corner arc, each sitting exactly on a straight edge -- and give each
+  // an EXPLICIT Bezier handle.
+  //
+  // The magic constant is kappa = 4/3 * (sqrt(2) - 1) ~= 0.55228, the canonical
+  // factor for approximating a quarter circle with a single cubic. With a
+  // handle of length kappa*r pointing along the edge direction, every corner
+  // becomes a mathematically exact circular arc and every edge stays dead
+  // straight -- zero bunching, only 8 editable nodes.
+  //
+  // NOTE: explicit handles are stored as fixed offsets, so they translate with
+  // the shape but do NOT auto-rotate under Shift+R rigid-body rotation (the
+  // node points rotate, the handles stay axis-aligned). Rotating a converted
+  // rounded rect will therefore distort the corners until handle-aware rotation
+  // is added. Straight (sharp) rectangles are unaffected.
+  void convertRectangleToSpline(CompassRectangle rect) {
+    CompassLayer? targetLayer;
+    int shapeIndex = -1;
+    for (var layer in layers) {
+      shapeIndex = layer.shapes.indexOf(rect);
+      if (shapeIndex != -1) {
+        targetLayer = layer;
+        break;
+      }
+    }
+    
+    if (targetLayer == null) return;
+
+    final cx = (rect.p1.x.value + rect.p2.x.value) / 2;
+    final cy = (rect.p1.y.value + rect.p2.y.value) / 2;
+    final anchor = CompassPoint(x: cx, y: cy);
+    points.add(anchor);
+    anchor.x.addListener(notifyListeners);
+    anchor.y.addListener(notifyListeners);
+
+    final spline = CompassXSpline(isClosed: true, anchorPoint: anchor)
+      ..operation = rect.operation
+      ..isVisible = rect.isVisible;
+
+    final left = min(rect.p1.x.value, rect.p2.x.value);
+    final right = max(rect.p1.x.value, rect.p2.x.value);
+    final top = min(rect.p1.y.value, rect.p2.y.value);
+    final bottom = max(rect.p1.y.value, rect.p2.y.value);
+    
+    final width = right - left;
+    final height = bottom - top;
+    final maxR = min(width / 2, height / 2);
+    final r = rect.cornerRadius.value.clamp(0.0, maxR);
+
+    // Helper: spawn a point, wire it into the engine + anchor, and append a
+    // node carrying the given tension / explicit handle.
+    void addNodeAt(Offset pos, {required double tension, Offset? handle}) {
+      final p = CompassPoint(x: pos.dx, y: pos.dy);
+      points.add(p);
+      p.x.addListener(notifyListeners);
+      p.y.addListener(notifyListeners);
+      anchor.attach(p);
+
+      final node = CompassSplineNode(point: p, tension: tension, handle: handle);
+      node.tension.addListener(notifyListeners);
+      spline.addNode(node);
+    }
+
+    if (r <= 0.1) {
+      // Sharp rectangle: 4 corners, zero tension => straight segments.
+      final corners = [
+        Offset(left, top),
+        Offset(right, top),
+        Offset(right, bottom),
+        Offset(left, bottom),
+      ];
+      for (final c in corners) {
+        addNodeAt(c, tension: 0.0);
+      }
+    } else {
+      // Rounded rectangle: 8 arc-endpoint nodes with kappa*r axis-aligned
+      // handles. Order is clockwise (screen space, +y down) starting at the
+      // top edge. The handle is the symmetric control-point offset; the
+      // spline mirrors it for the incoming side, giving a smooth G1 junction.
+      final k = 0.5522847498307936 * r; // 4/3 * (sqrt(2) - 1) * r
+
+      // (node position, handle vector)
+      final spec = <(Offset, Offset)>[
+        (Offset(left + r, top),     Offset(k, 0)),   // top edge start   / TL arc exit
+        (Offset(right - r, top),    Offset(k, 0)),   // top edge end     / TR arc entry
+        (Offset(right, top + r),    Offset(0, k)),   // right edge start / TR arc exit
+        (Offset(right, bottom - r), Offset(0, k)),   // right edge end   / BR arc entry
+        (Offset(right - r, bottom), Offset(-k, 0)),  // bottom edge start/ BR arc exit
+        (Offset(left + r, bottom),  Offset(-k, 0)),  // bottom edge end  / BL arc entry
+        (Offset(left, bottom - r),  Offset(0, -k)),  // left edge start  / BL arc exit
+        (Offset(left, top + r),     Offset(0, -k)),  // left edge end    / TL arc entry
+      ];
+
+      for (final (pos, handle) in spec) {
+        addNodeAt(pos, tension: 1.0, handle: handle);
+      }
+    }
+
+    targetLayer.shapes[shapeIndex] = spline;
+    
+    if (_selectedShape == rect) {
+      _selectedShape = spline;
+    }
+
+    _checkAndGCPoint(rect.p1);
+    _checkAndGCPoint(rect.p2);
 
     _saveSnapshot();
     notifyListeners();
@@ -349,6 +449,21 @@ class CompassEngine extends ChangeNotifier {
   void updateSpiral(CompassSpiral spiral, {bool? isClockwise, double? revolutions}) {
     if (isClockwise != null) spiral.isClockwise = isClockwise;
     if (revolutions != null) spiral.revolutions = revolutions;
+    _saveSnapshot();
+    notifyListeners();
+  }
+
+  void updateRectangleRadius(CompassRectangle rect, double radius) {
+    rect.cornerRadius.value = radius;
+    _saveSnapshot();
+    notifyListeners();
+  }
+
+  void toggleRectangleSquare(CompassRectangle rect, bool isSquare) {
+    rect.isSquare = isSquare;
+    if (isSquare) {
+      rect.p2.moveBy(0, 0); 
+    }
     _saveSnapshot();
     notifyListeners();
   }
@@ -427,13 +542,12 @@ class CompassEngine extends ChangeNotifier {
           return shape.center == p || shape.radiusPoint == p;
         } else if (shape is CompassSpiral) {
           return shape.center == p || shape.startPoint == p;
+        } else if (shape is CompassRectangle) {
+          return shape.p1 == p || shape.p2 == p;
         } else if (shape is CompassXSpline) {
           shape.nodes.removeWhere((n) => n.point == p);
-          // Destroy the spline if it doesn't have enough points left to form a path
           if (shape.nodes.length < 2) {
-             // Let GC try to clean up the anchor point if the shape is destroyed
              if (shape.anchorPoint != null) {
-                // Detach everything so the anchor isn't artificially holding onto ghost nodes
                 for (var n in shape.nodes) shape.anchorPoint!.detach(n.point);
              }
              return true; 
@@ -473,10 +587,6 @@ class CompassEngine extends ChangeNotifier {
   void finalizePointDrag() {
     _saveSnapshot();
   }
-
-  // =========================================
-  // DELEGATED IO SYSTEM
-  // =========================================
 
   String toProjectData() {
     return ProjectSerializer.serialize(this);

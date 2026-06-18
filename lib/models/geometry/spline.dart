@@ -8,9 +8,25 @@ import 'shape.dart';
 class CompassSplineNode {
   final CompassPoint point;
   // 0.0 means a perfectly sharp linear corner. 1.0 means a fully smooth Catmull-Rom curve.
+  // NOTE: tension only drives the curve when [handle] is null.
   final ValueNotifier<double> tension;
 
-  CompassSplineNode({required this.point, double tension = 1.0}) 
+  // Optional explicit symmetric Bezier handle.
+  //
+  // When set, this is the offset vector FROM this node's point TO its outgoing
+  // cubic control point. The incoming control point is mirrored automatically
+  // (point - handle), giving a smooth G1 junction with handles of equal length.
+  //
+  // A non-null handle OVERRIDES the neighbor-derived Catmull-Rom tangent for
+  // this node, letting us express mathematically exact geometry (e.g. true
+  // circular-arc corners on a rounded rectangle) that pure positional
+  // Catmull-Rom physically cannot represent.
+  //
+  // Null => fall back to the classic neighbor + tension behavior. This keeps
+  // every previously-authored spline 100% unchanged.
+  Offset? handle;
+
+  CompassSplineNode({required this.point, double tension = 1.0, this.handle})
       : tension = ValueNotifier(tension);
 }
 
@@ -67,6 +83,19 @@ class CompassXSpline extends CompassShape {
     List<Offset> tangents = [];
     for (int i = 0; i < nodes.length; i++) {
       final current = nodes[i];
+
+      // --- EXPLICIT HANDLE OVERRIDE ---
+      // If this node carries an explicit Bezier handle, it wins outright. We
+      // store the handle as the control-point offset (cp = pt + handle), but
+      // the cubic emitters work in Hermite tangent units (cp = pt + tangent/3),
+      // so convert by multiplying by 3. No neighbor lookup, no tension, no
+      // endpoint special-casing -- the handle fully defines this node's tangent.
+      final h = current.handle;
+      if (h != null) {
+        tangents.add(Offset(h.dx * 3, h.dy * 3));
+        continue;
+      }
+
       final tension = current.tension.value;
       
       Offset prev, next;
