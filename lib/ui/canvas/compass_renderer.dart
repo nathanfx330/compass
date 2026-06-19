@@ -1,11 +1,9 @@
 // lib/ui/canvas/compass_renderer.dart
 
-import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../../engine.dart';
 import '../../models/geometry/point.dart';
-import '../../models/geometry/shape.dart';
 import '../../models/geometry/line.dart';
 import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
@@ -33,6 +31,12 @@ class CompassRenderer extends CustomPainter {
   final double canvasScale;
   final Color pointBorderColor;
 
+  // The node whose explicit Bezier handle is being dragged, and which side
+  // (true = handleOut, false = handleIn). Used purely to render the active dot
+  // larger/brighter than its idle siblings. Null when no handle drag is live.
+  final CompassSplineNode? activeHandleNode;
+  final bool activeHandleIsOut;
+
   CompassRenderer({
     required this.engine, 
     this.selectedPoint,
@@ -50,6 +54,8 @@ class CompassRenderer extends CustomPainter {
     required this.panOffset,
     required this.canvasScale,
     required this.pointBorderColor,
+    this.activeHandleNode,
+    this.activeHandleIsOut = false,
   }) : super(repaint: engine);
 
   @override
@@ -178,6 +184,15 @@ class CompassRenderer extends CustomPainter {
              }
           }
         }
+      }
+
+      // --- BEZIER HANDLES for the selected X-Spline ---
+      // Drawn after wireframes so the dots sit above the curve, but before the
+      // anchor points so the points stay graspable on top. Only baked nodes of
+      // the selected spline contribute -- a fully-fluid spline shows nothing.
+      final selForHandles = engine.selectedShape;
+      if (selForHandles is CompassXSpline) {
+        _drawBezierHandles(canvas, selForHandles, invScale);
       }
 
       // --- EXPLICITLY SELECTED POINT(S) HIGHLIGHT ---
@@ -319,6 +334,72 @@ class CompassRenderer extends CustomPainter {
     }
 
     canvas.restore();
+  }
+
+  // Renders the draggable Bezier handle dots + tether lines for one spline.
+  // Each dot sits at point + handle * tension -- identical to the canvas hit-test,
+  // so the visual and the grab target are guaranteed to coincide. handleIn and
+  // handleOut are drawn independently (asymmetric editing), in purple to stay
+  // distinct from the blue tension boxes and orange rotation/tension guides. The
+  // node+side currently being dragged renders larger with an inverted fill.
+  void _drawBezierHandles(Canvas canvas, CompassXSpline spline, double invScale) {
+    final linePaint = Paint()
+      ..color = Colors.purpleAccent.withOpacity(0.6)
+      ..strokeWidth = 1.5 * invScale
+      ..style = PaintingStyle.stroke;
+
+    final dotPaint = Paint()
+      ..color = Colors.purpleAccent
+      ..style = PaintingStyle.fill;
+
+    final dotBorderPaint = Paint()
+      ..color = pointBorderColor
+      ..strokeWidth = 1.0 * invScale
+      ..style = PaintingStyle.stroke;
+
+    final activeFillPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+
+    final activeBorderPaint = Paint()
+      ..color = Colors.purpleAccent
+      ..strokeWidth = 2.0 * invScale
+      ..style = PaintingStyle.stroke;
+
+    void drawDot(Offset dot, bool isActive) {
+      if (isActive) {
+        canvas.drawCircle(dot, 7.0 * invScale, activeFillPaint);
+        canvas.drawCircle(dot, 7.0 * invScale, activeBorderPaint);
+      } else {
+        canvas.drawCircle(dot, 5.0 * invScale, dotPaint);
+        canvas.drawCircle(dot, 5.0 * invScale, dotBorderPaint);
+      }
+    }
+
+    for (var node in spline.nodes) {
+      if (node.handleIn == null && node.handleOut == null) continue;
+
+      final anchor = Offset(node.point.x.value, node.point.y.value);
+      final t = node.tension.value;
+
+      if (node.handleOut != null) {
+        final dot = Offset(
+          anchor.dx + node.handleOut!.dx * t,
+          anchor.dy + node.handleOut!.dy * t,
+        );
+        canvas.drawLine(anchor, dot, linePaint);
+        drawDot(dot, node == activeHandleNode && activeHandleIsOut);
+      }
+
+      if (node.handleIn != null) {
+        final dot = Offset(
+          anchor.dx + node.handleIn!.dx * t,
+          anchor.dy + node.handleIn!.dy * t,
+        );
+        canvas.drawLine(anchor, dot, linePaint);
+        drawDot(dot, node == activeHandleNode && !activeHandleIsOut);
+      }
+    }
   }
 
   bool _isPointUnlocked(CompassPoint p) {

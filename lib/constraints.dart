@@ -2,14 +2,13 @@
 
 import 'dart:math';
 import 'package:flutter/foundation.dart';
-import 'engine.dart'; // Keep this, as it might be needed for anything that touches Engine state directly
 
 // --- IMPORT MODELS ---
 import 'models/geometry/point.dart';
 import 'models/geometry/line.dart';
 import 'models/geometry/circle.dart';
 import 'models/geometry/spiral.dart';
-import 'models/geometry/rectangle.dart'; // <--- ADDED
+import 'models/geometry/rectangle.dart';
 
 /// The base class for all rules in the system.
 abstract class CompassConstraint {

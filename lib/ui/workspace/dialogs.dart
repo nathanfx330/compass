@@ -1,4 +1,7 @@
+// lib/ui/workspace/dialogs.dart
+
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../../engine.dart';
 
@@ -60,6 +63,99 @@ class CompassDialogs {
               },
             ),
           ],
+        );
+      },
+    );
+  }
+
+  static void showExportPNG(BuildContext context, CompassEngine engine) {
+    final TextEditingController filenameController = TextEditingController(text: 'compass_export.png');
+    // Resolution multiplier over the artwork's natural bounding-box size.
+    double exportScale = 2.0;
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setLocalState) {
+            return AlertDialog(
+              title: const Text('Export as PNG'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Enter a filename to save your raster image:'),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: filenameController,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Filename',
+                      suffixText: '.png',
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text('Resolution'),
+                  const SizedBox(height: 8),
+                  SegmentedButton<double>(
+                    segments: const [
+                      ButtonSegment(value: 1.0, label: Text('1x')),
+                      ButtonSegment(value: 2.0, label: Text('2x')),
+                      ButtonSegment(value: 4.0, label: Text('4x')),
+                    ],
+                    selected: {exportScale},
+                    onSelectionChanged: (newSelection) {
+                      setLocalState(() {
+                        exportScale = newSelection.first;
+                      });
+                    },
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton.icon(
+                  icon: const Icon(Icons.save),
+                  label: const Text('Save File'),
+                  onPressed: () async {
+                    String filename = filenameController.text;
+                    if (!filename.endsWith('.png')) {
+                      filename += '.png';
+                    }
+                    try {
+                      final Uint8List? bytes = await engine.toPNG(scale: exportScale);
+                      if (bytes == null) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Nothing to export — the canvas is empty.')),
+                          );
+                        }
+                        return;
+                      }
+
+                      final file = File(filename);
+                      await file.writeAsBytes(bytes);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Successfully saved to $filename!')),
+                        );
+                        Navigator.of(context).pop();
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Error saving file: $e')),
+                        );
+                      }
+                    }
+                  },
+                ),
+              ],
+            );
+          },
         );
       },
     );

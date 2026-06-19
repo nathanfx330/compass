@@ -1,5 +1,6 @@
 // lib/engine.dart
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -18,6 +19,7 @@ import 'models/reference_layer.dart';
 // --- IO ---
 import 'io/project_serializer.dart';
 import 'io/svg_exporter.dart';
+import 'io/png_exporter.dart';
 
 /// The state holder and brain of the application.
 class CompassEngine extends ChangeNotifier {
@@ -575,6 +577,83 @@ class CompassEngine extends ChangeNotifier {
     }
   }
 
+  // Forward of resetPointHandles: freezes a node's current fluid Catmull-Rom
+  // tangent into explicit, independently-editable Bezier handles. Reads the live
+  // evaluated control offsets (which already include the tension multiplier) and
+  // divides the tension back out before storing, so re-evaluation reproduces the
+  // identical curve -- zero visual jump at the moment of conversion. Only acts on
+  // nodes whose handles are still null (already-baked nodes are left untouched).
+  void convertPointToBezier(CompassPoint p) {
+    bool changed = false;
+    for (var layer in layers) {
+      if (layer.isLocked) continue;
+      for (var shape in layer.shapes) {
+        if (shape is CompassXSpline) {
+          // Snapshot evaluated controls ONCE per spline before mutating any node,
+          // so every node in this spline bakes from the same coherent tangent field.
+          List<(Offset, Offset)>? controls;
+          for (int i = 0; i < shape.nodes.length; i++) {
+            final node = shape.nodes[i];
+            if (node.point != p) continue;
+            if (node.handleIn != null || node.handleOut != null) continue;
+
+            controls ??= shape.getEvaluatedControls();
+            final t = node.tension.value;
+            final hOut = controls[i].$1;
+            final hIn = controls[i].$2;
+
+            // Strip the tension multiplier so getEvaluatedControls re-applies it
+            // to the exact same effective vector. Guard the near-zero case.
+            Offset safeDivide(Offset v, double tension) {
+              return tension > 0.001 ? Offset(v.dx / tension, v.dy / tension) : v;
+            }
+
+            node.handleOut = safeDivide(hOut, t);
+            node.handleIn = safeDivide(hIn, t);
+            changed = true;
+          }
+        }
+      }
+    }
+
+    if (changed) {
+      _saveSnapshot();
+      notifyListeners();
+    }
+  }
+
+  // Option B commit: the instant a handle is grabbed for direct editing, fold the
+  // node's tension multiplier into the stored handle vectors and pin tension to
+  // 1.0. From then on the node is pure explicit Bezier -- the on-screen handle dot
+  // sits exactly at point + handle, so subsequent drag deltas map 1:1 with no
+  // divide-by-tension fragility, and the tension slider no longer affects it.
+  void commitNodeToBezierEdit(CompassSplineNode node) {
+    final t = node.tension.value;
+    if ((t - 1.0).abs() > 0.0001) {
+      if (node.handleIn != null) {
+        node.handleIn = Offset(node.handleIn!.dx * t, node.handleIn!.dy * t);
+      }
+      if (node.handleOut != null) {
+        node.handleOut = Offset(node.handleOut!.dx * t, node.handleOut!.dy * t);
+      }
+      node.tension.value = 1.0;
+    }
+    notifyListeners();
+  }
+
+  // Per-drag-tick setter for one handle of a node. Stores the raw vector directly
+  // (the node is already committed to tension 1.0 via commitNodeToBezierEdit, so no
+  // tension division is needed) and repaints. The undo snapshot is deferred to drag
+  // release through finalizePointDrag, matching how point drags are journaled.
+  void updateNodeHandle(CompassSplineNode node, bool isOut, Offset handle) {
+    if (isOut) {
+      node.handleOut = handle;
+    } else {
+      node.handleIn = handle;
+    }
+    notifyListeners();
+  }
+
   // -------------------------------------
 
   void addPoint(CompassPoint p) {
@@ -650,5 +729,9 @@ class CompassEngine extends ChangeNotifier {
 
   String toSVG() {
     return SVGExporter.toSVG(this);
+  }
+
+  Future<Uint8List?> toPNG({double scale = 2.0}) {
+    return PNGExporter.toPNG(this, scale: scale);
   }
 }

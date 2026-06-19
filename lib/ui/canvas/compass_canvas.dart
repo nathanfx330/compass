@@ -62,6 +62,15 @@ class _CompassCanvasState extends State<CompassCanvas> {
   CompassSplineNode? _activeTensionNode; 
   CompassSplineNode? _targetTensionNode; 
 
+  // --- Direct Bezier Handle Editing State ---
+  // The node whose explicit Bezier handle is currently being dragged, and which
+  // side (true = handleOut, false = handleIn). When set, _onPanUpdate routes the
+  // mouse straight into the handle vector. The node is committed to tension 1.0
+  // the instant the drag begins (see _onPanStart), so the stored vector maps 1:1
+  // with the on-screen dot at point + handle, with no tension division.
+  CompassSplineNode? _activeHandleNode;
+  bool _activeHandleIsOut = false;
+
   // Canvas Transform State
   Offset _panOffset = Offset.zero;
   double _canvasScale = 1.0; 
@@ -311,6 +320,21 @@ class _CompassCanvasState extends State<CompassCanvas> {
     return (localPosition - _panOffset) / _canvasScale;
   }
 
+  // Returns the visual (logical-space) position of a node's handle control dot.
+  // The dot always sits at point + handle * tension: before a node is committed
+  // its stored handle is the tension-divided base, and after commit tension is
+  // 1.0, so this single formula is correct in both states. Returns null if the
+  // requested side carries no explicit handle.
+  Offset? _handleDotPosition(CompassSplineNode node, bool isOut) {
+    final handle = isOut ? node.handleOut : node.handleIn;
+    if (handle == null) return null;
+    final t = node.tension.value;
+    return Offset(
+      node.point.x.value + handle.dx * t,
+      node.point.y.value + handle.dy * t,
+    );
+  }
+
   void _onHover(PointerHoverEvent event) {
     if (!widget.showScaffolding) return;
 
@@ -488,11 +512,19 @@ class _CompassCanvasState extends State<CompassCanvas> {
           child: Text(parentSpline.isClosed ? 'Open Spline' : 'Close Spline (Connect Last to First)'),
         ));
         
-        // Add Reset Handles (Escape Hatch) if this node is explicitly baked
+        // The convert/reset pair forms a toggle: show exactly one based on whether
+        // this node currently carries explicit handles. Fluid node -> offer to bake
+        // it into editable Bezier handles. Baked node -> offer the escape hatch back
+        // to fluid Catmull-Rom.
         if (clickedNode != null && (clickedNode.handleIn != null || clickedNode.handleOut != null)) {
           pointMenuItems.add(const PopupMenuItem(
             value: 'reset_handles',
             child: Text('Reset Handles (Make Fluid)'),
+          ));
+        } else {
+          pointMenuItems.add(const PopupMenuItem(
+            value: 'convert_to_bezier',
+            child: Text('Convert to Bézier (Edit Handles)'),
           ));
         }
         
@@ -527,6 +559,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
         }
       } else if (selectedAction == 'reset_handles') {
         widget.engine.resetPointHandles(clickedPoint);
+      } else if (selectedAction == 'convert_to_bezier') {
+        widget.engine.convertPointToBezier(clickedPoint);
       } else if (selectedAction == 'toggle_closed' && parentSpline != null) {
         widget.engine.toggleSplineClosed(parentSpline);
       } else if (selectedAction == 'start_spline') {
@@ -1138,6 +1172,42 @@ class _CompassCanvasState extends State<CompassCanvas> {
       return;
     }
 
+    // --- Direct Bezier handle grab ---
+    // Checked before the fixed-offset tension box and before the point hit-test:
+    // if you converted a node to Bezier specifically to edit its handles, grabbing
+    // a visible handle dot should win over adjusting tension or selecting the anchor
+    // sitting underneath. Only the selected spline's baked nodes are probed, and
+    // only when no transform key is held, so this never collides with R/Shift/A.
+    final selForHandles = widget.engine.selectedShape;
+    if (selForHandles is CompassXSpline &&
+        widget.showScaffolding &&
+        !_isShiftPressed && !_isRPressed && !_isShiftRPressed && !_isAPressed) {
+      final handleThreshold = 12.0 / _canvasScale;
+      for (var node in selForHandles.nodes) {
+        if (node.handleIn == null && node.handleOut == null) continue;
+
+        final outDot = _handleDotPosition(node, true);
+        if (outDot != null && (logicalPosition - outDot).distance < handleThreshold) {
+          // Commit the node to pure Bezier (folds tension into the handles, pins
+          // tension to 1.0) so the drag maps 1:1 with no visual jump.
+          widget.engine.commitNodeToBezierEdit(node);
+          _activeHandleNode = node;
+          _activeHandleIsOut = true;
+          setState(() {});
+          return;
+        }
+
+        final inDot = _handleDotPosition(node, false);
+        if (inDot != null && (logicalPosition - inDot).distance < handleThreshold) {
+          widget.engine.commitNodeToBezierEdit(node);
+          _activeHandleNode = node;
+          _activeHandleIsOut = false;
+          setState(() {});
+          return;
+        }
+      }
+    }
+
     final selectedShape = widget.engine.selectedShape;
     if (selectedShape is CompassXSpline && widget.showScaffolding) {
        for (var node in selectedShape.nodes) {
@@ -1258,6 +1328,22 @@ class _CompassCanvasState extends State<CompassCanvas> {
       return;
     }
 
+    // --- Direct Bezier handle drag ---
+    // The node was committed to tension 1.0 on grab, so the on-screen dot lives at
+    // point + handle. Storing (mouse - point) as the raw handle therefore tracks the
+    // cursor exactly. handleIn and handleOut move independently -- this is the true
+    // asymmetric corner control the conversion unlocks. Undo is journaled on release.
+    if (_activeHandleNode != null) {
+      final node = _activeHandleNode!;
+      final newHandle = Offset(
+        logicalPosition.dx - node.point.x.value,
+        logicalPosition.dy - node.point.y.value,
+      );
+      widget.engine.updateNodeHandle(node, _activeHandleIsOut, newHandle);
+      _lastPanPosition = logicalPosition;
+      return;
+    }
+
     // Box Selection Area Hit Testing
     if (_isDraggingSelectionBox && _selectionBoxStart != null) {
        _selectionBoxCurrent = logicalPosition;
@@ -1314,6 +1400,10 @@ class _CompassCanvasState extends State<CompassCanvas> {
       _rotatingHandleNodes.clear();
       for (var p in _transformingPoints) p.isBeingDragged = false;
       widget.engine.finalizePointDrag(); 
+    } else if (_activeHandleNode != null) {
+      _activeHandleNode = null;
+      widget.engine.finalizePointDrag();
+      setState(() {});
     } else if (_isDraggingSelectionBox) {
       setState(() {
         _isDraggingSelectionBox = false;
@@ -1347,6 +1437,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
       _isPanningSelectedPoints = false;
       for (var p in _transformingPoints) p.isBeingDragged = false;
     }
+    _activeHandleNode = null;
     _activeTensionNode = null;
     _lastPanPosition = null;
   }
@@ -1445,6 +1536,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
                     panOffset: _panOffset,
                     canvasScale: _canvasScale,
                     pointBorderColor: theme.colorScheme.surface, 
+                    activeHandleNode: _activeHandleNode,
+                    activeHandleIsOut: _activeHandleIsOut,
                   ),
                 ),
               ),

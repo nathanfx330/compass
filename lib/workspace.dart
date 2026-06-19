@@ -1,9 +1,10 @@
-import 'dart:io';
+// lib/workspace.dart
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'engine.dart';
-import 'ui/canvas/compass_canvas.dart'; // <--- FIXED IMPORT
+import 'ui/canvas/compass_canvas.dart';
 
 // --- UI COMPONENTS ---
 import 'ui/panels/layers_panel.dart';
