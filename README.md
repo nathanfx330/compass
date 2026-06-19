@@ -38,15 +38,15 @@ If you drag Point A, the line moves, and the circle moves. If you drag Point B, 
 
 Compass is rapidly evolving into a desktop-grade parametric engine. It currently supports:
 
-* **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines (Catmull-Rom). Use the `A` key to fluidly adjust vertex tension via a global distance tether.
-* **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, `R` to rotate a shape locally, or `Shift+Drag` to translate complex shape groupings.
+* **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines. Splines live in two mathematical modes: a *fluid* Catmull-Rom curve whose vertex tension you adjust with the `A` key via a global distance tether, or *explicit* Bézier—right-click any vertex to **Convert to Bézier** and freeze its current tangent into independently draggable in/out handles for exact, asymmetric control. Right-click again to **Reset Handles** and dissolve back into fluid curvature. Conversion is loss-free: the curve never jumps, it simply becomes editable.
+* **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, `R` to rotate a shape locally, or `Shift+Drag` to translate complex shape groupings. Explicit Bézier handles rotate in perfect lockstep with their points, so a hand-tuned corner stays mathematically true through any rotation.
 * **Infinite Mathematical Canvas:** Pan infinitely using the middle mouse button and zoom seamlessly without breaking underlying coordinate math.
 * **Reference Imagery:** Load, scale, position, and lock underlying raster sketches to trace over with perfect mathematics.
 * **Hierarchical Z-Layers:** Create layers, reorder shapes, and assign independent Fill Colors, Stroke Colors, and Stroke Widths. **Lock layers** to freeze underlying scaffolding and safely work on top of complex construction geometry.
 * **Live Boolean Engine:** Assign Union, Subtract, Intersect, or "Construction" (invisible guide) rules to any shape, recalculating the master path at 60fps.
 * **Scaffolding Toggle:** Right-click the canvas (or use the View menu) to instantly hide all points, rules, and wireframes, leaving only your pure, clean vector geometry.
 * **Native `.compass` Serialization:** Save and Open projects directly to your local file system, preserving every mathematical constraint.
-* **Advanced SVG Compiler:** Export pure XML-based SVG files. Compass calculates complex bounding boxes and utilizes native SVG `<mask...>` tags to perfectly replicate dynamic Boolean Subtractions for external image viewers.
+* **Vector & Raster Compilers:** Export pure XML-based SVG files—Compass calculates complex bounding boxes and utilizes native SVG `<mask...>` tags to perfectly replicate dynamic Boolean Subtractions for external image viewers. For pixel-based workflows, export crisp **PNG** images at 1x, 2x, or 4x resolution; the raster compiler re-renders the design offscreen from the same mathematical truth, emitting only the clean geometry on a transparent background—never the scaffolding.
 * **Desktop UI & Themes:** Complete with a native desktop Menu Bar, floating toolbars, contextual right-click menus, and dynamic Light/Dark modes.
 
 ---
@@ -56,8 +56,8 @@ Compass is rapidly evolving into a desktop-grade parametric engine. It currently
 Compass heavily utilizes keyboard modifiers to keep the UI clean while providing complex mathematical transformations.
 
 **Mouse Controls:**
-* **Left Click:** Select shapes, drag points.
-* **Right Click:** Context menu for Boolean operations, layer manipulation, converting geometry to splines, and hiding scaffolding.
+* **Left Click:** Select shapes, drag points. Drag the purple in/out dots of a Bézier vertex to sculpt its curve handles directly.
+* **Right Click:** Context menu for Boolean operations, layer manipulation, converting geometry to splines, converting a vertex to or from Bézier handles, and hiding scaffolding.
 * **Middle Click & Drag:** Pan the infinite canvas.
 * **Scroll Wheel:** Zoom the infinite canvas.
 
@@ -76,7 +76,7 @@ Compass uses a highly decoupled, feature-driven architecture to ensure scalable 
 * `models/geometry/`: The pure data models representing shapes, splines, and points.
 * `constraints.dart`: The mathematical rule engine enforcing logic (e.g., Point-on-Circle, Distance-Radius).
 * `engine.dart`: The centralized state holder that cascades updates from the models to the UI.
-* `io/`: Standalone `.compass` serializers and SVG XML compilers.
+* `io/`: Standalone serializers and compilers—the `.compass` project format, the SVG XML exporter, and the offscreen PNG raster exporter.
 * `ui/`: Modular UI panels, dynamic HUDs, and the interactive `CustomPainter` canvas.
 
 ---
