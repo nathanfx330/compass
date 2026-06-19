@@ -264,10 +264,27 @@ class _CompassCanvasState extends State<CompassCanvas> {
       while (queue.isNotEmpty) {
         CompassPoint p = queue.removeLast();
 
+        // DOWNWARD walk: every point p is attached to (its children).
         for (var child in p.attachedPoints) {
           if (!rigidBody.contains(child)) {
             rigidBody.add(child);
             queue.add(child);
+          }
+        }
+
+        // UPWARD walk: every point that has p as one of ITS children (p's parents).
+        // The attach graph is stored one-directionally -- parent.attachedPoints holds
+        // the child, but the child carries no back-pointer -- so the only way to climb
+        // is to scan all points for any whose attachedPoints include p. Without this,
+        // grabbing a leaf (e.g. the deepest circle in a chain of circles linked onto
+        // circles) reaches nothing above it, so the structure can't be rotated from
+        // that shape. With it, the rigid body is the full connected component, so a
+        // global rotation from ANY shape in the chain swings the whole thing.
+        for (var other in widget.engine.points) {
+          if (other == p) continue;
+          if (other.attachedPoints.contains(p) && !rigidBody.contains(other)) {
+            rigidBody.add(other);
+            queue.add(other);
           }
         }
 
@@ -293,6 +310,39 @@ class _CompassCanvasState extends State<CompassCanvas> {
     return rigidBody;
   }
 
+  // Circles and spirals encode their "radius" as the LIVE distance between two
+  // defining points (center<->radiusPoint for a circle, center<->startPoint for a
+  // spiral). If a rotation moves only ONE of those two points, that distance
+  // changes and the shape silently *resizes* instead of rotating. So before any
+  // rotation we expand the moving set: whenever such a shape contributes one of its
+  // two defining points, it must contribute both. With both points orbiting the
+  // same pivot by the same angle their separation is preserved, the radius is
+  // invariant, and the shape rotates rigidly.
+  //
+  // This helper is STRICTLY additive -- it only ever adds points to the set, never
+  // removes any -- so it cannot affect which dependents follow a rotation. It just
+  // guarantees a circle/spiral can't be torn apart mid-rotation.
+  Set<CompassPoint> _expandForShapeCohesion(Set<CompassPoint> pts) {
+    final expanded = Set<CompassPoint>.from(pts);
+    for (var layer in widget.engine.layers) {
+      if (layer.isLocked) continue;
+      for (var shape in layer.shapes) {
+        if (shape is CompassCircle && shape.radiusPoint != null) {
+          if (expanded.contains(shape.center) || expanded.contains(shape.radiusPoint)) {
+            expanded.add(shape.center);
+            expanded.add(shape.radiusPoint!);
+          }
+        } else if (shape is CompassSpiral) {
+          if (expanded.contains(shape.center) || expanded.contains(shape.startPoint)) {
+            expanded.add(shape.center);
+            expanded.add(shape.startPoint);
+          }
+        }
+      }
+    }
+    return expanded;
+  }
+
   void _setupRotationState({required bool hierarchy}) {
     CompassPoint? explicitPoint = _selectedPoints.isNotEmpty ? _selectedPoints.first : _hoveredPoint;
     CompassShape? selShape = widget.engine.selectedShape;
@@ -313,7 +363,10 @@ class _CompassCanvasState extends State<CompassCanvas> {
     }
 
     _rotationPivotOffset = pivotOffset;
-    _transformingPoints = _getRigidBody(selShape, explicitPoint, hierarchy);
+    // Original rigid-body computation, unchanged, then run through the cohesion
+    // guard so a circle/spiral never distorts. The guard is purely additive, so
+    // this preserves every prior rotation behavior (hierarchy expansion included).
+    _transformingPoints = _expandForShapeCohesion(_getRigidBody(selShape, explicitPoint, hierarchy));
   }
 
   Offset _getLogicalPosition(Offset localPosition) {

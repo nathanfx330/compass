@@ -74,6 +74,21 @@ class PointOnLineConstraint extends CompassConstraint {
     if (_isEnforcing) return;
     _isEnforcing = true;
 
+    // RIGID-BODY GUARD: if this point AND one of the line's endpoints are both
+    // being dragged, the line and the point are moving together as a single rigid
+    // body (a global rotation or translation). The transform has already placed the
+    // point at its correct position on the equally-rotated line, so a projection
+    // here would only act on a half-written intermediate line and slide the point to
+    // a wrong spot. There is no locked reference to refresh -- the projection is
+    // recomputed fresh whenever the constraint runs normally -- so we simply skip.
+    // (Dragging the point alone still slides it along the line; dragging an endpoint
+    // alone still re-projects the point, because in both those cases only one side
+    // is being dragged and this guard does not trigger.)
+    if (point.isBeingDragged && (line.start.isBeingDragged || line.end.isBeingDragged)) {
+      _isEnforcing = false;
+      return;
+    }
+
     final start = line.start;
     final end = line.end;
 
@@ -153,6 +168,28 @@ class PointOnCircleConstraint extends CompassConstraint {
   void enforce() {
     if (_isEnforcing) return;
     _isEnforcing = true;
+
+    // RIGID-BODY GUARD: when the circle's center is being dragged AND this point is
+    // also being dragged, the whole circle is moving as one rigid body (a global
+    // rotation or translation). The point has already been placed at its correct
+    // rigid position by the transform; issuing a circumference correction here would
+    // act on a half-written intermediate state -- center moved, radius momentarily
+    // recomputed from a partially-rotated circle -- and snap the point to a wrong
+    // angle/radius. If this point ALSO defines another circle's radius (one circle
+    // linked onto another), that wrong placement rescales the partner circle, and
+    // the error compounds every tick. So we keep the locked angle synced to the live
+    // geometry and skip the correction. The final listener fire of the tick reads
+    // fully-settled coordinates, so _lockedAngle lands correct.
+    //
+    // This guard only triggers when the host circle is itself moving. Dragging the
+    // point alone (center stationary) still slides it around the circumference, and
+    // resizing the circle (center stationary, radius point dragged) still drags the
+    // point along -- both fall through to the normal logic below.
+    if (point.isBeingDragged && circle.center.isBeingDragged) {
+      _calculateCurrentAngle();
+      _isEnforcing = false;
+      return;
+    }
 
     final cx = circle.center.x.value;
     final cy = circle.center.y.value;
@@ -259,6 +296,17 @@ class PointOnSpiralConstraint extends CompassConstraint {
   void enforce() {
     if (_isEnforcing) return;
     _isEnforcing = true;
+
+    // RIGID-BODY GUARD: see PointOnCircleConstraint. When the spiral is being moved
+    // as a rigid body (its center is being dragged) and this point rides along, the
+    // point is already correctly placed -- skip the correction, which would act on a
+    // half-written spiral, and only keep _lockedTheta synced to the live geometry.
+    // Dragging the point alone (center stationary) still walks it along the curve.
+    if (point.isBeingDragged && spiral.center.isBeingDragged) {
+      _calculateCurrentTheta();
+      _isEnforcing = false;
+      return;
+    }
 
     final cx = spiral.center.x.value;
     final cy = spiral.center.y.value;
