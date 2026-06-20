@@ -32,13 +32,6 @@ class CompassMenuBar extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16.0),
-            child: Text(
-              'Compass',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-            ),
-          ),
           Expanded(
             child: MenuBar(
               style: MenuStyle(
@@ -46,6 +39,19 @@ class CompassMenuBar extends StatelessWidget {
                 elevation: WidgetStateProperty.all(0),
               ),
               children: [
+                SubmenuButton(
+                  menuChildren: [
+                    MenuItemButton(
+                      onPressed: () => CompassDialogs.showAboutDialog(context),
+                      leadingIcon: const Icon(Icons.info_outline),
+                      child: const Text('About Compass'),
+                    ),
+                  ],
+                  child: const Text(
+                    'Compass',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
                 SubmenuButton(
                   menuChildren: [
                     MenuItemButton(

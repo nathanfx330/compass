@@ -7,6 +7,39 @@ import '../../engine.dart';
 import '../../models/geometry/spline.dart';
 
 class CompassDialogs {
+  static void showAboutDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('About Compass'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: const [
+              Text(
+                'Compass 0.3',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+              ),
+              SizedBox(height: 12),
+              Text('Created by Nathaniel Westveer'),
+              SizedBox(height: 8),
+              Text(
+                'Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).',
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   static void showExportSVG(BuildContext context, CompassEngine engine) {
     final svgData = engine.toSVG();
     final TextEditingController filenameController = TextEditingController(text: 'compass_export.svg');
