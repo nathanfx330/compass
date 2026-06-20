@@ -224,8 +224,14 @@ class CompassEngine extends ChangeNotifier {
     }
 
     if (removed) {
+      // This shape's structural points are deleted together as one batch. The
+      // attachment links the shape created among them (e.g. a circle's
+      // center.attach(radiusPoint)) must NOT keep each other alive, or every point
+      // survives as a floating orphan. Passing the batch tells the GC to treat
+      // intra-batch links as dead weight and collect on out-of-batch links only.
+      final batch = shapePoints.toSet();
       for (var p in shapePoints) {
-        _checkAndGCPoint(p);
+        _checkAndGCPoint(p, batch: batch);
       }
       
       _saveSnapshot();
@@ -233,7 +239,26 @@ class CompassEngine extends ChangeNotifier {
     }
   }
 
-  void _checkAndGCPoint(CompassPoint p) {
+  // Garbage-collects a point that may no longer be needed, aware of a deletion
+  // *batch* -- the set of points being removed together as a single shape.
+  //
+  // The earlier version weighed attachment links against ALL points, which let a
+  // shape's own points keep each other alive: a circle creates center.attach(
+  // radiusPoint), so center "has a child" (radiusPoint) while radiusPoint "is a
+  // child" (of center). Neither side ever cleared the other, so both leaked as
+  // floating orphans on delete. Spirals (center/startPoint) and converted splines
+  // (anchor/nodes) leak by the identical mechanism.
+  //
+  // Fix: links *inside* the batch don't count as dependencies. Only a link to a
+  // point OUTSIDE the batch -- a constraint point riding this geometry, or a
+  // rigidly-linked partner shape -- protects a point from collection. Callers that
+  // GC a single stray point (circle/rectangle -> spline conversions, fillet corner
+  // cleanup) pass no batch, so the default {p} reproduces the original behavior
+  // exactly for them.
+  void _checkAndGCPoint(CompassPoint p, {Set<CompassPoint>? batch}) {
+    final deletionBatch = batch ?? {p};
+
+    // (A) Still a structural member of any surviving shape? Always keep if so.
     bool isUsed = false;
     for (var layer in layers) {
       for (var s in layer.shapes) {
@@ -248,20 +273,34 @@ class CompassEngine extends ChangeNotifier {
       if (isUsed) break;
     }
 
-    if (!isUsed) {
-      bool hasDependencies = p.attachedPoints.isNotEmpty;
+    if (isUsed) return;
+
+    // (B) Still bound -- as parent or as child -- to a point OUTSIDE the batch?
+    bool hasExternalDependency = false;
+
+    // p is the parent of a child that lives beyond this deletion batch.
+    for (var child in p.attachedPoints) {
+      if (!deletionBatch.contains(child)) {
+        hasExternalDependency = true;
+        break;
+      }
+    }
+
+    // p is the child of a surviving parent that lives beyond this deletion batch.
+    if (!hasExternalDependency) {
       for (var other in points) {
+        if (deletionBatch.contains(other)) continue;
         if (other.attachedPoints.contains(p)) {
-          hasDependencies = true;
+          hasExternalDependency = true;
           break;
         }
       }
+    }
 
-      if (!hasDependencies) {
-        points.remove(p);
-        for (var remainingPoint in points) {
-          remainingPoint.attachedPoints.remove(p);
-        }
+    if (!hasExternalDependency) {
+      points.remove(p);
+      for (var remainingPoint in points) {
+        remainingPoint.attachedPoints.remove(p);
       }
     }
   }
@@ -651,6 +690,87 @@ class CompassEngine extends ChangeNotifier {
     } else {
       node.handleIn = handle;
     }
+    notifyListeners();
+  }
+
+  // Applies a parametric geometric fillet (circular arc corner) to a given node in a spline.
+  void applyFilletToNode(CompassXSpline spline, CompassSplineNode node, double cutDistance) {
+    int index = spline.nodes.indexOf(node);
+    if (index == -1) return;
+
+    final fillet = spline.computeFillet(node, cutDistance);
+    if (fillet == null) return;
+
+    int prevIndex = (index - 1 + spline.nodes.length) % spline.nodes.length;
+    int nextIndex = (index + 1) % spline.nodes.length;
+    
+    final prevNode = spline.nodes[prevIndex];
+    final nextNode = spline.nodes[nextIndex];
+
+    // Safely divide evaluated handles by tension before storing them into explicit nodes.
+    Offset safeDivide(Offset v, double tension) {
+      return tension > 0.001 ? Offset(v.dx / tension, v.dy / tension) : Offset.zero;
+    }
+
+    // 1. Solidify and mutate the PREVIOUS node's outgoing handle
+    final controls = spline.getEvaluatedControls();
+    if (prevNode.handleIn == null && prevNode.handleOut == null) {
+      prevNode.handleIn = safeDivide(controls[prevIndex].$2, prevNode.tension.value);
+    }
+    prevNode.handleOut = safeDivide(fillet.prevHandleOut, prevNode.tension.value);
+
+    // 2. Solidify and mutate the NEXT node's incoming handle
+    if (nextNode.handleIn == null && nextNode.handleOut == null) {
+      nextNode.handleOut = safeDivide(controls[nextIndex].$1, nextNode.tension.value);
+    }
+    nextNode.handleIn = safeDivide(fillet.nextHandleIn, nextNode.tension.value);
+
+    // 3. Create the two new independent points
+    final pt1 = CompassPoint(x: fillet.cutPt1.dx, y: fillet.cutPt1.dy);
+    final pt2 = CompassPoint(x: fillet.cutPt2.dx, y: fillet.cutPt2.dy);
+    
+    points.add(pt1);
+    pt1.x.addListener(notifyListeners);
+    pt1.y.addListener(notifyListeners);
+
+    points.add(pt2);
+    pt2.x.addListener(notifyListeners);
+    pt2.y.addListener(notifyListeners);
+
+    // Retain anchor connections if they exist
+    if (spline.anchorPoint != null) {
+      spline.anchorPoint!.attach(pt1);
+      spline.anchorPoint!.attach(pt2);
+      spline.anchorPoint!.detach(node.point);
+    }
+
+    // 4. Create the new fillet nodes mapped into explicit geometry
+    final newNode1 = CompassSplineNode(
+      point: pt1,
+      tension: 1.0, 
+      handleIn: fillet.node1HandleIn,
+      handleOut: fillet.node1HandleOut,
+    );
+    newNode1.tension.addListener(notifyListeners);
+
+    final newNode2 = CompassSplineNode(
+      point: pt2,
+      tension: 1.0, 
+      handleIn: fillet.node2HandleIn,
+      handleOut: fillet.node2HandleOut,
+    );
+    newNode2.tension.addListener(notifyListeners);
+
+    // 5. Swap the nodes
+    spline.nodes.insert(index, newNode1);
+    spline.nodes.insert(index + 1, newNode2);
+    spline.nodes.remove(node);
+
+    // Automatically clean up the old orphaned corner point 
+    // (Unless it's mathematically bound to a circle/line elsewhere!)
+    _checkAndGCPoint(node.point);
+
+    _saveSnapshot();
     notifyListeners();
   }
 

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../../engine.dart';
+import '../../models/geometry/spline.dart';
 
 class CompassDialogs {
   static void showExportSVG(BuildContext context, CompassEngine engine) {
@@ -322,6 +323,53 @@ class CompassDialogs {
                       const SnackBar(content: Text('Failed to load image at that path.')),
                     );
                   }
+                }
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  static void showFilletDialog(BuildContext context, CompassEngine engine, CompassXSpline spline, CompassSplineNode node) {
+    final TextEditingController radiusController = TextEditingController(text: '20.0');
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Fillet Corner'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Enter corner radius:'),
+              const SizedBox(height: 12),
+              TextField(
+                controller: radiusController,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: 'Radius',
+                  suffixText: 'px',
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton.icon(
+              icon: const Icon(Icons.rounded_corner),
+              label: const Text('Apply Fillet'),
+              onPressed: () {
+                final radius = double.tryParse(radiusController.text);
+                if (radius != null && radius > 0) {
+                  engine.applyFilletToNode(spline, node, radius);
+                  Navigator.of(context).pop();
                 }
               },
             ),

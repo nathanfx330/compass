@@ -4,6 +4,12 @@ import 'package:flutter/material.dart';
 
 import '../../engine.dart';
 import '../../models/geometry/shape.dart';
+import '../../models/geometry/point.dart';
+import '../../models/geometry/line.dart';
+import '../../models/geometry/circle.dart';
+import '../../models/geometry/spiral.dart';
+import '../../models/geometry/rectangle.dart';
+import '../../models/geometry/spline.dart';
 
 class LayersPanel extends StatelessWidget {
   final CompassEngine engine;
@@ -14,6 +20,33 @@ class LayersPanel extends StatelessWidget {
     required this.engine,
     required this.onLoadReferenceImage,
   });
+
+  // --- NEW: Helper method to detect if a shape's points are tied to anything else
+  bool _isShapeLinked(CompassShape shape) {
+    List<CompassPoint> shapePts = [];
+    if (shape is CompassLine) {
+      shapePts = [shape.start, shape.end];
+    } else if (shape is CompassCircle) {
+      shapePts = [shape.center, if (shape.radiusPoint != null) shape.radiusPoint!];
+    } else if (shape is CompassSpiral) {
+      shapePts = [shape.center, shape.startPoint];
+    } else if (shape is CompassRectangle) {
+      shapePts = [shape.p1, shape.p2];
+    } else if (shape is CompassXSpline) {
+      shapePts.addAll(shape.nodes.map((n) => n.point));
+      if (shape.anchorPoint != null) shapePts.add(shape.anchorPoint!);
+    }
+
+    for (var p in shapePts) {
+      // Is this point acting as a parent to something else?
+      if (p.attachedPoints.isNotEmpty) return true;
+      // Is this point a child of something else in the global engine?
+      for (var other in engine.points) {
+        if (other != p && other.attachedPoints.contains(p)) return true;
+      }
+    }
+    return false;
+  }
 
   Color _getOpColor(CompassBooleanOp op) {
     switch (op) {
@@ -213,12 +246,24 @@ class LayersPanel extends StatelessWidget {
                                 size: 16,
                                 color: (shape.isVisible && !layer.isLocked) ? null : theme.disabledColor,
                               ),
-                              title: Text(
-                                shapeName, 
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: (shape.isVisible && !layer.isLocked) ? null : theme.disabledColor,
-                                ),
+                              title: Row(
+                                children: [
+                                  Text(
+                                    shapeName, 
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: (shape.isVisible && !layer.isLocked) ? null : theme.disabledColor,
+                                    ),
+                                  ),
+                                  // --- NEW: Add the link icon if relationships exist
+                                  if (_isShapeLinked(shape)) ...[
+                                    const SizedBox(width: 6),
+                                    Tooltip(
+                                      message: 'Shape shares mathematical constraints',
+                                      child: Icon(Icons.link, size: 12, color: theme.colorScheme.primary.withOpacity(0.7)),
+                                    ),
+                                  ],
+                                ],
                               ),
                               subtitle: Text(
                                 shape.operation.name.toUpperCase(),

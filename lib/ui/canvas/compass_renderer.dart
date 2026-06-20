@@ -1,5 +1,6 @@
 // lib/ui/canvas/compass_renderer.dart
 
+import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../../engine.dart';
@@ -10,17 +11,24 @@ import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
 
-// Import CompassTool from the canvas file
-import 'compass_canvas.dart';
+// Import CompassTool from the canvas controller
+import 'canvas_controller.dart';
 
 class CompassRenderer extends CustomPainter {
   final CompassEngine engine;
-  final CompassPoint? selectedPoint; // Kept so the compiler doesn't break
-  final Set<CompassPoint>? selectedPoints; // --- NEW: Multi-selection support ---
+  final CompassPoint? selectedPoint; 
+  final Set<CompassPoint>? selectedPoints; 
   final Offset? rotationPivotOffset;
   final bool isRPressed;
   final bool isShiftRPressed;
   final bool isAPressed; 
+  
+  // --- NEW: Receive the active fillet state from the controller
+  final CompassSplineNode? activeFilletNode;
+  final CompassXSpline? activeFilletSpline;
+  final double activeFilletRadius;
+  final bool isFPressed;
+
   final CompassPoint? tensionTargetPoint; 
   final CompassPoint? shapeStartPoint;
   final CompassPoint? hoveredPoint;
@@ -31,9 +39,6 @@ class CompassRenderer extends CustomPainter {
   final double canvasScale;
   final Color pointBorderColor;
 
-  // The node whose explicit Bezier handle is being dragged, and which side
-  // (true = handleOut, false = handleIn). Used purely to render the active dot
-  // larger/brighter than its idle siblings. Null when no handle drag is live.
   final CompassSplineNode? activeHandleNode;
   final bool activeHandleIsOut;
 
@@ -45,6 +50,10 @@ class CompassRenderer extends CustomPainter {
     this.isRPressed = false,
     this.isShiftRPressed = false,
     this.isAPressed = false, 
+    this.activeFilletNode,
+    this.activeFilletSpline,
+    this.activeFilletRadius = 0.0,
+    this.isFPressed = false,
     this.tensionTargetPoint, 
     this.shapeStartPoint,
     this.hoveredPoint,
@@ -187,16 +196,12 @@ class CompassRenderer extends CustomPainter {
       }
 
       // --- BEZIER HANDLES for the selected X-Spline ---
-      // Drawn after wireframes so the dots sit above the curve, but before the
-      // anchor points so the points stay graspable on top. Only baked nodes of
-      // the selected spline contribute -- a fully-fluid spline shows nothing.
       final selForHandles = engine.selectedShape;
       if (selForHandles is CompassXSpline) {
         _drawBezierHandles(canvas, selForHandles, invScale);
       }
 
       // --- EXPLICITLY SELECTED POINT(S) HIGHLIGHT ---
-      // Collect all points that should be highlighted (from the old single variable OR the new Set)
       final highlightSet = <CompassPoint>{};
       if (selectedPoint != null) highlightSet.add(selectedPoint!);
       if (selectedPoints != null) highlightSet.addAll(selectedPoints!);
@@ -215,8 +220,13 @@ class CompassRenderer extends CustomPainter {
         }
       }
 
+      // --- F KEY LIVE FILLET PREVIEW ---
+      if (isFPressed && activeFilletNode != null && activeFilletSpline != null && activeFilletRadius > 0) {
+        _drawFilletPreview(canvas, activeFilletSpline!, activeFilletNode!, activeFilletRadius, invScale);
+      }
+      
       // --- TENSION GUIDE LINE (A KEY) ---
-      if (isAPressed && tensionTargetPoint != null && hoverPosition != null) {
+      else if (isAPressed && tensionTargetPoint != null && hoverPosition != null) {
         final targetOffset = Offset(tensionTargetPoint!.x.value, tensionTargetPoint!.y.value);
         
         final tensionPaint = Paint()
@@ -331,17 +341,98 @@ class CompassRenderer extends CustomPainter {
           canvas.drawCircle(offset, 5.0 * invScale, pointBorderPaint);
         }
       }
+
+      // Add Point Live Preview
+      if (currentTool == CompassTool.addPoint && hoverPosition != null) {
+        final previewOffset = hoveredPoint != null 
+          ? Offset(hoveredPoint!.x.value, hoveredPoint!.y.value) 
+          : hoverPosition!;
+          
+        final addPointPaint = Paint()
+          ..color = Colors.greenAccent
+          ..style = PaintingStyle.fill;
+          
+        final addPointBorder = Paint()
+          ..color = pointBorderColor
+          ..strokeWidth = 2.0 * invScale
+          ..style = PaintingStyle.stroke;
+          
+        canvas.drawCircle(previewOffset, 7.0 * invScale, addPointPaint);
+        canvas.drawCircle(previewOffset, 7.0 * invScale, addPointBorder);
+        
+        final plusPaint = Paint()
+          ..color = Colors.black87
+          ..strokeWidth = 1.5 * invScale
+          ..style = PaintingStyle.stroke;
+        canvas.drawLine(previewOffset + Offset(-3.5 * invScale, 0), previewOffset + Offset(3.5 * invScale, 0), plusPaint);
+        canvas.drawLine(previewOffset + Offset(0, -3.5 * invScale), previewOffset + Offset(0, 3.5 * invScale), plusPaint);
+      }
     }
 
     canvas.restore();
   }
 
-  // Renders the draggable Bezier handle dots + tether lines for one spline.
-  // Each dot sits at point + handle * tension -- identical to the canvas hit-test,
-  // so the visual and the grab target are guaranteed to coincide. handleIn and
-  // handleOut are drawn independently (asymmetric editing), in purple to stay
-  // distinct from the blue tension boxes and orange rotation/tension guides. The
-  // node+side currently being dragged renders larger with an inverted fill.
+  // --- NEW: Draws the curve-aware preview of the fillet while F is held ---
+  void _drawFilletPreview(Canvas canvas, CompassXSpline spline, CompassSplineNode node, double cutDistance, double invScale) {
+    final fillet = spline.computeFillet(node, cutDistance);
+    if (fillet == null) return;
+
+    int index = spline.nodes.indexOf(node);
+    int prevIndex = (index - 1 + spline.nodes.length) % spline.nodes.length;
+    int nextIndex = (index + 1) % spline.nodes.length;
+
+    final pPrev = Offset(spline.nodes[prevIndex].point.x.value, spline.nodes[prevIndex].point.y.value);
+    final pCurr = Offset(node.point.x.value, node.point.y.value);
+    final pNext = Offset(spline.nodes[nextIndex].point.x.value, spline.nodes[nextIndex].point.y.value);
+
+    final previewPath = Path();
+    
+    // Draw from Prev to Cut1
+    previewPath.moveTo(pPrev.dx, pPrev.dy);
+    previewPath.cubicTo(
+      pPrev.dx + fillet.prevHandleOut.dx, pPrev.dy + fillet.prevHandleOut.dy,
+      fillet.cutPt1.dx + fillet.node1HandleIn.dx, fillet.cutPt1.dy + fillet.node1HandleIn.dy,
+      fillet.cutPt1.dx, fillet.cutPt1.dy,
+    );
+    
+    // Draw the Bridging Arc (Cut1 to Cut2)
+    previewPath.cubicTo(
+      fillet.cutPt1.dx + fillet.node1HandleOut.dx, fillet.cutPt1.dy + fillet.node1HandleOut.dy,
+      fillet.cutPt2.dx + fillet.node2HandleIn.dx, fillet.cutPt2.dy + fillet.node2HandleIn.dy,
+      fillet.cutPt2.dx, fillet.cutPt2.dy,
+    );
+    
+    // Draw from Cut2 to Next
+    previewPath.cubicTo(
+      fillet.cutPt2.dx + fillet.node2HandleOut.dx, fillet.cutPt2.dy + fillet.node2HandleOut.dy,
+      pNext.dx + fillet.nextHandleIn.dx, pNext.dy + fillet.nextHandleIn.dy,
+      pNext.dx, pNext.dy,
+    );
+
+    final linePaint = Paint()
+      ..color = Colors.greenAccent
+      ..strokeWidth = 3.0 * invScale
+      ..style = PaintingStyle.stroke;
+      
+    final scissorPaint = Paint()
+      ..color = Colors.redAccent.withOpacity(0.5)
+      ..strokeWidth = 2.0 * invScale
+      ..style = PaintingStyle.stroke;
+
+    // Draw the new curve. Because it perfectly overlays the existing curve, 
+    // it will vividly demonstrate how the fillet blends without jumping.
+    canvas.drawPath(previewPath, linePaint);
+    
+    // Draw scissor lines showing the part of the control polygon that will be deleted
+    _drawDashedLine(canvas, fillet.cutPt1, pCurr, scissorPaint, invScale);
+    _drawDashedLine(canvas, pCurr, fillet.cutPt2, scissorPaint, invScale);
+
+    // Draw preview nodes
+    final nodePaint = Paint()..color = Colors.greenAccent..style = PaintingStyle.fill;
+    canvas.drawCircle(fillet.cutPt1, 6.0 * invScale, nodePaint);
+    canvas.drawCircle(fillet.cutPt2, 6.0 * invScale, nodePaint);
+  }
+
   void _drawBezierHandles(Canvas canvas, CompassXSpline spline, double invScale) {
     final linePaint = Paint()
       ..color = Colors.purpleAccent.withOpacity(0.6)
@@ -368,11 +459,11 @@ class CompassRenderer extends CustomPainter {
 
     void drawDot(Offset dot, bool isActive) {
       if (isActive) {
-        canvas.drawCircle(dot, 7.0 * invScale, activeFillPaint);
-        canvas.drawCircle(dot, 7.0 * invScale, activeBorderPaint);
+        canvas.drawCircle(dot, 9.0 * invScale, activeFillPaint);
+        canvas.drawCircle(dot, 9.0 * invScale, activeBorderPaint);
       } else {
-        canvas.drawCircle(dot, 5.0 * invScale, dotPaint);
-        canvas.drawCircle(dot, 5.0 * invScale, dotBorderPaint);
+        canvas.drawCircle(dot, 7.0 * invScale, dotPaint);
+        canvas.drawCircle(dot, 7.0 * invScale, dotBorderPaint);
       }
     }
 
@@ -402,21 +493,49 @@ class CompassRenderer extends CustomPainter {
     }
   }
 
+  // Decides whether a point gets drawn as a grabbable scaffolding dot.
+  //
+  // Previously this returned true ONLY when the point was a *structural* member of
+  // a visible, unlocked shape (a line endpoint, circle center/radius, spiral
+  // center/start, or a spline node). That silently excluded constraint-attached
+  // points -- the ones created by "Add Point to Shape" on a line/circle/spiral,
+  // which ride the curve via a PointOnLine/Circle/Spiral constraint but are NOT
+  // stored in any shape's point list. They were invisible yet still hoverable
+  // (the controller's _isPointLocked treats a point belonging to no shape as
+  // unlocked), producing the "highlights on mouseover but never shows" bug.
+  //
+  // New rule, aligned with the hover predicate: a point is drawn when the user can
+  // meaningfully grab it --
+  //   * it's a structural vertex of a visible shape on a visible, unlocked layer, OR
+  //   * it isn't a structural member of ANY shape at all -- i.e. a constraint point
+  //     riding a curve, or a free orphan point.
+  // It is hidden only when every shape that structurally owns it lives on a hidden
+  // or locked layer. That last clause preserves the prior behavior of not spawning
+  // floating dots for geometry tucked under a hidden/locked layer (a point whose
+  // only home is a hidden layer stays hidden, rather than appearing shapeless).
   bool _isPointUnlocked(CompassPoint p) {
+    bool usedInVisibleUnlocked = false;
+    bool usedAnywhere = false;
+
     for (var layer in engine.layers) {
-      if (!layer.isVisible || layer.isLocked) continue;
-      
       for (var shape in layer.shapes) {
-        if (!shape.isVisible) continue;
-        
-        if (shape is CompassLine && (shape.start == p || shape.end == p)) return true;
-        if (shape is CompassCircle && (shape.center == p || shape.radiusPoint == p)) return true;
-        if (shape is CompassSpiral && (shape.center == p || shape.startPoint == p)) return true;
-        if (shape is CompassRectangle && (shape.p1 == p || shape.p2 == p)) return true;
-        if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == p) || shape.anchorPoint == p)) return true;
+        bool hasPoint = false;
+        if (shape is CompassLine && (shape.start == p || shape.end == p)) hasPoint = true;
+        else if (shape is CompassCircle && (shape.center == p || shape.radiusPoint == p)) hasPoint = true;
+        else if (shape is CompassSpiral && (shape.center == p || shape.startPoint == p)) hasPoint = true;
+        else if (shape is CompassRectangle && (shape.p1 == p || shape.p2 == p)) hasPoint = true;
+        else if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == p) || shape.anchorPoint == p)) hasPoint = true;
+
+        if (hasPoint) {
+          usedAnywhere = true;
+          if (layer.isVisible && !layer.isLocked && shape.isVisible) {
+            usedInVisibleUnlocked = true;
+          }
+        }
       }
     }
-    return false;
+
+    return usedInVisibleUnlocked || !usedAnywhere;
   }
 
   void _drawDashedLine(Canvas canvas, Offset p1, Offset p2, Paint paint, double invScale) {

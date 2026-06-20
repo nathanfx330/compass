@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import '../../engine.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/rectangle.dart';
-import 'compass_canvas.dart'; 
+import 'canvas_controller.dart'; 
 
 class CanvasHUD extends StatelessWidget {
   final CompassEngine engine;
@@ -17,6 +17,9 @@ class CanvasHUD extends StatelessWidget {
   final bool isShiftRPressed;
   final bool isShiftPressed;
   final bool isAPressed;
+  
+  // --- NEW: Receive F key state ---
+  final bool isFPressed;
 
   final Offset panOffset;
   final double canvasScale;
@@ -31,6 +34,7 @@ class CanvasHUD extends StatelessWidget {
     required this.isShiftRPressed,
     required this.isShiftPressed,
     required this.isAPressed,
+    required this.isFPressed,
     required this.panOffset,
     required this.canvasScale,
   });
@@ -52,6 +56,9 @@ class CanvasHUD extends StatelessWidget {
     } else if (isAPressed) {
       overlayText = 'A : VERTEX TENSION';
       overlayColor = Colors.orangeAccent; 
+    } else if (isFPressed) { // --- NEW: Handle F key HUD overlay
+      overlayText = 'F : FILLET CORNER';
+      overlayColor = Colors.greenAccent.shade700;
     } else if (isShiftPressed && currentTool == CompassTool.select) {
       overlayText = 'SHIFT : PAN SHAPE';
       overlayColor = Colors.blueAccent;
@@ -220,7 +227,6 @@ class CanvasHUD extends StatelessWidget {
                       ),
                       const Divider(),
                       
-                      // --- NEW: SQUARE TOGGLE CHECKBOX ---
                       Row(
                         children: [
                           SizedBox(
