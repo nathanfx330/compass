@@ -66,6 +66,7 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 * **`R + Drag`**: Rotate a selected shape or point locally around its centroid.
 * **`Shift + R + Drag`**: Rotate an entire hierarchical rigid-body system around the targeted centroid.
 * **`A + Drag`**: Target an X-Spline vertex and drag anywhere on the screen to fluidly adjust its Catmull-Rom curve tension.
+* **`F + Drag`**: With an X-Spline vertex selected, hold F and drag horizontally anywhere on the screen to dynamically apply a curve-aware fillet (corner rounding).
 * **`Ctrl/Cmd + Z`**: Undo mathematical and geometric state changes.
 
 ---
