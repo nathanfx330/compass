@@ -1,4 +1,4 @@
-// lib/ui/canvas/canvas_controller.dart
+// ./lib/ui/canvas/canvas_controller.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -16,8 +16,9 @@ import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
 
-// --- Add Dialogs Import ---
+// --- Imports ---
 import '../../ui/workspace/dialogs.dart';
+import 'canvas_hit_tester.dart';
 
 // Defines the current interaction mode for the canvas
 enum CompassTool { select, addPoint, addLine, addCircle, addSpiral, addPen, addRect } 
@@ -56,6 +57,15 @@ class CanvasController extends ChangeNotifier {
   CompassXSpline? activeFilletSpline;
   double activeFilletRadius = 0.0;
 
+  // --- Q-hover "Add Resolution" preview state ---
+  // When Q is held in select mode over a spline segment (and not over a point), we
+  // preview a vertex at the segment's parametric center. A click commits it on press.
+  // addVertexPreviewPos is the exact on-curve point (t=0.5 on the segment's cubic),
+  // so it lands precisely where subdivideSplineSegment will place the new vertex.
+  CompassXSpline? addVertexSpline;
+  int addVertexSegmentIndex = -1;
+  Offset? addVertexPreviewPos;
+
   Offset panOffset = Offset.zero;
   double canvasScale = 1.0; 
   bool isPanningCanvas = false;
@@ -64,12 +74,18 @@ class CanvasController extends ChangeNotifier {
   bool isShiftRPressed = false;
   bool isShiftPressed = false;
   bool isAPressed = false; 
-  bool isFPressed = false; // --- NEW: F key state
+  bool isFPressed = false; 
+  bool isQPressed = false; 
   
+  // --- NEW: Axis Locking State ---
+  bool is1Pressed = false; 
+  bool is2Pressed = false; 
+
   Offset? rotationPivotOffset; 
 
   // --- PRIVATE INTERNAL STATE ---
   Offset? _lastPanPosition; 
+  Offset? _dragStartLogicalPosition; // --- NEW: Anchors the axis locks perfectly
   Set<CompassPoint> _initialSelectionBeforeBox = {};
   bool _isPanningSelectedPoints = false;
   
@@ -89,19 +105,22 @@ class CanvasController extends ChangeNotifier {
     selectedPoints.clear(); 
     shapeStartPoint = null; 
     _activeSpline = null;
+    _clearAddVertexHover();
     notifyListeners();
   }
 
   // --- KEYBOARD HANDLING ---
   bool _handleKeyEvent(KeyEvent event) {
-    final isR = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.keyR);
-    final isShift = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftLeft) ||
-                    HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftRight);
-    final isA = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.keyA);
-    final isF = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.keyF); // --- NEW
+    final keys = HardwareKeyboard.instance.logicalKeysPressed;
+    final isR = keys.contains(LogicalKeyboardKey.keyR);
+    final isShift = keys.contains(LogicalKeyboardKey.shiftLeft) || keys.contains(LogicalKeyboardKey.shiftRight);
+    final isA = keys.contains(LogicalKeyboardKey.keyA);
+    final isF = keys.contains(LogicalKeyboardKey.keyF); 
+    final isQ = keys.contains(LogicalKeyboardKey.keyQ); 
+    final is1 = keys.contains(LogicalKeyboardKey.digit1) || keys.contains(LogicalKeyboardKey.numpad1);
+    final is2 = keys.contains(LogicalKeyboardKey.digit2) || keys.contains(LogicalKeyboardKey.numpad2);
 
-    final isDelete = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.delete) ||
-                     HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.backspace);
+    final isDelete = keys.contains(LogicalKeyboardKey.delete) || keys.contains(LogicalKeyboardKey.backspace);
 
     if (isDelete && selectedPoints.isNotEmpty && event is KeyDownEvent) {
        for (var p in selectedPoints.toList()) {
@@ -115,12 +134,18 @@ class CanvasController extends ChangeNotifier {
     final bool justR = isR && !isShift;
     final bool justShift = isShift && !isR && !isA && !isF; 
 
-    if (isRPressed != justR || isShiftRPressed != shiftR || isShiftPressed != justShift || isAPressed != isA || isFPressed != isF) {
+    if (isRPressed != justR || isShiftRPressed != shiftR || isShiftPressed != justShift || 
+        isAPressed != isA || isFPressed != isF || isQPressed != isQ ||
+        is1Pressed != is1 || is2Pressed != is2) {
+      
       isRPressed = justR;
       isShiftRPressed = shiftR;
       isShiftPressed = justShift;
       isAPressed = isA; 
-      isFPressed = isF; // --- NEW
+      isFPressed = isF; 
+      isQPressed = isQ; 
+      is1Pressed = is1; 
+      is2Pressed = is2; 
 
       if (justR || shiftR) {
         _setupRotationState(hierarchy: shiftR);
@@ -141,6 +166,13 @@ class CanvasController extends ChangeNotifier {
         activeFilletNode = null;
         activeFilletSpline = null;
         activeFilletRadius = 0.0;
+      }
+
+      // Refresh the Q-hover add-vertex preview against the new modifier state
+      if (hoverPosition != null) {
+        _updateAddVertexHover(hoverPosition!);
+      } else {
+        _clearAddVertexHover();
       }
       
       notifyListeners();
@@ -207,37 +239,6 @@ class CanvasController extends ChangeNotifier {
       return Offset((shape.start.x.value + shape.end.x.value) / 2, (shape.start.y.value + shape.end.y.value) / 2);
     }
     return null;
-  }
-
-  bool _isPointLocked(CompassPoint p) {
-    bool usedInUnlocked = false;
-    bool usedInLocked = false;
-
-    for (var layer in engine.layers) {
-      if (!layer.isVisible) continue; 
-      
-      for (var shape in layer.shapes) {
-        if (!shape.isVisible) continue;
-
-        bool hasPoint = false;
-        if (shape is CompassLine && (shape.start == p || shape.end == p)) hasPoint = true;
-        else if (shape is CompassCircle && (shape.center == p || shape.radiusPoint == p)) hasPoint = true;
-        else if (shape is CompassSpiral && (shape.center == p || shape.startPoint == p)) hasPoint = true;
-        else if (shape is CompassRectangle && (shape.p1 == p || shape.p2 == p)) hasPoint = true; 
-        else if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == p) || shape.anchorPoint == p)) hasPoint = true;
-
-        if (hasPoint) {
-          if (layer.isLocked) {
-            usedInLocked = true;
-          } else {
-            usedInUnlocked = true;
-          }
-        }
-      }
-    }
-
-    if (!usedInLocked && !usedInUnlocked) return false;
-    return usedInLocked && !usedInUnlocked;
   }
 
   Set<CompassPoint> _getRigidBody(CompassShape? shape, CompassPoint? explicitPoint, bool hierarchy) {
@@ -351,6 +352,88 @@ class CanvasController extends ChangeNotifier {
     );
   }
 
+  // --- Q-HOVER "ADD RESOLUTION" HELPERS ---
+  void _updateAddVertexHover(Offset logical) {
+    if (currentTool != CompassTool.select || !isQPressed || hoveredPoint != null) {
+      _clearAddVertexHover();
+      return;
+    }
+    final hit = _findNearestSplineSegment(logical);
+    if (hit == null) {
+      _clearAddVertexHover();
+      return;
+    }
+    addVertexSpline = hit.$1;
+    addVertexSegmentIndex = hit.$2;
+    addVertexPreviewPos = hit.$3;
+  }
+
+  void _clearAddVertexHover() {
+    addVertexSpline = null;
+    addVertexSegmentIndex = -1;
+    addVertexPreviewPos = null;
+  }
+
+  (CompassXSpline, int, Offset)? _findNearestSplineSegment(Offset logical) {
+    final scaledThreshold = _hitThreshold / canvasScale;
+
+    CompassXSpline? bestSpline;
+    int bestSeg = -1;
+    Offset? bestCenter;
+    double bestDist = double.infinity;
+
+    for (var layer in engine.layers) {
+      if (!layer.isVisible || layer.isLocked) continue;
+      for (var shape in layer.shapes) {
+        if (!shape.isVisible) continue;
+        if (shape is! CompassXSpline) continue;
+
+        final n = shape.nodes.length;
+        if (n < 2) continue;
+
+        final controls = shape.getEvaluatedControls();
+        final segCount = shape.isClosed ? n : n - 1;
+
+        for (int i = 0; i < segCount; i++) {
+          final p0 = Offset(shape.nodes[i].point.x.value, shape.nodes[i].point.y.value);
+          final p3 = Offset(shape.nodes[(i + 1) % n].point.x.value, shape.nodes[(i + 1) % n].point.y.value);
+          final p1 = p0 + controls[i].$1;
+          final p2 = p3 + controls[(i + 1) % n].$2;
+
+          const samples = 16;
+          double segMinDist = double.infinity;
+          for (int s = 0; s <= samples; s++) {
+            final pt = _cubicAt(p0, p1, p2, p3, s / samples);
+            final d = (pt - logical).distance;
+            if (d < segMinDist) segMinDist = d;
+          }
+
+          if (segMinDist < bestDist && segMinDist <= scaledThreshold) {
+            bestDist = segMinDist;
+            bestSpline = shape;
+            bestSeg = i;
+            bestCenter = _cubicAt(p0, p1, p2, p3, 0.5);
+          }
+        }
+      }
+    }
+
+    if (bestSpline == null || bestCenter == null) return null;
+    return (bestSpline, bestSeg, bestCenter);
+  }
+
+  Offset _cubicAt(Offset p0, Offset p1, Offset p2, Offset p3, double t) {
+    final u = 1.0 - t;
+    final a = u * u * u;
+    final b = 3 * u * u * t;
+    final c = 3 * u * t * t;
+    final d = t * t * t;
+    return Offset(
+      a * p0.dx + b * p1.dx + c * p2.dx + d * p3.dx,
+      a * p0.dy + b * p1.dy + c * p2.dy + d * p3.dy,
+    );
+  }
+
   // --- GESTURE ROUTING ---
 
   void startCanvasPan() {
@@ -400,31 +483,16 @@ class CanvasController extends ChangeNotifier {
     final localPosition = renderBox.globalToLocal(event.position);
     final logicalPosition = _getLogicalPosition(localPosition);
 
-    CompassPoint? foundPoint;
-    final scaledThreshold = _hitThreshold / canvasScale; 
-
-    for (var point in engine.points) {
-      if (_isPointLocked(point)) continue; 
-      
-      final distance = sqrt(
-        pow(point.x.value - logicalPosition.dx, 2) +
-        pow(point.y.value - logicalPosition.dy, 2),
-      );
-
-      if (distance < scaledThreshold) {
-        foundPoint = point;
-        break; 
-      }
-    }
-
     hoverPosition = logicalPosition;
-    hoveredPoint = foundPoint;
+    hoveredPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
+
+    _updateAddVertexHover(logicalPosition);
     
-    if ((isRPressed || isShiftRPressed) && rotationPivotOffset == null && foundPoint != null) {
+    if ((isRPressed || isShiftRPressed) && rotationPivotOffset == null && hoveredPoint != null) {
       _setupRotationState(hierarchy: isShiftRPressed);
     }
 
-    if (isAPressed && targetTensionNode == null && foundPoint != null) {
+    if (isAPressed && targetTensionNode == null && hoveredPoint != null) {
       _setupTensionState();
     }
     
@@ -434,6 +502,7 @@ class CanvasController extends ChangeNotifier {
   void clearHover() {
     hoverPosition = null;
     hoveredPoint = null;
+    _clearAddVertexHover();
     notifyListeners();
   }
 
@@ -441,7 +510,9 @@ class CanvasController extends ChangeNotifier {
     TapDownDetails details, 
     BuildContext context, 
     bool showScaffolding, 
-    VoidCallback onToggleScaffolding
+    VoidCallback onToggleScaffolding,
+    bool showHandles, // <--- NEW ARGUMENT
+    VoidCallback onToggleHandles // <--- NEW ARGUMENT
   ) async {
     final RenderBox renderBox = context.findRenderObject() as RenderBox;
     final localPosition = renderBox.globalToLocal(details.globalPosition);
@@ -455,22 +526,9 @@ class CanvasController extends ChangeNotifier {
     }
 
     CompassShape? clickedShape;
-    CompassPoint? clickedPoint;
     final scaledThreshold = _hitThreshold / canvasScale;
 
-    for (var point in engine.points) {
-      if (_isPointLocked(point)) continue; 
-      
-      final distance = sqrt(
-        pow(point.x.value - logicalPosition.dx, 2) +
-        pow(point.y.value - logicalPosition.dy, 2),
-      );
-
-      if (distance < scaledThreshold) {
-        clickedPoint = point;
-        break; 
-      }
-    }
+    CompassPoint? clickedPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, scaledThreshold);
 
     if (clickedPoint == null) {
       for (var layer in engine.layers.reversed) {
@@ -583,7 +641,7 @@ class CanvasController extends ChangeNotifier {
         if (clickedNode != null && (clickedNode.handleIn != null || clickedNode.handleOut != null)) {
           pointMenuItems.add(const PopupMenuItem(
             value: 'reset_handles',
-            child: Text('Reset Handles (Make Fluid)'),
+            child: Text('Reset Handles (Make Fluid)'), // <--- REVERTED BACK
           ));
         } else {
           pointMenuItems.add(const PopupMenuItem(
@@ -633,10 +691,8 @@ class CanvasController extends ChangeNotifier {
         engine.resetPointHandles(clickedPoint);
       } else if (selectedAction == 'convert_to_bezier') {
         engine.convertPointToBezier(clickedPoint);
-      
       } else if (selectedAction == 'fillet_corner' && parentSpline != null && clickedNode != null) {
         CompassDialogs.showFilletDialog(context, engine, parentSpline, clickedNode);
-
       } else if (selectedAction == 'toggle_closed' && parentSpline != null) {
         engine.toggleSplineClosed(parentSpline);
       } else if (selectedAction == 'start_spline') {
@@ -752,11 +808,18 @@ class CanvasController extends ChangeNotifier {
             value: 'toggle_scaffolding', 
             child: Text(showScaffolding ? 'Hide Scaffolding (Clean View)' : 'Show Scaffolding'),
           ), 
+          // <--- NEW: Right click empty canvas to toggle handles
+          PopupMenuItem(
+            value: 'toggle_handles', 
+            child: Text(showHandles ? 'Hide Handles' : 'Show Handles'),
+          ), 
         ],
       );
 
       if (selectedAction == 'toggle_scaffolding') {
         onToggleScaffolding();
+      } else if (selectedAction == 'toggle_handles') {
+        onToggleHandles();
       }
     }
   }
@@ -771,22 +834,28 @@ class CanvasController extends ChangeNotifier {
         HardwareKeyboard.instance.logicalKeysPressed
             .contains(LogicalKeyboardKey.shiftRight);
 
-    if (currentTool == CompassTool.select) {
-      
-      CompassPoint? hitPoint;
-      final scaledThreshold = _hitThreshold / canvasScale; 
-      for (var point in engine.points) {
-        if (_isPointLocked(point)) continue; 
+    if (addVertexSpline != null && addVertexSegmentIndex >= 0) {
+      final spline = addVertexSpline!;
+      final segIndex = addVertexSegmentIndex;
 
-        final distance = sqrt(
-          pow(point.x.value - logicalPosition.dx, 2) +
-          pow(point.y.value - logicalPosition.dy, 2),
-        );
-        if (distance < scaledThreshold) {
-          hitPoint = point;
-          break; 
-        }
+      final created = engine.subdivideSplineSegment(spline, segIndex, t: 0.5);
+      if (created != null) {
+        engine.selectShape(spline);
+        selectedPoints = {created};
       }
+
+      if (hoverPosition != null) {
+        _updateAddVertexHover(hoverPosition!);
+      } else {
+        _clearAddVertexHover();
+      }
+
+      notifyListeners();
+      return;
+    }
+
+    if (currentTool == CompassTool.select) {
+      CompassPoint? hitPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
 
       if (hitPoint != null) {
         if (isShiftPressed) {
@@ -1119,20 +1188,7 @@ class CanvasController extends ChangeNotifier {
       if (hoveredPoint != null) {
         tappedPoint = hoveredPoint;
       } else {
-        final scaledThreshold = _hitThreshold / canvasScale;
-        for (var point in engine.points) {
-          if (_isPointLocked(point)) continue; 
-
-          final distance = sqrt(
-            pow(point.x.value - logicalPosition.dx, 2) +
-            pow(point.y.value - logicalPosition.dy, 2),
-          );
-
-          if (distance < scaledThreshold) {
-            tappedPoint = point;
-            break; 
-          }
-        }
+        tappedPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
       }
 
       if (tappedPoint == null) {
@@ -1183,7 +1239,12 @@ class CanvasController extends ChangeNotifier {
     }
   }
 
-  void onPanStart(DragStartDetails details, BuildContext context, bool showScaffolding) {
+  void onPanStart(
+    DragStartDetails details, 
+    BuildContext context, 
+    bool showScaffolding,
+    bool showHandles // <--- NEW ARGUMENT
+  ) {
     if (currentTool != CompassTool.select) return;
 
     final RenderBox renderBox = context.findRenderObject() as RenderBox;
@@ -1191,6 +1252,7 @@ class CanvasController extends ChangeNotifier {
     final logicalPosition = _getLogicalPosition(localPosition);
 
     _lastPanPosition = logicalPosition;
+    _dragStartLogicalPosition = logicalPosition; // <-- NEW: Anchors the 1/2 axis lock orthogonal lines
     hoverPosition = logicalPosition; 
     notifyListeners();
 
@@ -1229,8 +1291,6 @@ class CanvasController extends ChangeNotifier {
       return;
     }
 
-    // --- NEW: F KEY LIVE FILLET DRAG START ---
-    // Maps to selected point instead of hovered point for modal-style drag
     if (isFPressed && selectedPoints.isNotEmpty) {
       final targetPoint = selectedPoints.first;
       for (var layer in engine.layers) {
@@ -1240,7 +1300,6 @@ class CanvasController extends ChangeNotifier {
             for (int i = 0; i < shape.nodes.length; i++) {
               final node = shape.nodes[i];
               if (node.point == targetPoint) {
-                // Must have neighbors to fillet
                 if (!shape.isClosed && (i == 0 || i == shape.nodes.length - 1)) continue;
                 
                 activeFilletNode = node;
@@ -1257,7 +1316,7 @@ class CanvasController extends ChangeNotifier {
 
     final selForHandles = engine.selectedShape;
     if (selForHandles is CompassXSpline &&
-        showScaffolding &&
+        showScaffolding && showHandles && // <--- NEW CHECK
         !isShiftPressed && !isRPressed && !isShiftRPressed && !isAPressed && !isFPressed) {
       final handleThreshold = 24.0 / canvasScale;
       for (var node in selForHandles.nodes) {
@@ -1297,21 +1356,7 @@ class CanvasController extends ChangeNotifier {
        }
     }
 
-    final scaledThreshold = _hitThreshold / canvasScale;
-    CompassPoint? hitPoint;
-    for (var point in engine.points) {
-      if (_isPointLocked(point)) continue; 
-
-      final distance = sqrt(
-        pow(point.x.value - logicalPosition.dx, 2) +
-        pow(point.y.value - logicalPosition.dy, 2),
-      );
-
-      if (distance < scaledThreshold) {
-        hitPoint = point;
-        break; 
-      }
-    }
+    CompassPoint? hitPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
 
     if (hitPoint != null) {
       if (!selectedPoints.contains(hitPoint)) {
@@ -1338,8 +1383,18 @@ class CanvasController extends ChangeNotifier {
 
     final RenderBox renderBox = context.findRenderObject() as RenderBox;
     final localPosition = renderBox.globalToLocal(details.globalPosition);
-    final logicalPosition = _getLogicalPosition(localPosition);
-    
+    Offset logicalPosition = _getLogicalPosition(localPosition);
+
+    // --- NEW: Axis Locking Logic (Snaps to original drag start coordinate) ---
+    if (_dragStartLogicalPosition != null) {
+      if (is1Pressed) {
+        logicalPosition = Offset(logicalPosition.dx, _dragStartLogicalPosition!.dy);
+      }
+      if (is2Pressed) {
+        logicalPosition = Offset(_dragStartLogicalPosition!.dx, logicalPosition.dy);
+      }
+    }
+
     hoverPosition = logicalPosition; 
     notifyListeners();
 
@@ -1393,9 +1448,7 @@ class CanvasController extends ChangeNotifier {
       return;
     }
 
-    // --- NEW: F KEY LIVE FILLET DRAG UPDATE ---
     if (activeFilletNode != null && activeFilletSpline != null) {
-      // Modal slide: right increases cut distance, left decreases
       activeFilletRadius += dx;
       if (activeFilletRadius < 0.0) activeFilletRadius = 0.0;
       _lastPanPosition = logicalPosition;
@@ -1419,7 +1472,7 @@ class CanvasController extends ChangeNotifier {
        final newSelection = Set<CompassPoint>.from(_initialSelectionBeforeBox);
        
        for(var p in engine.points) {
-         if (_isPointLocked(p)) continue;
+         if (CanvasHitTester.isPointLocked(engine, p)) continue;
          if (rect.contains(Offset(p.x.value, p.y.value))) {
            newSelection.add(p);
          }
@@ -1468,7 +1521,6 @@ class CanvasController extends ChangeNotifier {
       for (var p in _transformingPoints) p.isBeingDragged = false;
       engine.finalizePointDrag(); 
     } else if (activeFilletNode != null && activeFilletSpline != null) {
-      // --- NEW: F KEY LIVE FILLET END ---
       if (activeFilletRadius > 0.1) {
         engine.applyFilletToNode(activeFilletSpline!, activeFilletNode!, activeFilletRadius);
       }
@@ -1494,6 +1546,7 @@ class CanvasController extends ChangeNotifier {
       engine.finalizePointDrag(); 
     }
     _lastPanPosition = null;
+    _dragStartLogicalPosition = null;
   }
   
   void onPanCancel() {
@@ -1514,11 +1567,11 @@ class CanvasController extends ChangeNotifier {
     activeHandleNode = null;
     _activeTensionNode = null;
     
-    // --- NEW: F KEY CANCEL
     activeFilletNode = null;
     activeFilletSpline = null;
     activeFilletRadius = 0.0;
 
     _lastPanPosition = null;
+    _dragStartLogicalPosition = null;
   }
 }

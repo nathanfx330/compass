@@ -17,10 +17,11 @@ class CanvasHUD extends StatelessWidget {
   final bool isShiftRPressed;
   final bool isShiftPressed;
   final bool isAPressed;
-  
-  // --- NEW: Receive F key state ---
   final bool isFPressed;
+  final bool is1Pressed; // --- NEW
+  final bool is2Pressed; // --- NEW
 
+  final bool addVertexActive;
   final Offset panOffset;
   final double canvasScale;
 
@@ -35,6 +36,9 @@ class CanvasHUD extends StatelessWidget {
     required this.isShiftPressed,
     required this.isAPressed,
     required this.isFPressed,
+    required this.is1Pressed, // --- NEW
+    required this.is2Pressed, // --- NEW
+    required this.addVertexActive,
     required this.panOffset,
     required this.canvasScale,
   });
@@ -56,12 +60,21 @@ class CanvasHUD extends StatelessWidget {
     } else if (isAPressed) {
       overlayText = 'A : VERTEX TENSION';
       overlayColor = Colors.orangeAccent; 
-    } else if (isFPressed) { // --- NEW: Handle F key HUD overlay
+    } else if (isFPressed) { 
       overlayText = 'F : FILLET CORNER';
       overlayColor = Colors.greenAccent.shade700;
+    } else if (addVertexActive) { 
+      overlayText = 'Q : ADD VERTEX';
+      overlayColor = Colors.green.shade600;
     } else if (isShiftPressed && currentTool == CompassTool.select) {
       overlayText = 'SHIFT : PAN SHAPE';
       overlayColor = Colors.blueAccent;
+    } else if (is1Pressed) { // --- NEW HUD LOGIC
+      overlayText = '1 : LOCK HORIZONTAL AXIS';
+      overlayColor = Colors.blueGrey;
+    } else if (is2Pressed) { // --- NEW HUD LOGIC
+      overlayText = '2 : LOCK VERTICAL AXIS';
+      overlayColor = Colors.blueGrey;
     }
 
     return Stack(

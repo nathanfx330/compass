@@ -21,6 +21,9 @@ import 'io/project_serializer.dart';
 import 'io/svg_exporter.dart';
 import 'io/png_exporter.dart';
 
+// --- GEOMETRY HELPERS ---
+import 'path_baker.dart';
+
 /// The state holder and brain of the application.
 class CompassEngine extends ChangeNotifier {
   final List<CompassPoint> points = [];
@@ -450,6 +453,104 @@ class CompassEngine extends ChangeNotifier {
     _saveSnapshot();
     notifyListeners();
   }
+
+  // --- Bake a layer's boolean result into editable Bézier X-Splines ---
+  //
+  // Flattens the layer's combined boolean Path (the same master path the renderer
+  // and exporters draw) into editable geometry, drops it into a fresh layer
+  // directly above the source, then hides the source. Non-destructive: the source
+  // layer and all its points stay intact, just invisible -- toggle it back on any
+  // time.
+  //
+  // The combined Path is opaque (dart:ui won't hand back its curves), so PathBaker
+  // samples the outline and reconstructs cubic Béziers -- see path_baker.dart. It
+  // returns one BakedContour per contour, depth-sorted ascending and tagged isHole
+  // by even-odd nesting. We emit one CompassXSpline per contour, outer contours as
+  // Union and holes as Subtract, appended in the returned order so the boolean
+  // engine on the NEW layer reproduces the identical silhouette: outers union
+  // first, then holes cut, then any re-fill island unions back.
+  //
+  // All contours share ONE anchor at the overall centroid, with every node point
+  // attached to it. That is what lets a multi-contour bake (e.g. an annulus: outer
+  // ring + hole) still translate under Shift-drag and rotate under Shift+R as a
+  // single rigid body, instead of the hole sliding out of its ring. Individual
+  // node editing is unaffected -- a plain drag moves only the grabbed point, since
+  // the anchor is each node's PARENT, not its child. The shared anchor is correctly
+  // reference-counted by _checkAndGCPoint: deleting one baked spline keeps the
+  // anchor alive while a sibling spline still references it.
+  //
+  // Baked handles arrive already in raw cubic (tension-1.0) space, so each node is
+  // created at tension 1.0 -- getEvaluatedControls multiplies explicit handles by
+  // tension, and 1.0 passes them through untouched, reproducing the fit exactly.
+  //
+  // The new layer inherits the source's fill/stroke/width so the bake looks
+  // identical to what it replaced. No-op if the layer has no fillable area (only
+  // strokes, `none`/construction shapes, or hidden shapes contribute nothing).
+  void bakeLayer(CompassLayer layer) {
+    final int srcIndex = layers.indexOf(layer);
+    if (srcIndex == -1) return;
+
+    final masterPath = layer.getLayerPath();
+    final contours = PathBaker.bake(masterPath);
+    if (contours.isEmpty) return;
+
+    // Overall centroid across every contour's vertices -> shared rigid-body anchor.
+    double sx = 0, sy = 0;
+    int count = 0;
+    for (final c in contours) {
+      for (final n in c.nodes) {
+        sx += n.point.dx;
+        sy += n.point.dy;
+        count++;
+      }
+    }
+    final anchor = CompassPoint(x: sx / count, y: sy / count);
+    points.add(anchor);
+    anchor.x.addListener(notifyListeners);
+    anchor.y.addListener(notifyListeners);
+
+    final baked = CompassLayer(
+      name: '${layer.name} (Baked)',
+      color: layer.color,
+      strokeColor: layer.strokeColor,
+      strokeWidth: layer.strokeWidth,
+    );
+
+    for (final contour in contours) {
+      final spline = CompassXSpline(isClosed: contour.isClosed, anchorPoint: anchor)
+        ..operation = contour.isHole ? CompassBooleanOp.subtract : CompassBooleanOp.add
+        ..isVisible = true;
+
+      for (final bn in contour.nodes) {
+        final p = CompassPoint(x: bn.point.dx, y: bn.point.dy);
+        points.add(p);
+        p.x.addListener(notifyListeners);
+        p.y.addListener(notifyListeners);
+        anchor.attach(p);
+
+        final node = CompassSplineNode(
+          point: p,
+          tension: 1.0,
+          handleIn: bn.handleIn,
+          handleOut: bn.handleOut,
+        );
+        node.tension.addListener(notifyListeners);
+        spline.addNode(node);
+      }
+
+      baked.shapes.add(spline);
+    }
+
+    // Drop the baked layer directly above the source, hide the source, focus it.
+    layers.insert(srcIndex + 1, baked);
+    layer.isVisible = false;
+    activeLayer = baked;
+    baked.isExpanded = true;
+    _selectedShape = null;
+
+    _saveSnapshot();
+    notifyListeners();
+  }
   
   void toggleShapeVisibility(CompassShape shape) {
     shape.isVisible = !shape.isVisible;
@@ -508,23 +609,82 @@ class CompassEngine extends ChangeNotifier {
 
   // --- SPLINE SPECIFIC ENGINE ACTIONS ---
 
+  // Cursor-driven node insertion: figures out which segment the dropped point is
+  // nearest to (chord distance), then splits that segment at the cursor's projected
+  // parameter. Public entry point for the Add-Point tool and rectangle->spline
+  // conversion, both of which hand us a pre-created point already added to `points`
+  // and sitting at the cursor.
   void insertPointIntoSpline(CompassPoint p, CompassXSpline spline) {
     final tap = Offset(p.x.value, p.y.value);
     final details = spline.getInsertDetailsForOffset(tap);
-    final index = details.$1;
-    final t = details.$2;
+    _spliceNodeIntoSpline(spline, p, details.$1, details.$2);
 
+    _saveSnapshot();
+    notifyListeners();
+  }
+
+  // Midpoint (or arbitrary-t) subdivision of a single segment, used by the
+  // Shift-hover "add resolution" interaction. `segmentIndex` addresses the segment
+  // between node[segmentIndex] and node[segmentIndex+1] (wrapping for closed
+  // splines). The new vertex is created and snapped exactly onto the existing curve
+  // at parameter `t`, so the silhouette never moves -- we only raise the node count.
+  // Returns the freshly created point, or null if the segment index was invalid.
+  //
+  // `t` defaults to 0.5 (parametric center). Pass the cursor's projected parameter
+  // here instead if you ever want "insert exactly where I'm pointing" semantics --
+  // nothing else in this method changes.
+  CompassPoint? subdivideSplineSegment(CompassXSpline spline, int segmentIndex, {double t = 0.5}) {
+    final int n = spline.nodes.length;
+    if (n < 2) return null;
+
+    final int segCount = spline.isClosed ? n : n - 1;
+    if (segmentIndex < 0 || segmentIndex >= segCount) return null;
+
+    // Translate the segment index into the splice index used by the core routine:
+    // the new node lands at segmentIndex + 1, except the closing segment of a closed
+    // spline (node[n-1] -> node[0]), which appends at the very end of the list.
+    int index = segmentIndex + 1;
+    if (spline.isClosed && segmentIndex == n - 1) index = n;
+
+    // Seed at the chord midpoint; _spliceNodeIntoSpline overwrites this with the
+    // exact on-curve split point before anyone repaints.
+    final a = spline.nodes[segmentIndex].point;
+    final b = spline.nodes[(segmentIndex + 1) % n].point;
+    final p = CompassPoint(
+      x: (a.x.value + b.x.value) / 2,
+      y: (a.y.value + b.y.value) / 2,
+    );
+    points.add(p);
+    p.x.addListener(notifyListeners);
+    p.y.addListener(notifyListeners);
+
+    _spliceNodeIntoSpline(spline, p, index, t);
+
+    _saveSnapshot();
+    notifyListeners();
+    return p;
+  }
+
+  // Shared De Casteljau splice. Splits the segment terminating at `index` (between
+  // node[index-1] and node[index], wrapping to node[0] when index == nodes.length on
+  // a closed spline) at parameter `t`, bakes the neighbor tangents into explicit
+  // handles so the curve is preserved exactly, snaps `p` onto the curve, and splices
+  // in a new node carrying the asymmetric child handles. The CALLER owns adding `p`
+  // to `points` and journaling the undo snapshot -- so both insertion entry points
+  // stay byte-for-byte identical in their math while differing only in how they
+  // choose the split parameter.
+  void _spliceNodeIntoSpline(CompassXSpline spline, CompassPoint p, int index, double t) {
     final node = CompassSplineNode(point: p);
     node.tension.addListener(notifyListeners);
-    
+
     // De Casteljau exact subdivision for Bezier curves
     if ((index > 0 && index < spline.nodes.length) || (spline.isClosed && index == spline.nodes.length)) {
       final prevIdx = index - 1;
       final nextIdx = index == spline.nodes.length ? 0 : index;
-      
+
       final prevNode = spline.nodes[prevIdx];
       final nextNode = spline.nodes[nextIdx];
-      
+
       final controls = spline.getEvaluatedControls();
       final hOut = controls[prevIdx].$1;
       final hIn = controls[nextIdx].$2;
@@ -543,11 +703,11 @@ class CompassEngine extends ChangeNotifier {
       final r0 = Offset.lerp(m0, m1, t)!;
       final r1 = Offset.lerp(m1, m2, t)!;
       // 3rd order (Point on curve)
-      final b = Offset.lerp(r0, r1, t)!;
+      final bPt = Offset.lerp(r0, r1, t)!;
 
-      // Force user's dropped point to snap exactly to the mathematical split
-      p.x.value = b.dx;
-      p.y.value = b.dy;
+      // Force the new point to snap exactly to the mathematical split
+      p.x.value = bPt.dx;
+      p.y.value = bPt.dy;
 
       // Safely divide by tension to prevent double-scaling when saving back to explicit fields.
       // (Because getEvaluatedControls() already applies the tension multiplier).
@@ -563,8 +723,8 @@ class CompassEngine extends ChangeNotifier {
       nextNode.handleIn = safeDivide(m2 - p3, nextNode.tension.value);
 
       // Assign the new asymmetric handles to the inserted node
-      node.handleIn = safeDivide(r0 - b, node.tension.value);
-      node.handleOut = safeDivide(r1 - b, node.tension.value);
+      node.handleIn = safeDivide(r0 - bPt, node.tension.value);
+      node.handleOut = safeDivide(r1 - bPt, node.tension.value);
     }
 
     if (index >= spline.nodes.length) {
@@ -579,9 +739,6 @@ class CompassEngine extends ChangeNotifier {
         firstPoint.attach(p);
       }
     }
-    
-    _saveSnapshot();
-    notifyListeners();
   }
 
   void toggleSplineClosed(CompassXSpline spline) {

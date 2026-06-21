@@ -128,6 +128,50 @@ class LayersPanel extends StatelessWidget {
                               engine.selectLayer(layer);
                             }
                           },
+                          // --- NEW: Right-click a layer to bake its boolean result
+                          // into editable X-Splines on a fresh layer above. ---
+                          onSecondaryTapDown: (details) async {
+                            final selected = await showMenu<String>(
+                              context: context,
+                              position: RelativeRect.fromLTRB(
+                                details.globalPosition.dx,
+                                details.globalPosition.dy,
+                                details.globalPosition.dx,
+                                details.globalPosition.dy,
+                              ),
+                              items: const [
+                                PopupMenuItem<String>(
+                                  value: 'bake',
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.draw, size: 18),
+                                      SizedBox(width: 12),
+                                      Text('Bake to X-Spline'),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+
+                            if (selected != 'bake') return;
+
+                            // Guard the silent no-op: a layer made of only strokes,
+                            // `none`/construction shapes, or hidden shapes has no
+                            // fillable area, so bakeLayer would do nothing. Say so
+                            // rather than looking broken.
+                            if (layer.getLayerPath().computeMetrics().isEmpty) {
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Nothing to bake — this layer has no filled area.'),
+                                  ),
+                                );
+                              }
+                              return;
+                            }
+
+                            engine.bakeLayer(layer);
+                          },
                           child: Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
                             child: Row(

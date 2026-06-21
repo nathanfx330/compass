@@ -1,4 +1,4 @@
-// lib/ui/workspace/menu_bar.dart
+// ./lib/ui/workspace/menu_bar.dart
 
 import 'package:flutter/material.dart';
 import '../../engine.dart';
@@ -9,6 +9,8 @@ class CompassMenuBar extends StatelessWidget {
   final ValueNotifier<ThemeMode> themeNotifier;
   final bool showScaffolding;
   final VoidCallback onToggleScaffolding;
+  final bool showHandles; // <--- NEW
+  final VoidCallback onToggleHandles; // <--- NEW
   final VoidCallback onClearCanvas;
 
   const CompassMenuBar({
@@ -17,6 +19,8 @@ class CompassMenuBar extends StatelessWidget {
     required this.themeNotifier,
     required this.showScaffolding,
     required this.onToggleScaffolding,
+    required this.showHandles, // <--- NEW
+    required this.onToggleHandles, // <--- NEW
     required this.onClearCanvas,
   });
 
@@ -113,6 +117,13 @@ class CompassMenuBar extends StatelessWidget {
                       leadingIcon: Icon(showScaffolding ? Icons.visibility : Icons.visibility_off),
                       child: Text(showScaffolding ? 'Hide Scaffolding' : 'Show Scaffolding'),
                     ),
+                    // <--- NEW: Menu Item for toggling Handles --->
+                    MenuItemButton(
+                      onPressed: onToggleHandles,
+                      leadingIcon: Icon(showHandles ? Icons.gesture : Icons.timeline),
+                      child: Text(showHandles ? 'Hide Handles' : 'Show Handles'),
+                    ),
+                    const CustomMenuItemDivider(),
                     SubmenuButton(
                       menuChildren: [
                         MenuItemButton(

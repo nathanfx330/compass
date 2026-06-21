@@ -1,4 +1,4 @@
-// lib/workspace.dart
+// ./lib/workspace.dart
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -27,6 +27,7 @@ class CompassWorkspace extends StatefulWidget {
 class _CompassWorkspaceState extends State<CompassWorkspace> {
   late CompassEngine _engine;
   bool _showScaffolding = true;
+  bool _showHandles = true; // <--- NEW: State for showing/hiding Bezier handles
 
   final List<Color> _swatchColors = [
     const Color(0xFF222222), 
@@ -77,6 +78,13 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
     });
   }
 
+  // <--- NEW: Toggle method for handles
+  void _toggleHandles() {
+    setState(() {
+      _showHandles = !_showHandles;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -97,6 +105,8 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
                 themeNotifier: widget.themeNotifier,
                 showScaffolding: _showScaffolding,
                 onToggleScaffolding: _toggleScaffolding,
+                showHandles: _showHandles, // <--- NEW
+                onToggleHandles: _toggleHandles, // <--- NEW
                 onClearCanvas: _clearCanvas,
               ),
 
@@ -110,6 +120,8 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
                           engine: _engine,
                           showScaffolding: _showScaffolding,
                           onToggleScaffolding: _toggleScaffolding, 
+                          showHandles: _showHandles, // <--- NEW
+                          onToggleHandles: _toggleHandles, // <--- NEW
                         ),
                       ),
                     ),

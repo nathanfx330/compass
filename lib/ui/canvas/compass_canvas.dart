@@ -1,4 +1,4 @@
-// lib/ui/canvas/compass_canvas.dart
+// ./lib/ui/canvas/compass_canvas.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -7,18 +7,22 @@ import 'package:flutter/gestures.dart';
 import '../../engine.dart';
 import 'compass_renderer.dart';
 import 'canvas_hud.dart';
-import 'canvas_controller.dart'; // <--- Imports the new controller & CompassTool
+import 'canvas_controller.dart'; 
 
 class CompassCanvas extends StatefulWidget {
   final CompassEngine engine;
   final bool showScaffolding;
   final VoidCallback onToggleScaffolding;
+  final bool showHandles; // <--- NEW
+  final VoidCallback onToggleHandles; // <--- NEW
 
   const CompassCanvas({
     super.key, 
     required this.engine,
     this.showScaffolding = true,
     required this.onToggleScaffolding,
+    required this.showHandles, // <--- NEW
+    required this.onToggleHandles, // <--- NEW
   });
 
   @override
@@ -82,8 +86,10 @@ class _CompassCanvasState extends State<CompassCanvas> {
                   onTapDown: (details) => _controller.onTapDown(details, context, widget.showScaffolding),
                   onSecondaryTapDown: (details) => _controller.onSecondaryTapDown(
                     details, context, widget.showScaffolding, widget.onToggleScaffolding,
+                    widget.showHandles, widget.onToggleHandles, // <--- NEW
                   ), 
-                  onPanStart: (details) => _controller.onPanStart(details, context, widget.showScaffolding),
+                  // <--- NEW: Passed showHandles down to pan functions so handles can be ignored if hidden
+                  onPanStart: (details) => _controller.onPanStart(details, context, widget.showScaffolding, widget.showHandles),
                   onPanUpdate: (details) => _controller.onPanUpdate(details, context, widget.showScaffolding),
                   onPanEnd: _controller.onPanEnd,
                   onPanCancel: _controller.onPanCancel,
@@ -100,18 +106,20 @@ class _CompassCanvasState extends State<CompassCanvas> {
                         isRPressed: _controller.isRPressed,           
                         isShiftRPressed: _controller.isShiftRPressed,
                         isAPressed: _controller.isAPressed, 
-                        // --- NEW: Pass Fillet State to Renderer ---
                         activeFilletNode: _controller.activeFilletNode,
                         activeFilletSpline: _controller.activeFilletSpline,
                         activeFilletRadius: _controller.activeFilletRadius,
                         isFPressed: _controller.isFPressed,
-                        
+                        addVertexPreviewPos: _controller.addVertexPreviewPos,
+                        addVertexSpline: _controller.addVertexSpline,
+                        addVertexSegmentIndex: _controller.addVertexSegmentIndex,
                         tensionTargetPoint: _controller.targetTensionNode?.point, 
                         shapeStartPoint: _controller.shapeStartPoint, 
                         hoveredPoint: _controller.hoveredPoint,
                         hoverPosition: _controller.hoverPosition,
                         currentTool: _controller.currentTool,
                         showScaffolding: widget.showScaffolding,
+                        showHandles: widget.showHandles, // <--- NEW
                         panOffset: _controller.panOffset,
                         canvasScale: _controller.canvasScale,
                         pointBorderColor: theme.colorScheme.surface, 
@@ -152,8 +160,10 @@ class _CompassCanvasState extends State<CompassCanvas> {
                 isShiftRPressed: _controller.isShiftRPressed,
                 isShiftPressed: _controller.isShiftPressed,
                 isAPressed: _controller.isAPressed, 
-                // --- NEW: Pass F Key state to HUD ---
                 isFPressed: _controller.isFPressed,
+                is1Pressed: _controller.is1Pressed,
+                is2Pressed: _controller.is2Pressed,
+                addVertexActive: _controller.addVertexPreviewPos != null,
                 
                 panOffset: _controller.panOffset,
                 canvasScale: _controller.canvasScale,

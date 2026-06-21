@@ -29,12 +29,21 @@ class CompassRenderer extends CustomPainter {
   final double activeFilletRadius;
   final bool isFPressed;
 
+  // --- NEW: Shift-hover "Add Resolution" preview ---
+  // addVertexPreviewPos is the exact on-curve center of the segment under the
+  // cursor (t=0.5 on its cubic). The spline + segment index are carried for
+  // context/future use; the marker itself is drawn purely from the preview pos.
+  final Offset? addVertexPreviewPos;
+  final CompassXSpline? addVertexSpline;
+  final int addVertexSegmentIndex;
+
   final CompassPoint? tensionTargetPoint; 
   final CompassPoint? shapeStartPoint;
   final CompassPoint? hoveredPoint;
   final Offset? hoverPosition;
   final CompassTool currentTool;
   final bool showScaffolding;
+  final bool showHandles; // <--- NEW ARGUMENT
   final Offset panOffset;
   final double canvasScale;
   final Color pointBorderColor;
@@ -54,12 +63,16 @@ class CompassRenderer extends CustomPainter {
     this.activeFilletSpline,
     this.activeFilletRadius = 0.0,
     this.isFPressed = false,
+    this.addVertexPreviewPos,
+    this.addVertexSpline,
+    this.addVertexSegmentIndex = -1,
     this.tensionTargetPoint, 
     this.shapeStartPoint,
     this.hoveredPoint,
     this.hoverPosition,
     required this.currentTool,
     required this.showScaffolding,
+    required this.showHandles, // <--- NEW ARGUMENT
     required this.panOffset,
     required this.canvasScale,
     required this.pointBorderColor,
@@ -197,7 +210,8 @@ class CompassRenderer extends CustomPainter {
 
       // --- BEZIER HANDLES for the selected X-Spline ---
       final selForHandles = engine.selectedShape;
-      if (selForHandles is CompassXSpline) {
+      // <--- NEW: Checks if showHandles is true before rendering the handles
+      if (selForHandles is CompassXSpline && showHandles) { 
         _drawBezierHandles(canvas, selForHandles, invScale);
       }
 
@@ -366,6 +380,38 @@ class CompassRenderer extends CustomPainter {
           ..style = PaintingStyle.stroke;
         canvas.drawLine(previewOffset + Offset(-3.5 * invScale, 0), previewOffset + Offset(3.5 * invScale, 0), plusPaint);
         canvas.drawLine(previewOffset + Offset(0, -3.5 * invScale), previewOffset + Offset(0, 3.5 * invScale), plusPaint);
+      }
+
+      // --- NEW: Shift-hover "Add Resolution" preview marker ---
+      // A green ringed "+" sitting exactly on the segment's parametric center.
+      // The outer ring reads as "snapped to the curve -- click to insert a vertex
+      // here," distinguishing it from the Add-Point tool's solid disc and from the
+      // solid blue structural points. Drawn last so it sits on top of everything.
+      if (addVertexPreviewPos != null) {
+        final pos = addVertexPreviewPos!;
+
+        final ringPaint = Paint()
+          ..color = Colors.greenAccent.withOpacity(0.5)
+          ..strokeWidth = 2.0 * invScale
+          ..style = PaintingStyle.stroke;
+        canvas.drawCircle(pos, 11.0 * invScale, ringPaint);
+
+        final fillPaint = Paint()
+          ..color = Colors.greenAccent
+          ..style = PaintingStyle.fill;
+        final borderPaint = Paint()
+          ..color = pointBorderColor
+          ..strokeWidth = 2.0 * invScale
+          ..style = PaintingStyle.stroke;
+        canvas.drawCircle(pos, 7.0 * invScale, fillPaint);
+        canvas.drawCircle(pos, 7.0 * invScale, borderPaint);
+
+        final plusPaint = Paint()
+          ..color = Colors.black87
+          ..strokeWidth = 1.5 * invScale
+          ..style = PaintingStyle.stroke;
+        canvas.drawLine(pos + Offset(-3.5 * invScale, 0), pos + Offset(3.5 * invScale, 0), plusPaint);
+        canvas.drawLine(pos + Offset(0, -3.5 * invScale), pos + Offset(0, 3.5 * invScale), plusPaint);
       }
     }
 

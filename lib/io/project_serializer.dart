@@ -21,7 +21,23 @@ class ProjectSerializer {
     for (var p in engine.points) {
       buffer.writeln('POINT,${p.id},${p.x.value},${p.y.value}');
     }
-    
+
+    // Persist the rigid-body attachment graph (parent -> child). attachedPoints is
+    // the live source of truth for which points move together; until now it was
+    // never serialized, so baked layers, converted rectangles/circles, spliced
+    // spline nodes, and constraint-ridden points all lost their cohesion on reload
+    // (the anchor *reference* survived via the XSPLINE line, so rotation pivots were
+    // fine, but Shift-drag no longer pulled the group through attachedPoints). We
+    // emit one ATTACH per edge and replay them on load once every point exists.
+    // Point ids never contain commas (they already survive this CSV round-trip), so
+    // a plain comma split is safe. attach() dedupes, so the handful of edges the
+    // shape-loaders also rebuild (circle/spiral center -> satellite) stay idempotent.
+    for (var p in engine.points) {
+      for (var child in p.attachedPoints) {
+        buffer.writeln('ATTACH,${p.id},${child.id}');
+      }
+    }
+
     if (engine.referenceLayer != null) {
       final rl = engine.referenceLayer!;
       buffer.writeln('REF,${rl.imagePath},${rl.isVisible},${rl.isLocked},${rl.offset.dx},${rl.offset.dy},${rl.scale},${rl.rotation}');
@@ -126,6 +142,22 @@ class ProjectSerializer {
       if (parts.isEmpty) continue;
       
       final type = parts[0].trim();
+
+      // Replay the attachment graph now that pass 1 has created every point, so
+      // lookups never miss regardless of where ATTACH lines sit in the file. Ids
+      // are trimmed to shrug off a trailing '\r' from CRLF-saved files. Legacy
+      // saves carry no ATTACH lines, so this is a clean no-op for them (they load
+      // exactly as before), and a new save opened by older code simply ignores the
+      // unknown ATTACH lines -- forward- and backward-compatible both ways.
+      if (type == 'ATTACH' && parts.length >= 3) {
+        final parent = pointMap[parts[1].trim()];
+        final child = pointMap[parts[2].trim()];
+        if (parent != null && child != null) {
+          parent.attach(child);
+        }
+        continue;
+      }
+
       if (type == 'SHAPE' && parts.length >= 6) {
         final shapeType = parts[1];
         final layer = layerMap[parts[2]];
