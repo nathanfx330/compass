@@ -51,6 +51,13 @@ class CompassRenderer extends CustomPainter {
   final CompassSplineNode? activeHandleNode;
   final bool activeHandleIsOut;
 
+  // --- NEW: bounding box of the active 2+ selection (logical space), or null. ---
+  // Drawn as a dashed, corner-ticked box framing the highlighted group -- the
+  // visible affordance for "grab anywhere in here to move the whole selection."
+  // Orange to match the rigid-body/centroid visual language and stay distinct from
+  // the blue transient marquee. Null (and thus undrawn) for 0- or 1-point selections.
+  final Rect? selectionBounds;
+
   CompassRenderer({
     required this.engine, 
     this.selectedPoint,
@@ -78,6 +85,7 @@ class CompassRenderer extends CustomPainter {
     required this.pointBorderColor,
     this.activeHandleNode,
     this.activeHandleIsOut = false,
+    this.selectionBounds, // <--- NEW ARGUMENT
   }) : super(repaint: engine);
 
   @override
@@ -213,6 +221,15 @@ class CompassRenderer extends CustomPainter {
       // <--- NEW: Checks if showHandles is true before rendering the handles
       if (selForHandles is CompassXSpline && showHandles) { 
         _drawBezierHandles(canvas, selForHandles, invScale);
+      }
+
+      // --- NEW: MULTI-SELECTION BOUNDING BOX ---
+      // Framed dashed box + corner ticks around a 2+ point selection. Drawn after the
+      // wireframes (so it frames the whole group) but before the point dots (so the
+      // selected dots render on top of the box edge). This is the grabbable affordance
+      // that the controller's _isPressOnSelection hit-tests against.
+      if (selectionBounds != null) {
+        _drawSelectionBounds(canvas, selectionBounds!, invScale);
       }
 
       // --- EXPLICITLY SELECTED POINT(S) HIGHLIGHT ---
@@ -416,6 +433,51 @@ class CompassRenderer extends CustomPainter {
     }
 
     canvas.restore();
+  }
+
+  // --- NEW: Draws the dashed, corner-ticked bounding box around a 2+ selection. ---
+  // Padded a few px beyond the literal point extents so the outer dots sit inside the
+  // frame rather than on its edge. Orange keeps it in the rigid-body visual family and
+  // distinct from the blue marquee. The corner ticks are short solid right-angle marks
+  // that make it read as a manipulable box ("grab me") instead of a plain outline.
+  void _drawSelectionBounds(Canvas canvas, Rect bounds, double invScale) {
+    final pad = 10.0 * invScale;
+    final box = bounds.inflate(pad);
+
+    final boxPaint = Paint()
+      ..color = Colors.orangeAccent.withOpacity(0.9)
+      ..strokeWidth = 1.5 * invScale
+      ..style = PaintingStyle.stroke;
+
+    // Dashed perimeter (reuse the dashed-line helper edge by edge).
+    final tl = box.topLeft;
+    final tr = box.topRight;
+    final br = box.bottomRight;
+    final bl = box.bottomLeft;
+    _drawDashedLine(canvas, tl, tr, boxPaint, invScale);
+    _drawDashedLine(canvas, tr, br, boxPaint, invScale);
+    _drawDashedLine(canvas, br, bl, boxPaint, invScale);
+    _drawDashedLine(canvas, bl, tl, boxPaint, invScale);
+
+    // Solid corner ticks -- short right-angle marks at each corner.
+    final tickPaint = Paint()
+      ..color = Colors.orangeAccent
+      ..strokeWidth = 2.0 * invScale
+      ..style = PaintingStyle.stroke;
+    final t = 8.0 * invScale; // tick arm length
+
+    // Top-left
+    canvas.drawLine(tl, tl + Offset(t, 0), tickPaint);
+    canvas.drawLine(tl, tl + Offset(0, t), tickPaint);
+    // Top-right
+    canvas.drawLine(tr, tr + Offset(-t, 0), tickPaint);
+    canvas.drawLine(tr, tr + Offset(0, t), tickPaint);
+    // Bottom-right
+    canvas.drawLine(br, br + Offset(-t, 0), tickPaint);
+    canvas.drawLine(br, br + Offset(0, -t), tickPaint);
+    // Bottom-left
+    canvas.drawLine(bl, bl + Offset(t, 0), tickPaint);
+    canvas.drawLine(bl, bl + Offset(0, -t), tickPaint);
   }
 
   // --- NEW: Draws the curve-aware preview of the fillet while F is held ---

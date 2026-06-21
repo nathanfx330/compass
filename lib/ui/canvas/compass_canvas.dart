@@ -84,6 +84,13 @@ class _CompassCanvasState extends State<CompassCanvas> {
                             : SystemMouseCursors.basic)),
                 child: GestureDetector(
                   onTapDown: (details) => _controller.onTapDown(details, context, widget.showScaffolding),
+                  // --- NEW: clean-click resolver for a 2+ selection. Fires only when
+                  // the press did NOT become a pan (the arena picked tap), so it's how
+                  // a click collapses/toggles the group while a drag moves it. ---
+                  onTap: () => _controller.onTap(),
+                  // --- NEW: if the tap is aborted without becoming a pan, drop any
+                  // deferred press so it can't leak into the next gesture. ---
+                  onTapCancel: () => _controller.onTapCancel(),
                   onSecondaryTapDown: (details) => _controller.onSecondaryTapDown(
                     details, context, widget.showScaffolding, widget.onToggleScaffolding,
                     widget.showHandles, widget.onToggleHandles, // <--- NEW
@@ -125,6 +132,11 @@ class _CompassCanvasState extends State<CompassCanvas> {
                         pointBorderColor: theme.colorScheme.surface, 
                         activeHandleNode: _controller.activeHandleNode,
                         activeHandleIsOut: _controller.activeHandleIsOut,
+                        // --- NEW: bounding box of the active 2+ selection (logical
+                        // space, or null). The renderer draws the grabbable box from
+                        // this. Pairs with the selectionBounds param added to
+                        // CompassRenderer in the next file. ---
+                        selectionBounds: _controller.selectionBounds,
                       ),
                     ),
                   ),

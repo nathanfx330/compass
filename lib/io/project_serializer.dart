@@ -73,12 +73,36 @@ class ProjectSerializer {
         }
       }
     }
+
+    // Persist host-rider constraints: PointOnLine / PointOnCircle / PointOnSpiral.
+    // These three have NO other reconstruction path (unlike DistanceRadius, rebuilt
+    // by the circle loader's radius closure, and Square, rebuilt from isSquare), so
+    // without this they vanish on every save/load -- and because undo() round-trips
+    // through serialize/deserialize, they vanish on Ctrl+Z too. We record the rider
+    // id plus the ids of the host shape's DEFINING points rather than inventing a
+    // shape id: that keeps every SHAPE line byte-identical and the rebuild pass
+    // matches those ids back to the freshly-built shape. Emitted last, after all
+    // SHAPE lines, since a constraint references a shape that must already exist;
+    // the load side also uses a dedicated pass so ordering is not actually relied on.
+    // Legacy files carry no CONSTRAINT lines (clean no-op on load); older code
+    // opening a new file simply ignores the unknown lines -- compatible both ways.
+    for (var c in engine.constraints) {
+      if (c is PointOnLineConstraint) {
+        buffer.writeln('CONSTRAINT,PONLINE,${c.point.id},${c.line.start.id},${c.line.end.id}');
+      } else if (c is PointOnCircleConstraint) {
+        buffer.writeln('CONSTRAINT,PONCIRCLE,${c.point.id},${c.circle.center.id},${c.circle.radiusPoint?.id ?? ""}');
+      } else if (c is PointOnSpiralConstraint) {
+        buffer.writeln('CONSTRAINT,PONSPIRAL,${c.point.id},${c.spiral.center.id},${c.spiral.startPoint.id}');
+      }
+    }
+
     return buffer.toString();
   }
 
   static void deserialize(CompassEngine engine, String data, VoidCallback onUpdate) {
     engine.points.clear();
     engine.layers.clear();
+    engine.constraints.clear(); // <--- Rebuilt from CONSTRAINT lines in the third pass
     engine.referenceLayer = null;
     engine.activeLayer = null;
     engine.selectShape(null);
@@ -300,6 +324,81 @@ class ProjectSerializer {
               layer.shapes.add(spline);
             }
           }
+        }
+      }
+    }
+
+    // --- THIRD PASS: rebuild host-rider constraints ---------------------------
+    //
+    // Runs only after pass 2 has built every shape, so a constraint's host always
+    // exists no matter where its CONSTRAINT line sits in the file (a clean line is
+    // emitted after all SHAPE lines, but we don't depend on that). For each line we
+    // look the rider up in pointMap, find the host shape by the recorded ids of its
+    // defining points, then construct the constraint and register it DIRECTLY in
+    // engine.constraints. We deliberately do NOT route through engine.addPointOn*:
+    // those snapshot the undo stack and notify listeners, which is wrong mid-load
+    // (this mirrors how SquareConstraint is reconstructed inline above, just with
+    // the extra list registration the engine now needs). The constraint constructor
+    // runs enforce() once, but every rider was saved exactly on its host, so that is
+    // a zero-delta no-op -- nothing jumps, no listener storm.
+
+    CompassLine? findLine(String startId, String endId) {
+      for (var layer in engine.layers) {
+        for (var s in layer.shapes) {
+          if (s is CompassLine && s.start.id == startId && s.end.id == endId) return s;
+        }
+      }
+      return null;
+    }
+
+    CompassCircle? findCircle(String centerId, String radiusPointId) {
+      for (var layer in engine.layers) {
+        for (var s in layer.shapes) {
+          if (s is CompassCircle && s.center.id == centerId) {
+            // When a radiusPoint id was recorded, require it to match too, so two
+            // concentric circles sharing a center can't get cross-bound.
+            if (radiusPointId.isEmpty) return s;
+            if (s.radiusPoint?.id == radiusPointId) return s;
+          }
+        }
+      }
+      return null;
+    }
+
+    CompassSpiral? findSpiral(String centerId, String startId) {
+      for (var layer in engine.layers) {
+        for (var s in layer.shapes) {
+          if (s is CompassSpiral && s.center.id == centerId && s.startPoint.id == startId) return s;
+        }
+      }
+      return null;
+    }
+
+    for (var line in lines) {
+      final parts = line.split(',');
+      if (parts.isEmpty) continue;
+
+      final type = parts[0].trim();
+      if (type != 'CONSTRAINT' || parts.length < 3) continue;
+
+      final kind = parts[1].trim();
+      final rider = pointMap[parts[2].trim()];
+      if (rider == null) continue;
+
+      if (kind == 'PONLINE' && parts.length >= 5) {
+        final host = findLine(parts[3].trim(), parts[4].trim());
+        if (host != null) {
+          engine.constraints.add(PointOnLineConstraint(point: rider, line: host));
+        }
+      } else if (kind == 'PONCIRCLE' && parts.length >= 5) {
+        final host = findCircle(parts[3].trim(), parts[4].trim());
+        if (host != null) {
+          engine.constraints.add(PointOnCircleConstraint(point: rider, circle: host));
+        }
+      } else if (kind == 'PONSPIRAL' && parts.length >= 5) {
+        final host = findSpiral(parts[3].trim(), parts[4].trim());
+        if (host != null) {
+          engine.constraints.add(PointOnSpiralConstraint(point: rider, spiral: host));
         }
       }
     }

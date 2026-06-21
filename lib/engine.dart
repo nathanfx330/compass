@@ -16,6 +16,9 @@ import 'models/geometry/rectangle.dart';
 import 'models/layer.dart';
 import 'models/reference_layer.dart';
 
+// --- CONSTRAINTS ---
+import 'constraints.dart';
+
 // --- IO ---
 import 'io/project_serializer.dart';
 import 'io/svg_exporter.dart';
@@ -28,7 +31,20 @@ import 'path_baker.dart';
 class CompassEngine extends ChangeNotifier {
   final List<CompassPoint> points = [];
   final List<CompassLayer> layers = [];
-  
+
+  // Live registry of host-rider constraints: PointOnLine / PointOnCircle /
+  // PointOnSpiral. Each binds a free "rider" point onto a host shape so it
+  // re-projects whenever the host's defining points move. These have NO other
+  // reconstruction path, so the engine must own them for serialization to persist
+  // them -- and because undo() round-trips through serialize/deserialize, owning
+  // them here is exactly what makes them survive Ctrl+Z too.
+  //
+  // Deliberately NOT tracked here: DistanceRadiusConstraint (rebuilt as the circle
+  // loader's bespoke radius closure) and SquareConstraint (rebuilt from the
+  // rectangle's isSquare flag). Both already survive a round-trip by other means;
+  // listing them here would double-bind them.
+  final List<CompassConstraint> constraints = [];
+
   CompassLayer? activeLayer;
   CompassShape? _selectedShape;
 
@@ -227,6 +243,14 @@ class CompassEngine extends ChangeNotifier {
     }
 
     if (removed) {
+      // A deleted shape can no longer host a PointOn* constraint. Drop any whose
+      // host IS this shape, so a dead constraint isn't left firing moveBy on its
+      // rider every time unrelated geometry moves -- and isn't serialized into the
+      // immediate post-delete snapshot only to be skipped on the way back in. The
+      // rider point itself is not one of this shape's structural points, so it is
+      // untouched by the GC below and simply becomes a free point.
+      constraints.removeWhere((c) => _constraintHasShape(c, shape));
+
       // This shape's structural points are deleted together as one batch. The
       // attachment links the shape created among them (e.g. a circle's
       // center.attach(radiusPoint)) must NOT keep each other alive, or every point
@@ -305,6 +329,11 @@ class CompassEngine extends ChangeNotifier {
       for (var remainingPoint in points) {
         remainingPoint.attachedPoints.remove(p);
       }
+      // A truly collected point can't anchor a constraint as rider OR as a host
+      // vertex. removeShape usually clears the host case first, but this also covers
+      // a rider collected as an orphan (e.g. via fillet corner cleanup), so no dead
+      // constraint is left pointing at a point that no longer exists.
+      constraints.removeWhere((c) => _constraintHasPoint(c, p));
     }
   }
 
@@ -978,6 +1007,14 @@ class CompassEngine extends ChangeNotifier {
     }
 
     points.remove(p);
+
+    // Deleting a point dissolves any constraint it anchored -- whether as the rider
+    // OR as a defining vertex of the host shape. (Deleting a line endpoint also
+    // removes the line in the loop above, leaving a point that was riding it now
+    // hostless; _constraintHasPoint checks host vertices too, so that case is caught
+    // here as well.)
+    constraints.removeWhere((c) => _constraintHasPoint(c, p));
+
     _saveSnapshot();
     notifyListeners();
   }
@@ -990,6 +1027,60 @@ class CompassEngine extends ChangeNotifier {
       _saveSnapshot();
       notifyListeners();
     }
+  }
+
+  // --- CONSTRAINT MANAGEMENT ---------------------------------------------------
+  //
+  // The canvas controller routes every PointOn* creation through these so the
+  // constraint lands in `constraints` the instant it is born. The snapshot in each
+  // is load-bearing: it puts the new constraint into the undo stack immediately.
+  // Without it, undoing a LATER edit would pop back to a snapshot taken before the
+  // constraint existed and silently strip a constraint the user never meant to
+  // touch. (The rider point itself was already added + snapshotted via addPoint;
+  // this extra snapshot is benign and simply makes a subsequent undo peel the
+  // constraint off one step before the point.)
+
+  void addPointOnLine(CompassPoint point, CompassLine line) {
+    constraints.add(PointOnLineConstraint(point: point, line: line));
+    _saveSnapshot();
+    notifyListeners();
+  }
+
+  void addPointOnCircle(CompassPoint point, CompassCircle circle) {
+    constraints.add(PointOnCircleConstraint(point: point, circle: circle));
+    _saveSnapshot();
+    notifyListeners();
+  }
+
+  void addPointOnSpiral(CompassPoint point, CompassSpiral spiral) {
+    constraints.add(PointOnSpiralConstraint(point: point, spiral: spiral));
+    _saveSnapshot();
+    notifyListeners();
+  }
+
+  // True when `shape` is the host of constraint `c` -- used to purge a constraint
+  // when its host shape is deleted.
+  bool _constraintHasShape(CompassConstraint c, CompassShape shape) {
+    if (c is PointOnLineConstraint) return c.line == shape;
+    if (c is PointOnCircleConstraint) return c.circle == shape;
+    if (c is PointOnSpiralConstraint) return c.spiral == shape;
+    return false;
+  }
+
+  // True when point `p` participates in constraint `c` -- either as the rider, or
+  // as one of the host shape's defining points -- used to purge a constraint when a
+  // point is deleted or garbage-collected.
+  bool _constraintHasPoint(CompassConstraint c, CompassPoint p) {
+    if (c is PointOnLineConstraint) {
+      return c.point == p || c.line.start == p || c.line.end == p;
+    }
+    if (c is PointOnCircleConstraint) {
+      return c.point == p || c.circle.center == p || c.circle.radiusPoint == p;
+    }
+    if (c is PointOnSpiralConstraint) {
+      return c.point == p || c.spiral.center == p || c.spiral.startPoint == p;
+    }
+    return false;
   }
 
   void finalizePointDrag() {

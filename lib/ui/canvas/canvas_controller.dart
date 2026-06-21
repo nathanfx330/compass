@@ -88,6 +88,20 @@ class CanvasController extends ChangeNotifier {
   Offset? _dragStartLogicalPosition; // --- NEW: Anchors the axis locks perfectly
   Set<CompassPoint> _initialSelectionBeforeBox = {};
   bool _isPanningSelectedPoints = false;
+
+  // --- NEW: strict (no-propagation) move of just the highlighted multi-selection ---
+  // Reuses _transformingPoints, but unlike _isPanningSelectedPoints it adds the delta
+  // straight to each point's coords (no moveBy walk), so attached children are NOT
+  // dragged along. This is the Shift+drag "move only them" path for a 2+ selection.
+  bool _isStrictPanningSelection = false;
+
+  // --- NEW: deferred press on a 2+ selection (hitPoint, wasShiftHeld) ---
+  // onTapDown stashes any press that lands on the active multi-selection here instead
+  // of mutating selection on pointer-down. A clean CLICK consumes it in onTap. (The
+  // DRAG path no longer reads this -- onPanStart re-detects the group grab fresh,
+  // because onTapCancel clears this stash on the tap->pan transition before onPanStart
+  // runs. See onPanStart's group-drag block.)
+  (CompassPoint?, bool)? _pendingSelectPress;
   
   CompassXSpline? _activeSpline;
   CompassSplineNode? _activeTensionNode; 
@@ -105,6 +119,7 @@ class CanvasController extends ChangeNotifier {
     selectedPoints.clear(); 
     shapeStartPoint = null; 
     _activeSpline = null;
+    _pendingSelectPress = null;
     _clearAddVertexHover();
     notifyListeners();
   }
@@ -315,7 +330,38 @@ class CanvasController extends ChangeNotifier {
     return expanded;
   }
 
+  // Centroid of an arbitrary point set -- the pivot for isolated multi-selection
+  // rotation. Plain mean of member coords; matches how the shape centroid reads.
+  Offset? _centroidOfPoints(Set<CompassPoint> pts) {
+    if (pts.isEmpty) return null;
+    double cx = 0, cy = 0;
+    for (var p in pts) {
+      cx += p.x.value;
+      cy += p.y.value;
+    }
+    return Offset(cx / pts.length, cy / pts.length);
+  }
+
   void _setupRotationState({required bool hierarchy}) {
+    // --- NEW: a 2+ highlighted selection is its own rigid body. ---
+    // Plain R: rotate ONLY the highlighted points about their own centroid -- fully
+    // isolated, nothing else on the canvas moves. Shift+R: rotate those points plus
+    // everything rigidly bound to them (attachment graph + shape cohesion), still
+    // pivoting on the selection centroid, preserving the local-vs-hierarchy split.
+    if (selectedPoints.length >= 2) {
+      rotationPivotOffset = _centroidOfPoints(selectedPoints);
+      if (hierarchy) {
+        Set<CompassPoint> body = {};
+        for (var p in selectedPoints) {
+          body.addAll(_getRigidBody(null, p, true));
+        }
+        _transformingPoints = _expandForShapeCohesion(body);
+      } else {
+        _transformingPoints = Set<CompassPoint>.from(selectedPoints);
+      }
+      return;
+    }
+
     CompassPoint? explicitPoint = selectedPoints.isNotEmpty ? selectedPoints.first : hoveredPoint;
     CompassShape? selShape = engine.selectedShape;
 
@@ -350,6 +396,39 @@ class CanvasController extends ChangeNotifier {
       node.point.x.value + handle.dx * t,
       node.point.y.value + handle.dy * t,
     );
+  }
+
+  // --- NEW: bounding box of the current multi-selection (logical space) ---
+  // Null unless 2+ points are selected. Used both to draw the box (renderer reads it)
+  // and to decide whether an empty-space press lands "inside the group" -> group drag.
+  Rect? get selectionBounds {
+    if (selectedPoints.length < 2) return null;
+    double minX = double.infinity, minY = double.infinity;
+    double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+    for (var p in selectedPoints) {
+      minX = min(minX, p.x.value);
+      minY = min(minY, p.y.value);
+      maxX = max(maxX, p.x.value);
+      maxY = max(maxY, p.y.value);
+    }
+    return Rect.fromLTRB(minX, minY, maxX, maxY);
+  }
+
+  // True when a logical press should grab the whole multi-selection: either dead-on a
+  // selected dot, or anywhere inside the selection's bounding box (padded a little so
+  // a tight cluster is still grabbable). A press on a NON-selected dot is excluded by
+  // the caller, so grabbing an unselected vertex inside the box still drags that dot.
+  bool _isPressOnSelection(Offset logical) {
+    if (selectedPoints.length < 2) return false;
+    final scaledThreshold = _hitThreshold / canvasScale;
+    for (var p in selectedPoints) {
+      if ((Offset(p.x.value, p.y.value) - logical).distance <= scaledThreshold) {
+        return true;
+      }
+    }
+    final b = selectionBounds;
+    if (b == null) return false;
+    return b.inflate(scaledThreshold).contains(logical);
   }
 
   // --- Q-HOVER "ADD RESOLUTION" HELPERS ---
@@ -764,13 +843,13 @@ class CanvasController extends ChangeNotifier {
 
           if (clickedShape is CompassLine) {
             clickedShape.start.attach(newPoint); 
-            PointOnLineConstraint(point: newPoint, line: clickedShape);
+            engine.addPointOnLine(newPoint, clickedShape);
           } else if (clickedShape is CompassCircle) {
             clickedShape.center.attach(newPoint); 
-            PointOnCircleConstraint(point: newPoint, circle: clickedShape);
+            engine.addPointOnCircle(newPoint, clickedShape);
           } else if (clickedShape is CompassSpiral) {
             clickedShape.center.attach(newPoint); 
-            PointOnSpiralConstraint(point: newPoint, spiral: clickedShape);
+            engine.addPointOnSpiral(newPoint, clickedShape);
           } else if (clickedShape is CompassRectangle) {
             engine.convertRectangleToSpline(clickedShape);
             
@@ -856,6 +935,20 @@ class CanvasController extends ChangeNotifier {
 
     if (currentTool == CompassTool.select) {
       CompassPoint? hitPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
+
+      // --- NEW: defer presses that belong to an active 2+ selection. ---
+      // If a multi-selection is live and this press lands on it -- on a member dot, or
+      // anywhere inside the box but NOT on some OTHER (unselected) dot -- we do NOT
+      // mutate selection now. We stash it so a clean CLICK can be resolved in onTap
+      // (collapse / toggle). A DRAG is handled separately: onPanStart re-detects the
+      // group grab fresh, because onTapCancel will have cleared this stash before
+      // onPanStart runs (arena rejects tap -> onTapCancel -> then accepts pan).
+      final pressOnSelectionMember = hitPoint != null && selectedPoints.contains(hitPoint);
+      final pressInsideBox = hitPoint == null && _isPressOnSelection(logicalPosition);
+      if (selectedPoints.length >= 2 && (pressOnSelectionMember || pressInsideBox)) {
+        _pendingSelectPress = (hitPoint, isShiftPressed);
+        return;
+      }
 
       if (hitPoint != null) {
         if (isShiftPressed) {
@@ -1073,11 +1166,11 @@ class CanvasController extends ChangeNotifier {
       engine.addPoint(newPoint);
 
       if (closestShape is CompassLine) {
-        PointOnLineConstraint(point: newPoint, line: closestShape);
+        engine.addPointOnLine(newPoint, closestShape);
       } else if (closestShape is CompassCircle) {
-        PointOnCircleConstraint(point: newPoint, circle: closestShape);
+        engine.addPointOnCircle(newPoint, closestShape);
       } else if (closestShape is CompassSpiral) {
-        PointOnSpiralConstraint(point: newPoint, spiral: closestShape);
+        engine.addPointOnSpiral(newPoint, closestShape);
       } else if (closestShape is CompassRectangle) {
         engine.convertRectangleToSpline(closestShape);
         
@@ -1239,6 +1332,71 @@ class CanvasController extends ChangeNotifier {
     }
   }
 
+  // --- NEW: resolve a clean click (no drag) on a 2+ selection. ---
+  // Wired to GestureDetector.onTap in compass_canvas.dart. Fires only when a press
+  // did NOT become a pan, so by here we know the user clicked, not dragged. This is
+  // the half of the tap-vs-drag fix that lets a click still collapse/toggle the
+  // group while a drag (handled in onPanStart) moves it. Consumes _pendingSelectPress.
+  void onTap() {
+    final pending = _pendingSelectPress;
+    _pendingSelectPress = null;
+    if (pending == null) return;
+
+    final (hitPoint, wasShift) = pending;
+
+    if (hitPoint != null) {
+      if (wasShift) {
+        // Shift-click a member: toggle it out of the group.
+        if (selectedPoints.contains(hitPoint)) {
+          selectedPoints.remove(hitPoint);
+        } else {
+          selectedPoints.add(hitPoint);
+        }
+      } else {
+        // Plain click a member: collapse the whole group down to just that point,
+        // and select its owning shape (mirrors single-point click behavior).
+        selectedPoints = {hitPoint};
+
+        CompassShape? ownerShape;
+        for (var layer in engine.layers.reversed) {
+          if (!layer.isVisible || layer.isLocked) continue;
+          for (var shape in layer.shapes.reversed) {
+            if (!shape.isVisible) continue;
+            if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) {
+              ownerShape = shape; break;
+            } else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) {
+              ownerShape = shape; break;
+            } else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) {
+              ownerShape = shape; break;
+            } else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) {
+              ownerShape = shape; break;
+            } else if (shape is CompassSpiral && (shape.center == hitPoint || shape.startPoint == hitPoint)) {
+              ownerShape = shape; break;
+            }
+          }
+          if (ownerShape != null) break;
+        }
+        engine.selectShape(ownerShape);
+      }
+    } else {
+      // Plain click on empty space inside the box: clear the group (unless Shift,
+      // which is a no-op so a mis-click doesn't nuke a careful selection).
+      if (!wasShift) {
+        selectedPoints.clear();
+        engine.selectShape(null);
+      }
+    }
+    notifyListeners();
+  }
+
+  // --- tap aborted without becoming a pan -- drop any deferred selection press so
+  // it can't leak into the next gesture. This fires on the tap->pan transition too
+  // (arena rejects tap before accepting pan); that's fine, because the DRAG path in
+  // onPanStart re-detects the group grab fresh and does not rely on this stash. ---
+  void onTapCancel() {
+    _pendingSelectPress = null;
+  }
+
   void onPanStart(
     DragStartDetails details, 
     BuildContext context, 
@@ -1273,6 +1431,47 @@ class CanvasController extends ChangeNotifier {
         }
       }
       return; 
+    }
+
+    // --- Group drag of a 2+ highlighted selection. ---
+    // Detected FRESH here rather than via the _pendingSelectPress stash, because the
+    // stash is cleared by onTapCancel on the tap->pan transition (the arena rejects
+    // the tap recognizer -- firing onTapCancel -- BEFORE it accepts the pan and fires
+    // onPanStart), so by the time we reach here the stash is already gone. Re-deriving
+    // the hit and reading Shift LIVE also makes the plain-vs-strict choice independent
+    // of press/key ordering, which is what fixes "held Shift still moved the whole
+    // rigid body."
+    //
+    // A press counts as a group grab when it lands on a SELECTED member dot, or inside
+    // the selection box but not on ANY dot -- mirroring the onTapDown defer test, so
+    // grabbing an UNSELECTED vertex inside the box still drags just that one dot.
+    // Plain = moveBy (attached children ride along). Shift = raw coordinate add on
+    // ONLY the highlighted points, no propagation (the "move only the lasso" case).
+    // Guarded so it never steals R / Shift+R / A / F.
+    if (selectedPoints.length >= 2 &&
+        !isRPressed && !isShiftRPressed && !isAPressed && !isFPressed) {
+      final hp = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
+      final onMember = hp != null && selectedPoints.contains(hp);
+      final inBoxNoDot = hp == null && _isPressOnSelection(logicalPosition);
+
+      if (onMember || inBoxNoDot) {
+        _pendingSelectPress = null; // the drag owns this gesture; no click to resolve
+
+        final liveShift = HardwareKeyboard.instance.logicalKeysPressed
+                .contains(LogicalKeyboardKey.shiftLeft) ||
+            HardwareKeyboard.instance.logicalKeysPressed
+                .contains(LogicalKeyboardKey.shiftRight);
+
+        _transformingPoints = Set<CompassPoint>.from(selectedPoints);
+        for (var p in _transformingPoints) p.isBeingDragged = true;
+
+        if (liveShift) {
+          _isStrictPanningSelection = true;
+        } else {
+          _isPanningSelectedPoints = true;
+        }
+        return;
+      }
     }
 
     if (isShiftPressed && !isRPressed && !isShiftRPressed && !isAPressed) {
@@ -1448,6 +1647,16 @@ class CanvasController extends ChangeNotifier {
       return;
     }
 
+    // --- NEW: strict multi-selection move (Shift+drag) -- no propagation. ---
+    if (_isStrictPanningSelection) {
+      for (var p in _transformingPoints) {
+        p.x.value += dx;
+        p.y.value += dy;
+      }
+      _lastPanPosition = logicalPosition;
+      return;
+    }
+
     if (activeFilletNode != null && activeFilletSpline != null) {
       activeFilletRadius += dx;
       if (activeFilletRadius < 0.0) activeFilletRadius = 0.0;
@@ -1520,6 +1729,10 @@ class CanvasController extends ChangeNotifier {
       _rotatingHandleNodes.clear();
       for (var p in _transformingPoints) p.isBeingDragged = false;
       engine.finalizePointDrag(); 
+    } else if (_isStrictPanningSelection) {
+      _isStrictPanningSelection = false;
+      for (var p in _transformingPoints) p.isBeingDragged = false;
+      engine.finalizePointDrag();
     } else if (activeFilletNode != null && activeFilletSpline != null) {
       if (activeFilletRadius > 0.1) {
         engine.applyFilletToNode(activeFilletSpline!, activeFilletNode!, activeFilletRadius);
@@ -1555,6 +1768,9 @@ class CanvasController extends ChangeNotifier {
       _isPanningShape = false;
       _rotatingHandleNodes.clear();
       for (var p in _transformingPoints) p.isBeingDragged = false;
+    } else if (_isStrictPanningSelection) {
+      _isStrictPanningSelection = false;
+      for (var p in _transformingPoints) p.isBeingDragged = false;
     } else if (isDraggingSelectionBox) {
       isDraggingSelectionBox = false;
       selectionBoxStart = null;
@@ -1571,6 +1787,7 @@ class CanvasController extends ChangeNotifier {
     activeFilletSpline = null;
     activeFilletRadius = 0.0;
 
+    _pendingSelectPress = null;
     _lastPanPosition = null;
     _dragStartLogicalPosition = null;
   }
