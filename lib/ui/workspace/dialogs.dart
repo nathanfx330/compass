@@ -1,9 +1,9 @@
-// lib/ui/workspace/dialogs.dart
-
+// /lib/ui/workspace/dialogs.dart
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../../engine.dart';
+import '../../models/layer.dart';
 import '../../models/geometry/spline.dart';
 
 class CompassDialogs {
@@ -172,6 +172,186 @@ class CompassDialogs {
 
                       final file = File(filename);
                       await file.writeAsBytes(bytes);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Successfully saved to $filename!')),
+                        );
+                        Navigator.of(context).pop();
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Error saving file: $e')),
+                        );
+                      }
+                    }
+                  },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // Layer-to-object export. Scoped to ONE layer (the "what a shot turns into"
+  // unit), unlike the whole-document SVG/PNG exporters. Mirrors showExportPNG's
+  // structure -- StatefulBuilder + filename + controls -- with these specifics:
+  //
+  //   1. "Curve Resolution" is SAMPLING SPACING (logical px between polyline
+  //      samples along each contour), sense INVERTED from PNG's scale: a SMALLER
+  //      number = DENSER polygon = smoother result. So "Fine" is the small value.
+  //      It matters in BOTH modes -- in scanline it sets the band density; in grid
+  //      it sets how finely the boundary contour is sampled for cell clipping.
+  //   2. "Grid mesh" checkbox switches tessellation: off = scanline (robust,
+  //      follows the curve, many thin bands); on = uniform quad grid (clean
+  //      workable topology, blocky silhouette). When on, a cell-count slider sets
+  //      how many cells span the longest side (higher = finer + smoother edge).
+  //   3. toOBJ returns an EMPTY STRING when the layer has no fillable area; we
+  //      treat that like the PNG exporter's null and surface a snackbar instead of
+  //      writing a junk file.
+  static void showExportOBJ(BuildContext context, CompassEngine engine, CompassLayer layer) {
+    // Seed the filename from the layer name so the default is meaningful.
+    final safeName = layer.name.replaceAll(RegExp(r'\s+'), '_').replaceAll(RegExp(r'[^A-Za-z0-9_\-.]'), '');
+    final TextEditingController filenameController =
+        TextEditingController(text: '${safeName.isEmpty ? 'layer' : safeName}.obj');
+
+    // Sampling spacing in logical px. Smaller = denser polygon = smoother.
+    double samplingSpacing = 2.0;
+    // Grid mode + density. gridCount = cells across the longest bbox side.
+    bool gridMode = false;
+    double gridCount = 48;
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setLocalState) {
+            return AlertDialog(
+              title: Text('Export "${layer.name}" as OBJ'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Exports this layer\'s resolved boolean fill as a flat '
+                      'triangle mesh on the Z=0 plane (holes preserved).'),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: filenameController,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Filename',
+                      suffixText: '.obj',
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text('Curve Resolution'),
+                  const SizedBox(height: 8),
+                  SegmentedButton<double>(
+                    segments: const [
+                      ButtonSegment(value: 1.0, label: Text('Fine')),
+                      ButtonSegment(value: 2.0, label: Text('Medium')),
+                      ButtonSegment(value: 4.0, label: Text('Coarse')),
+                    ],
+                    selected: {samplingSpacing},
+                    onSelectionChanged: (newSelection) {
+                      setLocalState(() {
+                        samplingSpacing = newSelection.first;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  const Divider(height: 1),
+                  const SizedBox(height: 8),
+
+                  // --- Grid mesh toggle ---
+                  CheckboxListTile(
+                    value: gridMode,
+                    onChanged: (v) {
+                      setLocalState(() {
+                        gridMode = v ?? false;
+                      });
+                    },
+                    title: const Text('Grid mesh (clean quads)'),
+                    subtitle: const Text(
+                      'Uniform quad grid instead of scanline bands. Workable topology; '
+                      'edges step at the cell size.',
+                    ),
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    dense: true,
+                  ),
+
+                  // --- Cell-count slider, only shown when grid mode is on ---
+                  if (gridMode) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        const Text('Cells across'),
+                        const Spacer(),
+                        Text(
+                          '${gridCount.round()}',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                    Slider(
+                      value: gridCount,
+                      min: 16,
+                      max: 96,
+                      divisions: 10, // steps of 8
+                      label: '${gridCount.round()}',
+                      onChanged: (v) {
+                        setLocalState(() {
+                          gridCount = v;
+                        });
+                      },
+                    ),
+                    Text(
+                      'More cells = smoother silhouette, more quads.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ] else ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      'Finer = smoother curves, more triangles.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton.icon(
+                  icon: const Icon(Icons.save),
+                  label: const Text('Save File'),
+                  onPressed: () async {
+                    String filename = filenameController.text;
+                    if (!filename.endsWith('.obj')) {
+                      filename += '.obj';
+                    }
+                    try {
+                      final objData = engine.toOBJ(
+                        layer,
+                        samplingSpacing: samplingSpacing,
+                        gridMode: gridMode,
+                        gridCount: gridCount.round(),
+                      );
+                      if (objData.isEmpty) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Nothing to export — this layer has no filled area.')),
+                          );
+                        }
+                        return;
+                      }
+
+                      final file = File(filename);
+                      await file.writeAsString(objData);
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(content: Text('Successfully saved to $filename!')),

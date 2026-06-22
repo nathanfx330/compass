@@ -48,6 +48,7 @@ Compass is rapidly evolving into a desktop-grade parametric engine. It currently
 * **Bake Layers to Editable Splines:** Right-click any layer to *bake* its live Boolean result into clean, editable X-Splines on a fresh layer above—the source layer is preserved and simply switched off, never destroyed. Because the merged Boolean boundary exists only as an opaque rendered path, Compass samples that outline and reconstructs it with a **least-squares Bézier curve fit**: the output is sparse, smooth, and fully handle-editable, and—unlike a flattened polygon—stays mathematically smooth at *any* zoom level on the infinite canvas. Holes and disjoint islands are faithfully preserved by emitting outer contours as Union and inner contours as Subtract, so the baked silhouette is identical to the original. Only filled geometry is baked; pure strokes and construction guides are correctly ignored.
 * **Scaffolding Toggle:** Right-click the canvas (or use the View menu) to instantly hide all points, rules, and wireframes, leaving only your pure, clean vector geometry.
 * **Native `.compass` Serialization:** Save and Open projects directly to your local file system, preserving every mathematical constraint.
+* **3D Mesh Compiler (.obj):** Right-click any layer to export its fully resolved boolean fill as a 2D Wavefront `.obj` mesh. This bridges 2D design directly into 3D/game-engine pipelines (like Blender or Godot) where SVG masks typically fail to handle boolean holes. Features two custom tessellation engines: a **Scanline** algorithm that traces curves robustly for high-fidelity silhouettes, and a **Grid** mode that generates uniform quad-based topology perfect for subdivision and displacement.
 * **Vector & Raster Compilers:** Export pure XML-based SVG files—Compass calculates complex bounding boxes and utilizes native SVG `<mask...>` tags to perfectly replicate dynamic Boolean Subtractions for external image viewers. For pixel-based workflows, export crisp **PNG** images at 1x, 2x, or 4x resolution; the raster compiler re-renders the design offscreen from the same mathematical truth, emitting only the clean geometry on a transparent background—never the scaffolding.
 * **Desktop UI & Themes:** Complete with a native desktop Menu Bar, floating toolbars, contextual right-click menus, and dynamic Light/Dark modes.
 
@@ -59,7 +60,7 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 
 **Mouse Controls:**
 * **Left Click:** Select shapes, drag points. Drag the purple in/out dots of a Bézier vertex to sculpt its curve handles directly.
-* **Right Click:** Context menu for Boolean operations, baking a layer into editable X-Splines, converting geometry to splines, converting a vertex to or from Bézier handles, and hiding scaffolding.
+* **Right Click:** Context menu for Boolean operations, baking a layer into editable X-Splines, exporting to OBJ, converting geometry to splines, converting a vertex to or from Bézier handles, and hiding scaffolding.
 * **Middle Click & Drag:** Pan the infinite canvas.
 * **Scroll Wheel:** Zoom the infinite canvas.
 
@@ -69,7 +70,9 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 * **`Shift + R + Drag`**: Rotate an entire hierarchical rigid-body system around the targeted centroid.
 * **`Ctrl/Cmd + R + Drag`**: Rotate the explicit Bézier handles of a selected vertex (or group of vertices) around their local centroid without moving the underlying points. Automatically converts fluid Catmull-Rom nodes to explicit handles.
 * **`A + Drag`**: Target an X-Spline vertex and drag anywhere on the screen to fluidly adjust its Catmull-Rom curve tension.
+* **`W + Drag`**: Target an X-Spline vertex and drag to adjust its variable stroke width. Shift+Drag to symmetrically scale both sides.
 * **`F + Drag`**: With an X-Spline vertex selected, hold F and drag horizontally anywhere on the screen to dynamically apply a curve-aware fillet (corner rounding).
+* **`Z + Drag`**: Select multiple nodes, hold Z, and drag to Laplacian smooth them. Hold `Shift+Z` to smooth variable widths.
 * **`1 + Drag`**: Constrain a point or vertex drag to the **horizontal** axis. The Y coordinate is frozen at the drag's origin, so the point can only travel left and right.
 * **`2 + Drag`**: Constrain a point or vertex drag to the **vertical** axis. The X coordinate is frozen at the drag's origin, so the point can only travel up and down.
 * **`Ctrl/Cmd + Z`**: Undo mathematical and geometric state changes.
@@ -83,7 +86,7 @@ Compass uses a highly decoupled, feature-driven architecture to ensure scalable 
 * `constraints.dart`: The mathematical rule engine enforcing logic (e.g., Point-on-Circle, Distance-Radius).
 * `engine.dart`: The centralized state holder that cascades updates from the models to the UI.
 * `path_baker.dart`: Reconstructs editable Bézier geometry from opaque rendered Boolean paths via least-squares curve fitting—the math behind Layer Baking.
-* `io/`: Standalone serializers and compilers—the `.compass` project format, the SVG XML exporter, and the offscreen PNG raster exporter.
+* `io/`: Standalone serializers and compilers—the `.compass` project format, the SVG XML exporter, the offscreen PNG raster exporter, and the OBJ mesh tessellator.
 * `ui/`: Modular UI panels, dynamic HUDs, and the interactive `CustomPainter` canvas.
 
 ---

@@ -1,4 +1,4 @@
-// lib/engine.dart
+// /lib/engine.dart
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -23,6 +23,7 @@ import 'constraints.dart';
 import 'io/project_serializer.dart';
 import 'io/svg_exporter.dart';
 import 'io/png_exporter.dart';
+import 'io/obj_exporter.dart';
 
 // --- GEOMETRY HELPERS ---
 import 'path_baker.dart';
@@ -1332,5 +1333,29 @@ class CompassEngine extends ChangeNotifier {
 
   Future<Uint8List?> toPNG({double scale = 2.0}) {
     return PNGExporter.toPNG(this, scale: scale);
+  }
+
+  // Layer-to-object export: serializes ONE layer's resolved boolean fill to a
+  // Wavefront .obj mesh, flat on Z=0. Unlike toSVG/toPNG (whole-document), this is
+  // scoped to the chosen layer -- the "what a shot turns into" unit. Returns an
+  // empty string when the layer has no fillable area, so the caller can report
+  // "nothing to export" rather than writing a junk file.
+  //
+  // [gridMode] false (default) = scanline tessellation (robust, follows the curve,
+  //   many thin bands). true = uniform quad grid (clean workable topology, blocky
+  //   silhouette at cell resolution). [gridCount] (grid mode only) = number of
+  //   cells across the longest bounding-box side; higher = finer + smoother edge.
+  String toOBJ(
+    CompassLayer layer, {
+    double samplingSpacing = 2.0,
+    bool gridMode = false,
+    int gridCount = 48,
+  }) {
+    return OBJExporter.toOBJ(
+      layer,
+      samplingSpacing: samplingSpacing,
+      gridMode: gridMode,
+      gridCount: gridCount,
+    );
   }
 }

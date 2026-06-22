@@ -1,4 +1,4 @@
-// lib/ui/panels/layers_panel.dart
+// /lib/ui/panels/layers_panel.dart
 
 import 'package:flutter/material.dart';
 
@@ -10,6 +10,7 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/spline.dart';
+import '../workspace/dialogs.dart';
 
 class LayersPanel extends StatelessWidget {
   final CompassEngine engine;
@@ -128,8 +129,12 @@ class LayersPanel extends StatelessWidget {
                               engine.selectLayer(layer);
                             }
                           },
-                          // --- NEW: Right-click a layer to bake its boolean result
-                          // into editable X-Splines on a fresh layer above. ---
+                          // --- Right-click a layer for layer-level actions:
+                          //   * Bake to X-Spline -- flatten the boolean result into
+                          //     editable splines on a fresh layer above (in-app).
+                          //   * Export to OBJ -- write the resolved fill as a flat
+                          //     triangle mesh to disk (off-app, for Blender/Godot).
+                          // ---
                           onSecondaryTapDown: (details) async {
                             final selected = await showMenu<String>(
                               context: context,
@@ -150,27 +155,49 @@ class LayersPanel extends StatelessWidget {
                                     ],
                                   ),
                                 ),
+                                PopupMenuDivider(),
+                                PopupMenuItem<String>(
+                                  value: 'export_obj',
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.view_in_ar, size: 18),
+                                      SizedBox(width: 12),
+                                      Text('Export to OBJ…'),
+                                    ],
+                                  ),
+                                ),
                               ],
                             );
 
-                            if (selected != 'bake') return;
-
-                            // Guard the silent no-op: a layer made of only strokes,
-                            // `none`/construction shapes, or hidden shapes has no
-                            // fillable area, so bakeLayer would do nothing. Say so
-                            // rather than looking broken.
-                            if (layer.getLayerPath().computeMetrics().isEmpty) {
-                              if (context.mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Nothing to bake — this layer has no filled area.'),
-                                  ),
-                                );
+                            if (selected == 'bake') {
+                              // Guard the silent no-op: a layer made of only strokes,
+                              // `none`/construction shapes, or hidden shapes has no
+                              // fillable area, so bakeLayer would do nothing. Say so
+                              // rather than looking broken.
+                              if (layer.getLayerPath().computeMetrics().isEmpty) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Nothing to bake — this layer has no filled area.'),
+                                    ),
+                                  );
+                                }
+                                return;
                               }
-                              return;
-                            }
 
-                            engine.bakeLayer(layer);
+                              engine.bakeLayer(layer);
+                            } else if (selected == 'export_obj') {
+                              // No pre-guard here: the OBJ exporter reads the FILL
+                              // path (getLayerFillPath), which differs from the bake
+                              // guard's getLayerPath for closed width-splines. Rather
+                              // than risk blocking a valid export with the wrong path
+                              // check, we let showExportOBJ surface the empty case via
+                              // toOBJ's empty-string return -- the exporter stays the
+                              // single source of truth for "is there fillable area."
+                              if (context.mounted) {
+                                CompassDialogs.showExportOBJ(context, engine, layer);
+                              }
+                            }
                           },
                           child: Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
