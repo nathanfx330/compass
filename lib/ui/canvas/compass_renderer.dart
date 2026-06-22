@@ -240,6 +240,32 @@ class CompassRenderer extends CustomPainter {
                  final scaffoldPaint = Paint()..color = Colors.orangeAccent.withOpacity(0.3)..strokeWidth = 1.0 * invScale..style = PaintingStyle.stroke;
                  _drawDashedLine(canvas, Offset(cx, cy), Offset(shape.nodes.first.point.x.value, shape.nodes.first.point.y.value), scaffoldPaint, invScale);
                }
+
+               // --- NEW: DRAW VERTEX NUMBERS IF TOGGLED ---
+               if (engine.showNodeIndices) {
+                 for (int i = 0; i < shape.nodes.length; i++) {
+                   final pt = Offset(shape.nodes[i].point.x.value, shape.nodes[i].point.y.value);
+                   
+                   final textSpan = TextSpan(
+                     text: ' $i ',
+                     style: TextStyle(
+                       color: Colors.white,
+                       backgroundColor: Colors.blueAccent.withOpacity(0.8),
+                       fontSize: 14 * invScale,
+                       fontWeight: FontWeight.bold,
+                     ),
+                   );
+                   
+                   final textPainter = TextPainter(
+                     text: textSpan,
+                     textDirection: TextDirection.ltr,
+                   );
+                   textPainter.layout();
+                   
+                   // Draw offset slightly to the bottom right of the point so it doesn't obscure the handle
+                   textPainter.paint(canvas, pt + Offset(8 * invScale, 8 * invScale));
+                 }
+               }
              }
           }
         }

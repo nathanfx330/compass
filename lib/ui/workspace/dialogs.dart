@@ -591,4 +591,129 @@ class CompassDialogs {
       },
     );
   }
+
+  static void showStrokeProfileDialog(BuildContext context, CompassEngine engine, CompassXSpline spline) {
+    // Determine initial values based on current nodes
+    double initialStart = spline.nodes.isNotEmpty ? spline.nodes.first.widthLeft.value : 10.0;
+    double initialEnd = spline.nodes.isNotEmpty ? spline.nodes.last.widthLeft.value : 10.0;
+
+    final TextEditingController uniformController = TextEditingController(text: initialStart.toStringAsFixed(1));
+    final TextEditingController startTaperController = TextEditingController(text: initialStart.toStringAsFixed(1));
+    final TextEditingController endTaperController = TextEditingController(text: initialEnd.toStringAsFixed(1));
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setLocalState) {
+            return AlertDialog(
+              title: const Text('Area Stroke Profile'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // --- Show Vertex Numbers Toggle ---
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.blueAccent.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.blueAccent.withOpacity(0.3)),
+                      ),
+                      child: SwitchListTile(
+                        title: const Text('Show Vertex Numbers (0...N)'),
+                        subtitle: const Text('Displays indices on the canvas to help you identify start/end points.'),
+                        value: engine.showNodeIndices,
+                        onChanged: (val) {
+                          setLocalState(() {
+                            engine.toggleNodeIndices(val);
+                          });
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+
+                    // --- Uniform Width ---
+                    const Text('Uniform Width', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: uniformController,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Width (px)'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton.tonal(
+                          onPressed: () {
+                            final w = double.tryParse(uniformController.text);
+                            if (w != null && w >= 0) engine.applyUniformWidth(spline, w);
+                          },
+                          child: const Text('Apply Uniform'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+                    const Divider(),
+                    const SizedBox(height: 24),
+
+                    // --- Taper Width ---
+                    const Text('Taper Width', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const Text('Interpolates width from node 0 to the last node.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: startTaperController,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Start (Node 0)'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Icon(Icons.arrow_forward, color: Colors.grey),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextField(
+                            controller: endTaperController,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'End (Last Node)'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.tonal(
+                        onPressed: () {
+                          final startW = double.tryParse(startTaperController.text);
+                          final endW = double.tryParse(endTaperController.text);
+                          if (startW != null && endW != null && startW >= 0 && endW >= 0) {
+                            engine.applyTaperToSpline(spline, startW, endW);
+                          }
+                        },
+                        child: const Text('Apply Taper'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    engine.toggleNodeIndices(false); // Clean up when closing
+                    Navigator.of(context).pop();
+                  },
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
 }

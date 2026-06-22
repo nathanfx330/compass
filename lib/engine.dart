@@ -55,12 +55,50 @@ class CompassEngine extends ChangeNotifier {
   final List<String> _undoStack = [];
   bool _isRestoring = false; 
 
+  // --- NEW: Toggle to show vertex indices (0, 1, 2...) on the canvas ---
+  bool showNodeIndices = false;
+
   CompassEngine() {
     addLayer('Layer 1');
     _saveSnapshot(); 
   }
 
   CompassShape? get selectedShape => _selectedShape;
+
+  void toggleNodeIndices(bool show) {
+    showNodeIndices = show;
+    notifyListeners();
+  }
+
+  void applyUniformWidth(CompassXSpline spline, double width) {
+    for (var node in spline.nodes) {
+      node.widthLeft.value = width;
+      node.widthRight.value = width;
+    }
+    _saveSnapshot();
+    notifyListeners();
+  }
+
+  void applyTaperToSpline(CompassXSpline spline, double startWidth, double endWidth) {
+    final int n = spline.nodes.length;
+    if (n == 0) return;
+
+    if (n == 1) {
+      spline.nodes[0].widthLeft.value = startWidth;
+      spline.nodes[0].widthRight.value = startWidth;
+    } else {
+      for (int i = 0; i < n; i++) {
+        // Calculate parametric 't' (0.0 at start, 1.0 at end)
+        double t = i / (n - 1);
+        double currentWidth = startWidth + (endWidth - startWidth) * t;
+        
+        spline.nodes[i].widthLeft.value = currentWidth;
+        spline.nodes[i].widthRight.value = currentWidth;
+      }
+    }
+    _saveSnapshot();
+    notifyListeners();
+  }
 
   void _saveSnapshot() {
     if (_isRestoring) return;

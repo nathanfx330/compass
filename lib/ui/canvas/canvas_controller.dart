@@ -1,4 +1,4 @@
-// lib/ui/canvas/canvas_controller.dart
+// /lib/ui/canvas/canvas_controller.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
