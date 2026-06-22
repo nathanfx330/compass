@@ -704,7 +704,11 @@ class CompassEngine extends ChangeNotifier {
   // choose the split parameter.
   void _spliceNodeIntoSpline(CompassXSpline spline, CompassPoint p, int index, double t) {
     final node = CompassSplineNode(point: p);
+    
+    // Ensure all properties trigger a canvas repaint when modified
     node.tension.addListener(notifyListeners);
+    node.widthLeft.addListener(notifyListeners);
+    node.widthRight.addListener(notifyListeners);
 
     // De Casteljau exact subdivision for Bezier curves
     if ((index > 0 && index < spline.nodes.length) || (spline.isClosed && index == spline.nodes.length)) {
@@ -713,6 +717,10 @@ class CompassEngine extends ChangeNotifier {
 
       final prevNode = spline.nodes[prevIdx];
       final nextNode = spline.nodes[nextIdx];
+
+      // Interpolate the variable width using parameter `t` to prevent the stroke from pinching to 0
+      node.widthLeft.value = prevNode.widthLeft.value * (1.0 - t) + nextNode.widthLeft.value * t;
+      node.widthRight.value = prevNode.widthRight.value * (1.0 - t) + nextNode.widthRight.value * t;
 
       final controls = spline.getEvaluatedControls();
       final hOut = controls[prevIdx].$1;
