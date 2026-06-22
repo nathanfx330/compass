@@ -170,11 +170,12 @@ class LayersPanel extends StatelessWidget {
                             );
 
                             if (selected == 'bake') {
-                              // Guard the silent no-op: a layer made of only strokes,
-                              // `none`/construction shapes, or hidden shapes has no
-                              // fillable area, so bakeLayer would do nothing. Say so
-                              // rather than looking broken.
-                              if (layer.getLayerPath().computeMetrics().isEmpty) {
+                              // Guard the silent no-op: check BOTH the standard fill 
+                              // and the area stroke path to ensure geometry exists.
+                              final fillEmpty = layer.getLayerFillPath().computeMetrics().isEmpty;
+                              final areaEmpty = layer.getLayerStrokeAreaPath().computeMetrics().isEmpty;
+
+                              if (fillEmpty && areaEmpty) {
                                 if (context.mounted) {
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     const SnackBar(

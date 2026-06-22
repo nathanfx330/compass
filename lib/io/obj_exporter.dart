@@ -78,7 +78,17 @@ class OBJExporter {
     bool gridMode = false,
     int gridCount = 48,
   }) {
-    final path = layer.getLayerFillPath();
+    // Combine the standard fill with the variable-width ribbons
+    Path path = layer.getLayerFillPath();
+    final areaPath = layer.getLayerStrokeAreaPath();
+    
+    if (areaPath.computeMetrics().isNotEmpty) {
+      if (path.computeMetrics().isEmpty) {
+        path = areaPath;
+      } else {
+        path = Path.combine(PathOperation.union, path, areaPath);
+      }
+    }
 
     // ---- 1. Flatten every contour to a polygon, keeping its own winding. ----
     final contours = <List<Offset>>[];

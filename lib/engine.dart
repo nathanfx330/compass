@@ -1,4 +1,5 @@
-// /lib/engine.dart
+// lib/engine.dart
+
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -558,7 +559,18 @@ class CompassEngine extends ChangeNotifier {
     final int srcIndex = layers.indexOf(layer);
     if (srcIndex == -1) return;
 
-    final masterPath = layer.getLayerPath();
+    // Combine the standard boolean fill with the variable-width ribbons
+    Path masterPath = layer.getLayerFillPath();
+    final areaPath = layer.getLayerStrokeAreaPath();
+    
+    if (areaPath.computeMetrics().isNotEmpty) {
+      if (masterPath.computeMetrics().isEmpty) {
+        masterPath = areaPath;
+      } else {
+        masterPath = Path.combine(PathOperation.union, masterPath, areaPath);
+      }
+    }
+
     final contours = PathBaker.bake(masterPath);
     if (contours.isEmpty) return;
 
