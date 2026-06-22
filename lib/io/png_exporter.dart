@@ -11,6 +11,7 @@ import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/rectangle.dart';
+import '../models/geometry/spline.dart'; // <--- NEW: Needed to calculate area-stroke bounds
 
 /// Rasterizes the pure artwork (no scaffolding) to a PNG by re-rendering the
 /// model offscreen. Mirrors SVGExporter's philosophy: export the *design*, not
@@ -36,8 +37,8 @@ class PNGExporter {
       if (p.y.value > maxY) maxY = p.y.value;
     }
 
-    // Circles and rectangles can extend past their defining points, so widen
-    // the box to include their full visual extent (matches SVGExporter).
+    // Circles, rectangles, and thick Area Strokes extend past their defining points.
+    // Widen the bounding box to include their full visual extent.
     for (var layer in engine.layers) {
       for (var shape in layer.shapes) {
         if (!shape.isVisible) continue;
@@ -58,6 +59,14 @@ class PNGExporter {
           if (minYP < minY) minY = minYP;
           if (maxXP > maxX) maxX = maxXP;
           if (maxYP > maxY) maxY = maxYP;
+        } else if (shape is CompassXSpline) {
+          if (shape.hasWidthProfile) {
+            final bounds = shape.getPath().getBounds();
+            if (bounds.left < minX) minX = bounds.left;
+            if (bounds.top < minY) minY = bounds.top;
+            if (bounds.right > maxX) maxX = bounds.right;
+            if (bounds.bottom > maxY) maxY = bounds.bottom;
+          }
         }
       }
     }
@@ -97,16 +106,23 @@ class PNGExporter {
     for (var layer in engine.layers) {
       if (!layer.isVisible) continue;
 
+      // fillPath includes closed width-spline centerlines (matching the renderer's
+      // step 1a); layerPath excludes width splines and remains the target of the
+      // uniform stroke (1b), so no hairline runs along a ribbon's inner edge.
+      final fillPath = layer.getLayerFillPath();
       final layerPath = layer.getLayerPath();
+      final strokeAreaPath = layer.getLayerStrokeAreaPath();
 
+      // 1a. Fill Standard Geometry (sourced from the fill path)
       if (layer.color != Colors.transparent) {
         final fillPaint = Paint()
           ..color = layer.color
           ..style = PaintingStyle.fill
           ..isAntiAlias = true;
-        canvas.drawPath(layerPath, fillPaint);
+        canvas.drawPath(fillPath, fillPaint);
       }
 
+      // 1b. Stroke Standard Geometry (Uniform outlines)
       if (layer.strokeColor != Colors.transparent && layer.strokeWidth > 0) {
         final strokePaint = Paint()
           ..color = layer.strokeColor
@@ -114,6 +130,15 @@ class PNGExporter {
           ..style = PaintingStyle.stroke
           ..isAntiAlias = true;
         canvas.drawPath(layerPath, strokePaint);
+      }
+
+      // 1c. Area Strokes (Variable-Width Geometry)
+      if (layer.strokeColor != Colors.transparent) {
+        final areaStrokePaint = Paint()
+          ..color = layer.strokeColor
+          ..style = PaintingStyle.fill
+          ..isAntiAlias = true;
+        canvas.drawPath(strokeAreaPath, areaStrokePaint);
       }
 
       // getLayerPath() skips shapes with no fill area or operation == none, so

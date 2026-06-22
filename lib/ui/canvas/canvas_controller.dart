@@ -1,4 +1,4 @@
-// ./lib/ui/canvas/canvas_controller.dart
+// lib/ui/canvas/canvas_controller.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -57,11 +57,34 @@ class CanvasController extends ChangeNotifier {
   CompassXSpline? activeFilletSpline;
   double activeFilletRadius = 0.0;
 
+  // --- NEW: Width Tool (W Key) State ---
+  bool isWPressed = false;
+  CompassSplineNode? activeWidthNode;
+  bool activeWidthIsLeft = false;
+
+  // First-pull-from-zero unification: when a width drag begins on a node whose
+  // both sides are ~zero, that drag pushes BOTH sides out together (you tune each
+  // side independently only after a stroke exists). Reset on drag end/cancel and
+  // on W release.
+  bool _isUnifiedWidthPull = false;
+
+  // --- NEW: Smooth Tool (Z key) State ---
+  // Lasso-then-smooth: the user selects nodes first, then holds Z and drags; the
+  // drag distance is the smoothing amount (same magnitude-from-drag pattern as A
+  // and F). isZPressed is exposed for the HUD overlay. The originals maps are
+  // captured ONCE at pan-start so smoothNodes can recompute from the starting
+  // state every tick (reversible within the drag, no compounding).
+  bool isZPressed = false;
+  bool isShiftZPressed = false; // <--- NEW: Track Shift+Z separately for widths
+  
+  bool _isSmoothing = false;
+  final Map<CompassPoint, Offset> _smoothOrigPositions = {};
+  final Map<CompassSplineNode, (Offset?, Offset?)> _smoothOrigHandles = {};
+
+  bool _isWidthSmoothing = false; // <--- NEW: Width smoothing state
+  final Map<CompassSplineNode, (double, double)> _smoothOrigWidths = {}; // <--- NEW: Capture starting widths
+
   // --- Q-hover "Add Resolution" preview state ---
-  // When Q is held in select mode over a spline segment (and not over a point), we
-  // preview a vertex at the segment's parametric center. A click commits it on press.
-  // addVertexPreviewPos is the exact on-curve point (t=0.5 on the segment's cubic),
-  // so it lands precisely where subdivideSplineSegment will place the new vertex.
   CompassXSpline? addVertexSpline;
   int addVertexSegmentIndex = -1;
   Offset? addVertexPreviewPos;
@@ -72,6 +95,7 @@ class CanvasController extends ChangeNotifier {
 
   bool isRPressed = false;
   bool isShiftRPressed = false;
+  bool isCtrlRPressed = false; // <--- NEW: Ctrl+R / Cmd+R State
   bool isShiftPressed = false;
   bool isAPressed = false; 
   bool isFPressed = false; 
@@ -85,22 +109,12 @@ class CanvasController extends ChangeNotifier {
 
   // --- PRIVATE INTERNAL STATE ---
   Offset? _lastPanPosition; 
-  Offset? _dragStartLogicalPosition; // --- NEW: Anchors the axis locks perfectly
+  Offset? _dragStartLogicalPosition; 
   Set<CompassPoint> _initialSelectionBeforeBox = {};
   bool _isPanningSelectedPoints = false;
 
-  // --- NEW: strict (no-propagation) move of just the highlighted multi-selection ---
-  // Reuses _transformingPoints, but unlike _isPanningSelectedPoints it adds the delta
-  // straight to each point's coords (no moveBy walk), so attached children are NOT
-  // dragged along. This is the Shift+drag "move only them" path for a 2+ selection.
   bool _isStrictPanningSelection = false;
 
-  // --- NEW: deferred press on a 2+ selection (hitPoint, wasShiftHeld) ---
-  // onTapDown stashes any press that lands on the active multi-selection here instead
-  // of mutating selection on pointer-down. A clean CLICK consumes it in onTap. (The
-  // DRAG path no longer reads this -- onPanStart re-detects the group grab fresh,
-  // because onTapCancel clears this stash on the tap->pan transition before onPanStart
-  // runs. See onPanStart's group-drag block.)
   (CompassPoint?, bool)? _pendingSelectPress;
   
   CompassXSpline? _activeSpline;
@@ -132,6 +146,20 @@ class CanvasController extends ChangeNotifier {
     final isA = keys.contains(LogicalKeyboardKey.keyA);
     final isF = keys.contains(LogicalKeyboardKey.keyF); 
     final isQ = keys.contains(LogicalKeyboardKey.keyQ); 
+    final isW = keys.contains(LogicalKeyboardKey.keyW); 
+
+    // Handle Ctrl/Cmd for the new rotation mode
+    final isCtrl = keys.contains(LogicalKeyboardKey.controlLeft) || keys.contains(LogicalKeyboardKey.controlRight);
+    final isMeta = keys.contains(LogicalKeyboardKey.metaLeft) || keys.contains(LogicalKeyboardKey.metaRight);
+    final isCtrlOrMeta = isCtrl || isMeta;
+
+    // Plain Z only -- exclude Ctrl/Cmd so the smooth modifier never collides with
+    // Ctrl+Z / Cmd+Z undo (handled at the workspace level via CallbackShortcuts).
+    final isZ = keys.contains(LogicalKeyboardKey.keyZ) && !isCtrlOrMeta;
+
+    final isShiftZ = isZ && isShift;
+    final isPlainZ = isZ && !isShift;
+
     final is1 = keys.contains(LogicalKeyboardKey.digit1) || keys.contains(LogicalKeyboardKey.numpad1);
     final is2 = keys.contains(LogicalKeyboardKey.digit2) || keys.contains(LogicalKeyboardKey.numpad2);
 
@@ -145,25 +173,33 @@ class CanvasController extends ChangeNotifier {
        notifyListeners();
     }
 
-    final bool shiftR = isR && isShift;
-    final bool justR = isR && !isShift;
-    final bool justShift = isShift && !isR && !isA && !isF; 
+    final bool shiftR = isR && isShift && !isCtrlOrMeta;
+    final bool ctrlR = isR && isCtrlOrMeta && !isShift;
+    final bool justR = isR && !isShift && !isCtrlOrMeta;
+    
+    // Don't trigger standard shift-pan if we are using the Width tool symmetrically, or smoothing widths
+    final bool justShift = isShift && !isR && !isA && !isF && !isW && !isZ; 
 
-    if (isRPressed != justR || isShiftRPressed != shiftR || isShiftPressed != justShift || 
-        isAPressed != isA || isFPressed != isF || isQPressed != isQ ||
+    if (isRPressed != justR || isShiftRPressed != shiftR || isCtrlRPressed != ctrlR || isShiftPressed != justShift || 
+        isAPressed != isA || isFPressed != isF || isQPressed != isQ || isWPressed != isW ||
+        isZPressed != isPlainZ || isShiftZPressed != isShiftZ ||
         is1Pressed != is1 || is2Pressed != is2) {
       
       isRPressed = justR;
       isShiftRPressed = shiftR;
+      isCtrlRPressed = ctrlR;
       isShiftPressed = justShift;
       isAPressed = isA; 
       isFPressed = isF; 
       isQPressed = isQ; 
+      isWPressed = isW; 
+      isZPressed = isPlainZ; 
+      isShiftZPressed = isShiftZ;
       is1Pressed = is1; 
       is2Pressed = is2; 
 
-      if (justR || shiftR) {
-        _setupRotationState(hierarchy: shiftR);
+      if (justR || shiftR || ctrlR) {
+        _setupRotationState(hierarchy: shiftR, handlesOnly: ctrlR);
       } else {
         rotationPivotOffset = null;
         _transformingPoints.clear();
@@ -176,14 +212,17 @@ class CanvasController extends ChangeNotifier {
         targetTensionNode = null;
       }
 
-      // If F is released while actively dragging a fillet, abort the fillet
       if (!isF && activeFilletNode != null) {
         activeFilletNode = null;
         activeFilletSpline = null;
         activeFilletRadius = 0.0;
       }
 
-      // Refresh the Q-hover add-vertex preview against the new modifier state
+      if (!isW) {
+        activeWidthNode = null;
+        _isUnifiedWidthPull = false;
+      }
+
       if (hoverPosition != null) {
         _updateAddVertexHover(hoverPosition!);
       } else {
@@ -330,8 +369,6 @@ class CanvasController extends ChangeNotifier {
     return expanded;
   }
 
-  // Centroid of an arbitrary point set -- the pivot for isolated multi-selection
-  // rotation. Plain mean of member coords; matches how the shape centroid reads.
   Offset? _centroidOfPoints(Set<CompassPoint> pts) {
     if (pts.isEmpty) return null;
     double cx = 0, cy = 0;
@@ -342,15 +379,11 @@ class CanvasController extends ChangeNotifier {
     return Offset(cx / pts.length, cy / pts.length);
   }
 
-  void _setupRotationState({required bool hierarchy}) {
-    // --- NEW: a 2+ highlighted selection is its own rigid body. ---
-    // Plain R: rotate ONLY the highlighted points about their own centroid -- fully
-    // isolated, nothing else on the canvas moves. Shift+R: rotate those points plus
-    // everything rigidly bound to them (attachment graph + shape cohesion), still
-    // pivoting on the selection centroid, preserving the local-vs-hierarchy split.
+  // --- NEW: handlesOnly prevents the greedy fallback to the entire selected shape
+  void _setupRotationState({required bool hierarchy, bool handlesOnly = false}) {
     if (selectedPoints.length >= 2) {
       rotationPivotOffset = _centroidOfPoints(selectedPoints);
-      if (hierarchy) {
+      if (hierarchy && !handlesOnly) {
         Set<CompassPoint> body = {};
         for (var p in selectedPoints) {
           body.addAll(_getRigidBody(null, p, true));
@@ -363,9 +396,22 @@ class CanvasController extends ChangeNotifier {
     }
 
     CompassPoint? explicitPoint = selectedPoints.isNotEmpty ? selectedPoints.first : hoveredPoint;
-    CompassShape? selShape = engine.selectedShape;
+    
+    // If we only want handles, isolate the explicit point and DO NOT check the shape!
+    if (handlesOnly) {
+      if (explicitPoint != null) {
+        rotationPivotOffset = Offset(explicitPoint.x.value, explicitPoint.y.value);
+        _transformingPoints = {explicitPoint};
+      } else {
+        rotationPivotOffset = null;
+        _transformingPoints = {};
+      }
+      return;
+    }
 
+    CompassShape? selShape = engine.selectedShape;
     Offset? pivotOffset;
+
     if (hierarchy) {
       if (selShape != null) {
         pivotOffset = _getShapeCentroid(selShape);
@@ -398,9 +444,90 @@ class CanvasController extends ChangeNotifier {
     );
   }
 
-  // --- NEW: bounding box of the current multi-selection (logical space) ---
-  // Null unless 2+ points are selected. Used both to draw the box (renderer reads it)
-  // and to decide whether an empty-space press lands "inside the group" -> group drag.
+  bool _nodeHasZeroWidth(CompassSplineNode node) {
+    return node.widthLeft.value < 0.01 && node.widthRight.value < 0.01;
+  }
+
+  Offset? _getWidthHandlePosition(CompassSplineNode node, bool isLeft, CompassXSpline spline) {
+    int i = spline.nodes.indexOf(node);
+    if (i == -1) return null;
+    
+    final controls = spline.getEvaluatedControls();
+    int n = spline.nodes.length;
+    
+    final pt = Offset(node.point.x.value, node.point.y.value);
+    Offset prevPt = spline.isClosed ? Offset(spline.nodes[(i - 1 + n) % n].point.x.value, spline.nodes[(i - 1 + n) % n].point.y.value) : (i > 0 ? Offset(spline.nodes[i - 1].point.x.value, spline.nodes[i - 1].point.y.value) : pt);
+    Offset nextPt = spline.isClosed ? Offset(spline.nodes[(i + 1) % n].point.x.value, spline.nodes[(i + 1) % n].point.y.value) : (i < n - 1 ? Offset(spline.nodes[i + 1].point.x.value, spline.nodes[i + 1].point.y.value) : pt);
+
+    final hOut = controls[i].$1;
+    final hIn = controls[i].$2;
+
+    Offset vOut = hOut;
+    if (vOut.distance < 0.001) vOut = nextPt - pt;
+    Offset vIn = Offset(-hIn.dx, -hIn.dy);
+    if (vIn.distance < 0.001) vIn = pt - prevPt;
+
+    if (!spline.isClosed) {
+      if (i == 0) vIn = vOut;
+      if (i == n - 1) vOut = vIn;
+    }
+
+    double lenOut = vOut.distance;
+    double lenIn = vIn.distance;
+    Offset tOut = lenOut > 0.001 ? vOut / lenOut : Offset.zero;
+    Offset tIn = lenIn > 0.001 ? vIn / lenIn : Offset.zero;
+
+    Offset T = tIn + tOut;
+    double lenT = T.distance;
+    if (lenT > 0.001) T = T / lenT; else T = tOut;
+    
+    Offset N = Offset(-T.dy, T.dx);
+    
+    if (isLeft) {
+      return pt + N * node.widthLeft.value;
+    } else {
+      return pt - N * node.widthRight.value;
+    }
+  }
+
+  void _captureSmoothOriginals() {
+    _smoothOrigPositions.clear();
+    _smoothOrigHandles.clear();
+
+    for (var p in selectedPoints) {
+      _smoothOrigPositions[p] = Offset(p.x.value, p.y.value);
+    }
+
+    for (var layer in engine.layers) {
+      if (layer.isLocked) continue;
+      for (var shape in layer.shapes) {
+        if (shape is! CompassXSpline) continue;
+        List<(Offset, Offset)>? controls;
+        for (int i = 0; i < shape.nodes.length; i++) {
+          final node = shape.nodes[i];
+          if (!selectedPoints.contains(node.point)) continue;
+          controls ??= shape.getEvaluatedControls();
+          // controls[i] is (out, in); store as (in, out) to match smoothNodes.
+          _smoothOrigHandles[node] = (controls[i].$2, controls[i].$1);
+        }
+      }
+    }
+  }
+
+  void _captureSmoothOriginalWidths() {
+    _smoothOrigWidths.clear();
+    for (var layer in engine.layers) {
+      if (layer.isLocked) continue;
+      for (var shape in layer.shapes) {
+        if (shape is! CompassXSpline) continue;
+        for (var node in shape.nodes) {
+          if (!selectedPoints.contains(node.point)) continue;
+          _smoothOrigWidths[node] = (node.widthLeft.value, node.widthRight.value);
+        }
+      }
+    }
+  }
+
   Rect? get selectionBounds {
     if (selectedPoints.length < 2) return null;
     double minX = double.infinity, minY = double.infinity;
@@ -414,10 +541,6 @@ class CanvasController extends ChangeNotifier {
     return Rect.fromLTRB(minX, minY, maxX, maxY);
   }
 
-  // True when a logical press should grab the whole multi-selection: either dead-on a
-  // selected dot, or anywhere inside the selection's bounding box (padded a little so
-  // a tight cluster is still grabbable). A press on a NON-selected dot is excluded by
-  // the caller, so grabbing an unselected vertex inside the box still drags that dot.
   bool _isPressOnSelection(Offset logical) {
     if (selectedPoints.length < 2) return false;
     final scaledThreshold = _hitThreshold / canvasScale;
@@ -567,8 +690,8 @@ class CanvasController extends ChangeNotifier {
 
     _updateAddVertexHover(logicalPosition);
     
-    if ((isRPressed || isShiftRPressed) && rotationPivotOffset == null && hoveredPoint != null) {
-      _setupRotationState(hierarchy: isShiftRPressed);
+    if ((isRPressed || isShiftRPressed || isCtrlRPressed) && rotationPivotOffset == null && hoveredPoint != null) {
+      _setupRotationState(hierarchy: isShiftRPressed, handlesOnly: isCtrlRPressed);
     }
 
     if (isAPressed && targetTensionNode == null && hoveredPoint != null) {
@@ -590,8 +713,8 @@ class CanvasController extends ChangeNotifier {
     BuildContext context, 
     bool showScaffolding, 
     VoidCallback onToggleScaffolding,
-    bool showHandles, // <--- NEW ARGUMENT
-    VoidCallback onToggleHandles // <--- NEW ARGUMENT
+    bool showHandles,
+    VoidCallback onToggleHandles
   ) async {
     final RenderBox renderBox = context.findRenderObject() as RenderBox;
     final localPosition = renderBox.globalToLocal(details.globalPosition);
@@ -720,7 +843,7 @@ class CanvasController extends ChangeNotifier {
         if (clickedNode != null && (clickedNode.handleIn != null || clickedNode.handleOut != null)) {
           pointMenuItems.add(const PopupMenuItem(
             value: 'reset_handles',
-            child: Text('Reset Handles (Make Fluid)'), // <--- REVERTED BACK
+            child: Text('Reset Handles (Make Fluid)'), 
           ));
         } else {
           pointMenuItems.add(const PopupMenuItem(
@@ -887,7 +1010,6 @@ class CanvasController extends ChangeNotifier {
             value: 'toggle_scaffolding', 
             child: Text(showScaffolding ? 'Hide Scaffolding (Clean View)' : 'Show Scaffolding'),
           ), 
-          // <--- NEW: Right click empty canvas to toggle handles
           PopupMenuItem(
             value: 'toggle_handles', 
             child: Text(showHandles ? 'Hide Handles' : 'Show Handles'),
@@ -936,13 +1058,6 @@ class CanvasController extends ChangeNotifier {
     if (currentTool == CompassTool.select) {
       CompassPoint? hitPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
 
-      // --- NEW: defer presses that belong to an active 2+ selection. ---
-      // If a multi-selection is live and this press lands on it -- on a member dot, or
-      // anywhere inside the box but NOT on some OTHER (unselected) dot -- we do NOT
-      // mutate selection now. We stash it so a clean CLICK can be resolved in onTap
-      // (collapse / toggle). A DRAG is handled separately: onPanStart re-detects the
-      // group grab fresh, because onTapCancel will have cleared this stash before
-      // onPanStart runs (arena rejects tap -> onTapCancel -> then accepts pan).
       final pressOnSelectionMember = hitPoint != null && selectedPoints.contains(hitPoint);
       final pressInsideBox = hitPoint == null && _isPressOnSelection(logicalPosition);
       if (selectedPoints.length >= 2 && (pressOnSelectionMember || pressInsideBox)) {
@@ -1332,11 +1447,6 @@ class CanvasController extends ChangeNotifier {
     }
   }
 
-  // --- NEW: resolve a clean click (no drag) on a 2+ selection. ---
-  // Wired to GestureDetector.onTap in compass_canvas.dart. Fires only when a press
-  // did NOT become a pan, so by here we know the user clicked, not dragged. This is
-  // the half of the tap-vs-drag fix that lets a click still collapse/toggle the
-  // group while a drag (handled in onPanStart) moves it. Consumes _pendingSelectPress.
   void onTap() {
     final pending = _pendingSelectPress;
     _pendingSelectPress = null;
@@ -1346,15 +1456,12 @@ class CanvasController extends ChangeNotifier {
 
     if (hitPoint != null) {
       if (wasShift) {
-        // Shift-click a member: toggle it out of the group.
         if (selectedPoints.contains(hitPoint)) {
           selectedPoints.remove(hitPoint);
         } else {
           selectedPoints.add(hitPoint);
         }
       } else {
-        // Plain click a member: collapse the whole group down to just that point,
-        // and select its owning shape (mirrors single-point click behavior).
         selectedPoints = {hitPoint};
 
         CompassShape? ownerShape;
@@ -1379,8 +1486,6 @@ class CanvasController extends ChangeNotifier {
         engine.selectShape(ownerShape);
       }
     } else {
-      // Plain click on empty space inside the box: clear the group (unless Shift,
-      // which is a no-op so a mis-click doesn't nuke a careful selection).
       if (!wasShift) {
         selectedPoints.clear();
         engine.selectShape(null);
@@ -1389,10 +1494,6 @@ class CanvasController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // --- tap aborted without becoming a pan -- drop any deferred selection press so
-  // it can't leak into the next gesture. This fires on the tap->pan transition too
-  // (arena rejects tap before accepting pan); that's fine, because the DRAG path in
-  // onPanStart re-detects the group grab fresh and does not rely on this stash. ---
   void onTapCancel() {
     _pendingSelectPress = null;
   }
@@ -1401,7 +1502,7 @@ class CanvasController extends ChangeNotifier {
     DragStartDetails details, 
     BuildContext context, 
     bool showScaffolding,
-    bool showHandles // <--- NEW ARGUMENT
+    bool showHandles
   ) {
     if (currentTool != CompassTool.select) return;
 
@@ -1410,21 +1511,34 @@ class CanvasController extends ChangeNotifier {
     final logicalPosition = _getLogicalPosition(localPosition);
 
     _lastPanPosition = logicalPosition;
-    _dragStartLogicalPosition = logicalPosition; // <-- NEW: Anchors the 1/2 axis lock orthogonal lines
+    _dragStartLogicalPosition = logicalPosition;
     hoverPosition = logicalPosition; 
     notifyListeners();
 
-    if ((isRPressed || isShiftRPressed) && rotationPivotOffset != null) {
+    if ((isRPressed || isShiftRPressed || isCtrlRPressed) && rotationPivotOffset != null) {
       _isRotating = true;
-      for (var p in _transformingPoints) p.isBeingDragged = true;
+      
+      // Only mark points as dragged if we are moving them physically (Not Ctrl+R)
+      if (!isCtrlRPressed) {
+        for (var p in _transformingPoints) p.isBeingDragged = true;
+      }
 
       _rotatingHandleNodes.clear();
       for (var layer in engine.layers) {
+        if (layer.isLocked) continue; // Don't modify locked handles
         for (var shape in layer.shapes) {
           if (shape is CompassXSpline) {
             for (var node in shape.nodes) {
-              if ((node.handleIn != null || node.handleOut != null) && _transformingPoints.contains(node.point)) {
-                _rotatingHandleNodes.add(node);
+              if (_transformingPoints.contains(node.point)) {
+                
+                // If Ctrl+R, we MUST ensure they are explicit handles first so they don't snap back
+                if (isCtrlRPressed && node.handleIn == null && node.handleOut == null) {
+                  engine.convertPointToBezier(node.point);
+                }
+
+                if (node.handleIn != null || node.handleOut != null) {
+                  _rotatingHandleNodes.add(node);
+                }
               }
             }
           }
@@ -1433,29 +1547,33 @@ class CanvasController extends ChangeNotifier {
       return; 
     }
 
-    // --- Group drag of a 2+ highlighted selection. ---
-    // Detected FRESH here rather than via the _pendingSelectPress stash, because the
-    // stash is cleared by onTapCancel on the tap->pan transition (the arena rejects
-    // the tap recognizer -- firing onTapCancel -- BEFORE it accepts the pan and fires
-    // onPanStart), so by the time we reach here the stash is already gone. Re-deriving
-    // the hit and reading Shift LIVE also makes the plain-vs-strict choice independent
-    // of press/key ordering, which is what fixes "held Shift still moved the whole
-    // rigid body."
-    //
-    // A press counts as a group grab when it lands on a SELECTED member dot, or inside
-    // the selection box but not on ANY dot -- mirroring the onTapDown defer test, so
-    // grabbing an UNSELECTED vertex inside the box still drags just that one dot.
-    // Plain = moveBy (attached children ride along). Shift = raw coordinate add on
-    // ONLY the highlighted points, no propagation (the "move only the lasso" case).
-    // Guarded so it never steals R / Shift+R / A / F.
+    // --- SHIFT+Z SMOOTH: Width smoothing ---
+    if (isShiftZPressed && selectedPoints.isNotEmpty) {
+      _captureSmoothOriginalWidths();
+      _isWidthSmoothing = true;
+      notifyListeners();
+      return;
+    }
+
+    // --- Z SMOOTH: lasso-then-smooth. The nodes are already selected; capture
+    // their starting state and let the drag distance drive the amount. Placed
+    // BEFORE the multi-point pan path so Z+drag smooths the selection rather than
+    // translating it. No-op (falls through to normal drag) if nothing is selected.
+    if (isZPressed && selectedPoints.isNotEmpty) {
+      _captureSmoothOriginals();
+      _isSmoothing = true;
+      notifyListeners();
+      return;
+    }
+
     if (selectedPoints.length >= 2 &&
-        !isRPressed && !isShiftRPressed && !isAPressed && !isFPressed) {
+        !isRPressed && !isShiftRPressed && !isCtrlRPressed && !isAPressed && !isFPressed && !isWPressed && !isZPressed && !isShiftZPressed) {
       final hp = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
       final onMember = hp != null && selectedPoints.contains(hp);
       final inBoxNoDot = hp == null && _isPressOnSelection(logicalPosition);
 
       if (onMember || inBoxNoDot) {
-        _pendingSelectPress = null; // the drag owns this gesture; no click to resolve
+        _pendingSelectPress = null; 
 
         final liveShift = HardwareKeyboard.instance.logicalKeysPressed
                 .contains(LogicalKeyboardKey.shiftLeft) ||
@@ -1474,7 +1592,7 @@ class CanvasController extends ChangeNotifier {
       }
     }
 
-    if (isShiftPressed && !isRPressed && !isShiftRPressed && !isAPressed) {
+    if (isShiftPressed && !isRPressed && !isShiftRPressed && !isCtrlRPressed && !isAPressed && !isWPressed && !isShiftZPressed) {
       if (hoveredPoint != null || engine.selectedShape != null) {
         _transformingPoints = _getRigidBody(engine.selectedShape, hoveredPoint, true);
         if (_transformingPoints.isNotEmpty) {
@@ -1514,9 +1632,50 @@ class CanvasController extends ChangeNotifier {
     }
 
     final selForHandles = engine.selectedShape;
-    if (selForHandles is CompassXSpline &&
-        showScaffolding && showHandles && // <--- NEW CHECK
-        !isShiftPressed && !isRPressed && !isShiftRPressed && !isAPressed && !isFPressed) {
+    
+    // --- Width Handle Hit Testing (W Key) ---
+    if (selForHandles is CompassXSpline && showScaffolding && showHandles && isWPressed) {
+      final handleThreshold = 24.0 / canvasScale;
+      for (var node in selForHandles.nodes) {
+        // Zero-width node: both handles sit on the node center, so there is no
+        // meaningful side to grab yet. A press near the center begins a UNIFIED
+        // pull -- the first drag pushes both sides out together. Side independence
+        // only comes into play once a stroke exists.
+        if (_nodeHasZeroWidth(node)) {
+          final center = Offset(node.point.x.value, node.point.y.value);
+          if ((logicalPosition - center).distance < handleThreshold) {
+            activeWidthNode = node;
+            activeWidthIsLeft = true; // arbitrary; a unified pull ignores side
+            _isUnifiedWidthPull = true;
+            notifyListeners();
+            return;
+          }
+          continue; // don't fall through to per-side tests for a zero-width node
+        }
+
+        final leftDot = _getWidthHandlePosition(node, true, selForHandles);
+        if (leftDot != null && (logicalPosition - leftDot).distance < handleThreshold) {
+          activeWidthNode = node;
+          activeWidthIsLeft = true;
+          _isUnifiedWidthPull = false;
+          notifyListeners();
+          return;
+        }
+
+        final rightDot = _getWidthHandlePosition(node, false, selForHandles);
+        if (rightDot != null && (logicalPosition - rightDot).distance < handleThreshold) {
+          activeWidthNode = node;
+          activeWidthIsLeft = false;
+          _isUnifiedWidthPull = false;
+          notifyListeners();
+          return;
+        }
+      }
+    }
+
+    // Explicit Bezier Handles hit test
+    if (selForHandles is CompassXSpline && showScaffolding && showHandles && 
+        !isShiftPressed && !isRPressed && !isShiftRPressed && !isCtrlRPressed && !isAPressed && !isFPressed && !isWPressed && !isZPressed && !isShiftZPressed) {
       final handleThreshold = 24.0 / canvasScale;
       for (var node in selForHandles.nodes) {
         if (node.handleIn == null && node.handleOut == null) continue;
@@ -1541,9 +1700,8 @@ class CanvasController extends ChangeNotifier {
       }
     }
 
-    final selectedShape = engine.selectedShape;
-    if (selectedShape is CompassXSpline && showScaffolding) {
-       for (var node in selectedShape.nodes) {
+    if (selForHandles is CompassXSpline && showScaffolding) {
+       for (var node in selForHandles.nodes) {
           final pt = Offset(node.point.x.value, node.point.y.value);
           final handlePt = pt + const Offset(20, -30); 
           final dist = (logicalPosition - handlePt).distance;
@@ -1584,7 +1742,6 @@ class CanvasController extends ChangeNotifier {
     final localPosition = renderBox.globalToLocal(details.globalPosition);
     Offset logicalPosition = _getLogicalPosition(localPosition);
 
-    // --- NEW: Axis Locking Logic (Snaps to original drag start coordinate) ---
     if (_dragStartLogicalPosition != null) {
       if (is1Pressed) {
         logicalPosition = Offset(logicalPosition.dx, _dragStartLogicalPosition!.dy);
@@ -1609,14 +1766,18 @@ class CanvasController extends ChangeNotifier {
       final cosA = cos(deltaAngle);
       final sinA = sin(deltaAngle);
 
-      for (var child in _transformingPoints) {
-        final pointDx = child.x.value - pivot.dx;
-        final pointDy = child.y.value - pivot.dy;
-        
-        child.x.value = pivot.dx + (pointDx * cosA - pointDy * sinA);
-        child.y.value = pivot.dy + (pointDx * sinA + pointDy * cosA);
+      // Only rotate underlying points if NOT holding Ctrl
+      if (!isCtrlRPressed) {
+        for (var child in _transformingPoints) {
+          final pointDx = child.x.value - pivot.dx;
+          final pointDy = child.y.value - pivot.dy;
+          
+          child.x.value = pivot.dx + (pointDx * cosA - pointDy * sinA);
+          child.y.value = pivot.dy + (pointDx * sinA + pointDy * cosA);
+        }
       }
 
+      // Always rotate the handles
       for (var node in _rotatingHandleNodes) {
         if (node.handleIn != null) {
           final h = node.handleIn!;
@@ -1647,7 +1808,6 @@ class CanvasController extends ChangeNotifier {
       return;
     }
 
-    // --- NEW: strict multi-selection move (Shift+drag) -- no propagation. ---
     if (_isStrictPanningSelection) {
       for (var p in _transformingPoints) {
         p.x.value += dx;
@@ -1657,9 +1817,72 @@ class CanvasController extends ChangeNotifier {
       return;
     }
 
+    // --- SHIFT+Z SMOOTH drag: Width smoothing ---
+    if (_isWidthSmoothing) {
+      final start = _dragStartLogicalPosition ?? _lastPanPosition!;
+      final dist = (logicalPosition - start).distance;
+      final amount = (dist * 0.01).clamp(0.0, 1.0);
+      engine.smoothWidths(
+        selectedPoints,
+        _smoothOrigWidths,
+        amount,
+      );
+      _lastPanPosition = logicalPosition;
+      return;
+    }
+
+    // --- Z SMOOTH drag: drag distance from the drag origin is the amount. ---
+    // Always recomputed from the captured originals (not from live geometry), so
+    // dragging back un-smooths cleanly. 0.01 -> ~100 logical px for a full smooth,
+    // matching the tension drag's feel; tune here if it's too sensitive.
+    if (_isSmoothing) {
+      final start = _dragStartLogicalPosition ?? _lastPanPosition!;
+      final dist = (logicalPosition - start).distance;
+      final amount = (dist * 0.01).clamp(0.0, 1.0);
+      engine.smoothNodes(
+        selectedPoints,
+        _smoothOrigPositions,
+        _smoothOrigHandles,
+        amount,
+      );
+      _lastPanPosition = logicalPosition;
+      return;
+    }
+
     if (activeFilletNode != null && activeFilletSpline != null) {
       activeFilletRadius += dx;
       if (activeFilletRadius < 0.0) activeFilletRadius = 0.0;
+      _lastPanPosition = logicalPosition;
+      return;
+    }
+
+    // --- Width Drag Logic ---
+    if (activeWidthNode != null) {
+      final node = activeWidthNode!;
+      final pt = Offset(node.point.x.value, node.point.y.value);
+      final newWidth = (logicalPosition - pt).distance;
+
+      // Shift re-links the two sides symmetrically. NOTE: the gated isShiftPressed
+      // is forced false whenever W is held (see _handleKeyEvent, where justShift
+      // excludes W to suppress shift-pan), so it can't be used here -- we read the
+      // live hardware Shift state directly, the same pattern onPanStart uses.
+      final liveShift = HardwareKeyboard.instance.logicalKeysPressed
+              .contains(LogicalKeyboardKey.shiftLeft) ||
+          HardwareKeyboard.instance.logicalKeysPressed
+              .contains(LogicalKeyboardKey.shiftRight);
+
+      // Unified first-pull (both sides ~zero at grab) OR an explicit Shift re-link
+      // drives both sides together; otherwise each handle is independent.
+      if (_isUnifiedWidthPull || liveShift) {
+        node.widthLeft.value = newWidth;
+        node.widthRight.value = newWidth;
+      } else {
+        if (activeWidthIsLeft) {
+          node.widthLeft.value = newWidth;
+        } else {
+          node.widthRight.value = newWidth;
+        }
+      }
       _lastPanPosition = logicalPosition;
       return;
     }
@@ -1733,6 +1956,17 @@ class CanvasController extends ChangeNotifier {
       _isStrictPanningSelection = false;
       for (var p in _transformingPoints) p.isBeingDragged = false;
       engine.finalizePointDrag();
+    } else if (_isWidthSmoothing) {
+      _isWidthSmoothing = false;
+      _smoothOrigWidths.clear();
+      engine.finalizePointDrag();
+      notifyListeners();
+    } else if (_isSmoothing) {
+      _isSmoothing = false;
+      _smoothOrigPositions.clear();
+      _smoothOrigHandles.clear();
+      engine.finalizePointDrag();
+      notifyListeners();
     } else if (activeFilletNode != null && activeFilletSpline != null) {
       if (activeFilletRadius > 0.1) {
         engine.applyFilletToNode(activeFilletSpline!, activeFilletNode!, activeFilletRadius);
@@ -1740,6 +1974,11 @@ class CanvasController extends ChangeNotifier {
       activeFilletNode = null;
       activeFilletSpline = null;
       activeFilletRadius = 0.0;
+      notifyListeners();
+    } else if (activeWidthNode != null) { 
+      activeWidthNode = null;
+      _isUnifiedWidthPull = false;
+      engine.finalizePointDrag();
       notifyListeners();
     } else if (activeHandleNode != null) {
       activeHandleNode = null;
@@ -1781,7 +2020,16 @@ class CanvasController extends ChangeNotifier {
       for (var p in _transformingPoints) p.isBeingDragged = false;
     }
     activeHandleNode = null;
+    activeWidthNode = null; 
+    _isUnifiedWidthPull = false;
     _activeTensionNode = null;
+
+    _isWidthSmoothing = false;
+    _smoothOrigWidths.clear();
+
+    _isSmoothing = false;
+    _smoothOrigPositions.clear();
+    _smoothOrigHandles.clear();
     
     activeFilletNode = null;
     activeFilletSpline = null;

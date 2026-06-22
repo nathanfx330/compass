@@ -31,12 +31,21 @@ class CompassSplineNode {
   Offset? handleIn;
   Offset? handleOut;
 
+  // Variable width properties for calligraphy / first-class area strokes.
+  // Represents the physical distance pushed out along the normal vector.
+  final ValueNotifier<double> widthLeft;
+  final ValueNotifier<double> widthRight;
+
   CompassSplineNode({
     required this.point, 
     double tension = 1.0, 
     this.handleIn, 
     this.handleOut,
-  }) : tension = ValueNotifier(tension);
+    double widthLeft = 0.0,
+    double widthRight = 0.0,
+  }) : tension = ValueNotifier(tension),
+       widthLeft = ValueNotifier(widthLeft),
+       widthRight = ValueNotifier(widthRight);
 }
 
 class CompassXSpline extends CompassShape {
@@ -51,6 +60,9 @@ class CompassXSpline extends CompassShape {
   void addNode(CompassSplineNode node) {
     nodes.add(node);
   }
+
+  // Returns true if any node has a width applied, triggering the area-stroke math
+  bool get hasWidthProfile => nodes.any((n) => n.widthLeft.value > 0.01 || n.widthRight.value > 0.01);
 
   FilletData? computeFillet(CompassSplineNode node, double cutDistance) {
     int index = nodes.indexOf(node);
@@ -151,7 +163,6 @@ class CompassXSpline extends CompassShape {
     );
   }
 
-  // Returns the (insertIndex, t_value) for the closest segment
   (int, double) getInsertDetailsForOffset(Offset tap) {
     if (nodes.length < 2) return (nodes.length, 0.0);
     
@@ -165,12 +176,10 @@ class CompassXSpline extends CompassShape {
       final p1 = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
       final p2 = Offset(nodes[(i + 1) % nodes.length].point.x.value, nodes[(i + 1) % nodes.length].point.y.value);
       
-      // Calculate point-to-line-segment distance to find the closest segment mathematically
       final l2 = (p2.dx - p1.dx) * (p2.dx - p1.dx) + (p2.dy - p1.dy) * (p2.dy - p1.dy);
       double t = 0;
       if (l2 != 0) {
         t = ((tap.dx - p1.dx) * (p2.dx - p1.dx) + (tap.dy - p1.dy) * (p2.dy - p1.dy)) / l2;
-        // Clamp t slightly inward to prevent degenerate stacking exactly on top of an existing node
         t = max(0.001, min(0.999, t)); 
       }
       final proj = Offset(p1.dx + t * (p2.dx - p1.dx), p1.dy + t * (p2.dy - p1.dy));
@@ -184,12 +193,10 @@ class CompassXSpline extends CompassShape {
       }
     }
     
-    // If closed and best index wrapped to 0, it means insert at the very end of the list
     if (bestIndex == 0 && isClosed) return (nodes.length, bestT);
     return (bestIndex, bestT);
   }
 
-  // Resolves the actual control point offsets (handleOut, handleIn) for every node.
   List<(Offset, Offset)> getEvaluatedControls() {
     List<(Offset, Offset)> controls = [];
     for (int i = 0; i < nodes.length; i++) {
@@ -199,7 +206,6 @@ class CompassXSpline extends CompassShape {
       Offset? hOut = current.handleOut;
       Offset? hIn = current.handleIn;
 
-      // If both explicit handles exist, we just scale them by the tension multiplier
       if (hOut != null && hIn != null) {
         controls.add((hOut * tension, hIn * tension));
         continue;
@@ -219,7 +225,6 @@ class CompassXSpline extends CompassShape {
           : Offset(nodes[i + 1].point.x.value, nodes[i + 1].point.y.value);
       }
       
-      // Standard Catmull-Rom tangent factor is 0.5. We scale it by our tension slider.
       final dx = (next.dx - prev.dx) * 0.5 * tension;
       final dy = (next.dy - prev.dy) * 0.5 * tension;
       
@@ -236,9 +241,6 @@ class CompassXSpline extends CompassShape {
         tangent = Offset(dx, dy);
       }
 
-      // Fallback: Catmull-Rom tangent converted to cubic Bezier handle length (/ 3).
-      // Since explicit handles scale above by tension, we also scale the explicit fallback here
-      // if one handle is explicit and the other is Catmull-Rom (rare but possible).
       controls.add((
         hOut != null ? hOut * tension : Offset(tangent.dx / 3, tangent.dy / 3),
         hIn != null ? hIn * tension : Offset(-tangent.dx / 3, -tangent.dy / 3)
@@ -247,79 +249,289 @@ class CompassXSpline extends CompassShape {
     return controls;
   }
 
-  @override
-  Path getPath() {
+  // --- Exposed to the renderer so we don't have to duplicate normal math ---
+  List<Offset> calculateNormals(List<(Offset, Offset)> controls) {
+    final normals = <Offset>[];
+    int n = nodes.length;
+    for (int i = 0; i < n; i++) {
+      final pt = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
+      
+      Offset prevPt;
+      if (isClosed) {
+        prevPt = Offset(nodes[(i - 1 + n) % n].point.x.value, nodes[(i - 1 + n) % n].point.y.value);
+      } else {
+        prevPt = i > 0 ? Offset(nodes[i - 1].point.x.value, nodes[i - 1].point.y.value) : pt;
+      }
+
+      Offset nextPt;
+      if (isClosed) {
+        nextPt = Offset(nodes[(i + 1) % n].point.x.value, nodes[(i + 1) % n].point.y.value);
+      } else {
+        nextPt = i < n - 1 ? Offset(nodes[i + 1].point.x.value, nodes[i + 1].point.y.value) : pt;
+      }
+
+      final hOut = controls[i].$1;
+      final hIn = controls[i].$2;
+
+      Offset vOut = hOut;
+      if (vOut.distance < 0.001) vOut = nextPt - pt;
+      
+      Offset vIn = Offset(-hIn.dx, -hIn.dy);
+      if (vIn.distance < 0.001) vIn = pt - prevPt;
+
+      if (!isClosed) {
+        if (i == 0) vIn = vOut;
+        if (i == n - 1) vOut = vIn;
+      }
+
+      double lenOut = vOut.distance;
+      double lenIn = vIn.distance;
+      
+      Offset tOut = lenOut > 0.001 ? vOut / lenOut : Offset.zero;
+      Offset tIn = lenIn > 0.001 ? vIn / lenIn : Offset.zero;
+
+      Offset T = tIn + tOut;
+      double lenT = T.distance;
+      if (lenT > 0.001) {
+        T = T / lenT;
+      } else {
+        T = tOut; 
+      }
+
+      // The Normal is exactly 90 degrees Counter-Clockwise from the Tangent
+      normals.add(Offset(-T.dy, T.dx));
+    }
+    return normals;
+  }
+
+  // --- Extracts pure 1D center spine ---
+  Path getCenterPath() {
     final path = Path();
-    // Setting fillType to evenOdd explicitly solves winding rule issues 
-    // when nodes loop tightly or are used in boolean subtractions
-    path.fillType = PathFillType.evenOdd;
-    
     if (nodes.isEmpty) return path;
-    
+
+    final controls = getEvaluatedControls();
+    int n = nodes.length;
+    int loopCount = isClosed ? n : n - 1;
+
     final startOffset = Offset(nodes[0].point.x.value, nodes[0].point.y.value);
     path.moveTo(startOffset.dx, startOffset.dy);
 
-    if (nodes.length == 1) return path;
-
-    final controls = getEvaluatedControls();
-    int loopCount = isClosed ? nodes.length : nodes.length - 1;
+    if (n == 1) return path;
 
     for (int i = 0; i < loopCount; i++) {
       final pt0 = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
-      final pt1 = Offset(nodes[(i + 1) % nodes.length].point.x.value, nodes[(i + 1) % nodes.length].point.y.value);
+      final pt1 = Offset(nodes[(i + 1) % n].point.x.value, nodes[(i + 1) % n].point.y.value);
       
       final hOut = controls[i].$1;
-      final hIn = controls[(i + 1) % nodes.length].$2;
+      final hIn = controls[(i + 1) % n].$2;
 
-      // Convert offsets to absolute standard Cubic Bezier control points
       final cp1 = pt0 + hOut;
       final cp2 = pt1 + hIn;
 
       path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, pt1.dx, pt1.dy);
     }
     
+    if (isClosed) path.close();
+    return path;
+  }
+
+  @override
+  Path getPath() {
+    if (!hasWidthProfile) {
+      return getCenterPath()..fillType = PathFillType.evenOdd;
+    }
+
+    final path = Path();
+    path.fillType = PathFillType.evenOdd;
+    
+    final controls = getEvaluatedControls();
+    final normals = calculateNormals(controls);
+    int n = nodes.length;
+    int loopCount = isClosed ? n : n - 1;
+
+    final leftPts = <Offset>[];
+    final rightPts = <Offset>[];
+
+    for (int i = 0; i < n; i++) {
+      final pt = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
+      final N = normals[i];
+      leftPts.add(pt + N * nodes[i].widthLeft.value);
+      rightPts.add(pt - N * nodes[i].widthRight.value);
+    }
+
+    // Trace the Forward (Left) Boundary
+    path.moveTo(leftPts[0].dx, leftPts[0].dy);
+    for (int i = 0; i < loopCount; i++) {
+      final nextIdx = (i + 1) % n;
+      final cp1 = leftPts[i] + controls[i].$1;
+      final cp2 = leftPts[nextIdx] + controls[nextIdx].$2;
+      path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, leftPts[nextIdx].dx, leftPts[nextIdx].dy);
+    }
+
     if (isClosed) {
-      path.close();
+      path.close(); // Close the Outer/Left contour
+      
+      // Trace the Inner/Right Boundary BACKWARD so boolean union honors the hole
+      path.moveTo(rightPts[0].dx, rightPts[0].dy);
+      for (int i = n; i > 0; i--) {
+        final currIdx = i % n;
+        final prevIdx = i - 1;
+        final cp1 = rightPts[currIdx] + controls[currIdx].$2;
+        final cp2 = rightPts[prevIdx] + controls[prevIdx].$1;
+        path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, rightPts[prevIdx].dx, rightPts[prevIdx].dy);
+      }
+      path.close(); 
+    } else {
+      // Forward Endcap: Perfect semi-circle from Left -> Right
+      final endRadius = (leftPts[n - 1] - rightPts[n - 1]).distance / 2.0;
+      if (endRadius > 0.001) {
+        path.arcToPoint(
+          rightPts[n - 1],
+          radius: Radius.circular(endRadius),
+          clockwise: false, // <--- FIXED: Outward bulge in Flutter space
+        );
+      } else {
+        path.lineTo(rightPts[n - 1].dx, rightPts[n - 1].dy);
+      }
+      
+      // Trace Backward (Right) Boundary
+      for (int i = n - 1; i > 0; i--) {
+        final prevIdx = i - 1;
+        final cp1 = rightPts[i] + controls[i].$2; 
+        final cp2 = rightPts[prevIdx] + controls[prevIdx].$1; 
+        path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, rightPts[prevIdx].dx, rightPts[prevIdx].dy);
+      }
+      
+      // Start Endcap: Perfect semi-circle from Right -> Left
+      final startRadius = (rightPts[0] - leftPts[0]).distance / 2.0;
+      if (startRadius > 0.001) {
+        path.arcToPoint(
+          leftPts[0],
+          radius: Radius.circular(startRadius),
+          clockwise: false, // <--- FIXED: Outward bulge in Flutter space
+        );
+      } else {
+        path.lineTo(leftPts[0].dx, leftPts[0].dy);
+      }
+      path.close(); 
     }
 
     return path;
   }
 
-  // Generates pure mathematically exact SVG bezier paths (no flattened lines)
-  String getSvgPathData() {
+  // --- Centerline as an SVG path string (the 1D spine, ignoring any width
+  // profile) --- the string counterpart of getCenterPath(), exactly as
+  // getSvgPathData()'s non-width branch always emitted. Pulled out so the SVG
+  // exporter can draw a CLOSED width spline's inner fill from its centerline
+  // while getSvgPathData() still returns the ribbon outline for the same shape.
+  // For a non-width spline this IS the whole shape, so getSvgPathData() below
+  // simply forwards to it -- one home for the centerline math.
+  String getCenterSvgPathData() {
     if (nodes.isEmpty) return "";
     final buffer = StringBuffer();
+    final controls = getEvaluatedControls();
+    int n = nodes.length;
+    int loopCount = isClosed ? n : n - 1;
+
     final start = Offset(nodes[0].point.x.value, nodes[0].point.y.value);
-    
-    // Explicitly add an SVG fill-rule hint so external editors (like Illustrator) parse booleans correctly
     buffer.write('M ${start.dx} ${start.dy} ');
 
     if (nodes.length > 1) {
-      final controls = getEvaluatedControls();
-      int loopCount = isClosed ? nodes.length : nodes.length - 1;
-
       for (int i = 0; i < loopCount; i++) {
         final pt0 = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
-        final pt1 = Offset(nodes[(i + 1) % nodes.length].point.x.value, nodes[(i + 1) % nodes.length].point.y.value);
-        
+        final pt1 = Offset(nodes[(i + 1) % n].point.x.value, nodes[(i + 1) % n].point.y.value);
+
         final cp1 = pt0 + controls[i].$1;
-        final cp2 = pt1 + controls[(i + 1) % nodes.length].$2;
+        final cp2 = pt1 + controls[(i + 1) % n].$2;
 
         buffer.write('C ${cp1.dx} ${cp1.dy}, ${cp2.dx} ${cp2.dy}, ${pt1.dx} ${pt1.dy} ');
       }
     }
+    if (isClosed) buffer.write('Z');
+    return buffer.toString().trim();
+  }
+
+  String getSvgPathData() {
+    if (nodes.isEmpty) return "";
+
+    // No width profile -> the shape IS its centerline.
+    if (!hasWidthProfile) {
+      return getCenterSvgPathData();
+    }
+
+    final buffer = StringBuffer();
+    final controls = getEvaluatedControls();
+    int n = nodes.length;
+    int loopCount = isClosed ? n : n - 1;
+
+    // SVG Outline Export
+    final normals = calculateNormals(controls);
+    final leftPts = <Offset>[];
+    final rightPts = <Offset>[];
+
+    for (int i = 0; i < n; i++) {
+      final pt = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
+      final N = normals[i];
+      leftPts.add(pt + N * nodes[i].widthLeft.value);
+      rightPts.add(pt - N * nodes[i].widthRight.value);
+    }
+
+    // Left Boundary
+    buffer.write('M ${leftPts[0].dx} ${leftPts[0].dy} ');
+    for (int i = 0; i < loopCount; i++) {
+      final nextIdx = (i + 1) % n;
+      final cp1 = leftPts[i] + controls[i].$1;
+      final cp2 = leftPts[nextIdx] + controls[nextIdx].$2;
+      buffer.write('C ${cp1.dx} ${cp1.dy}, ${cp2.dx} ${cp2.dy}, ${leftPts[nextIdx].dx} ${leftPts[nextIdx].dy} ');
+    }
 
     if (isClosed) {
+      buffer.write('Z ');
+      // Trace Inner/Right Boundary BACKWARD so boolean union honors the hole
+      buffer.write('M ${rightPts[0].dx} ${rightPts[0].dy} ');
+      for (int i = n; i > 0; i--) {
+        final currIdx = i % n;
+        final prevIdx = i - 1;
+        final cp1 = rightPts[currIdx] + controls[currIdx].$2;
+        final cp2 = rightPts[prevIdx] + controls[prevIdx].$1;
+        buffer.write('C ${cp1.dx} ${cp1.dy}, ${cp2.dx} ${cp2.dy}, ${rightPts[prevIdx].dx} ${rightPts[prevIdx].dy} ');
+      }
+      buffer.write('Z');
+    } else {
+      // Forward Semicircle Endcap (SVG 'A' command, counter-clockwise 0 0 0)
+      final endRadius = (leftPts[n - 1] - rightPts[n - 1]).distance / 2.0;
+      if (endRadius > 0.001) {
+        buffer.write('A $endRadius $endRadius 0 0 0 ${rightPts[n - 1].dx} ${rightPts[n - 1].dy} ');
+      } else {
+        buffer.write('L ${rightPts[n - 1].dx} ${rightPts[n - 1].dy} ');
+      }
+
+      for (int i = n - 1; i > 0; i--) {
+        final prevIdx = i - 1;
+        final cp1 = rightPts[i] + controls[i].$2; 
+        final cp2 = rightPts[prevIdx] + controls[prevIdx].$1; 
+        buffer.write('C ${cp1.dx} ${cp1.dy}, ${cp2.dx} ${cp2.dy}, ${rightPts[prevIdx].dx} ${rightPts[prevIdx].dy} ');
+      }
+
+      // Start Semicircle Endcap (counter-clockwise 0 0 0)
+      final startRadius = (rightPts[0] - leftPts[0]).distance / 2.0;
+      if (startRadius > 0.001) {
+        buffer.write('A $startRadius $startRadius 0 0 0 ${leftPts[0].dx} ${leftPts[0].dy} ');
+      } else {
+        buffer.write('L ${leftPts[0].dx} ${leftPts[0].dy} ');
+      }
       buffer.write('Z');
     }
+
     return buffer.toString().trim();
   }
 
   @override
   void paint(Canvas canvas, Paint paint, {bool showScaffolding = false, bool isSelected = false}) {
+    // Note: If drawing wireframe/scaffolding, draw the true mathematical area so
+    // the user can see exactly what boolean geometry is being output.
     canvas.drawPath(getPath(), paint);
 
-    // Draw the Mocha-style Tension Handles
     if (showScaffolding && isSelected) {
       final scaffoldLinePaint = Paint()
         ..color = Colors.blue.withOpacity(0.5)
@@ -337,14 +549,11 @@ class CompassXSpline extends CompassShape {
         // Fixed length visual slider projecting up and right
         final handlePt = pt + const Offset(20, -30);
         
-        // The tether line
         canvas.drawLine(pt, handlePt, scaffoldLinePaint);
         
-        // The interactive tension box
         final handleRect = Rect.fromCenter(center: handlePt, width: 10, height: 10);
         canvas.drawRect(handleRect, boxStrokePaint);
         
-        // Fill indicates how "smooth" (tension) it is
         final tensionFillPaint = Paint()
           ..color = Colors.blue.withOpacity(node.tension.value.clamp(0.0, 1.0))
           ..style = PaintingStyle.fill;

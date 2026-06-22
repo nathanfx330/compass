@@ -960,6 +960,229 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
+  // --- SMOOTH (Z key) ----------------------------------------------------------
+  //
+  // Pure function of CAPTURED ORIGINAL STATE + a 0..1 `amount`. The controller
+  // captures every selected node's starting position and starting handles ONCE on
+  // pan-start, then calls this each drag tick with a fresh `amount` derived from
+  // drag distance. Because we always recompute FROM the originals (never from the
+  // live, already-smoothed state), holding still doesn't drift and dragging back
+  // un-smooths cleanly -- same reversible-within-the-drag contract as the width and
+  // handle drags. The caller owns the undo snapshot at drag release
+  // (finalizePointDrag); this method only mutates + notifies.
+  //
+  // Two behaviors, decided PER OWNING SPLINE by how many of that spline's nodes are
+  // in the selection:
+  //
+  //   MANY (>= 2 nodes of one spline selected) -> Laplacian relax, points only.
+  //     Each selected interior node moves a fraction `amount` toward the midpoint
+  //     of its two neighbors (computed from ORIGINAL positions, so the smudge is a
+  //     simultaneous single step, not an order-dependent cascade). Endpoints of an
+  //     OPEN spline have a single neighbor and are PINNED -- relaxing them would
+  //     just shorten the curve, not smooth it. Explicit handles are left untouched.
+  //
+  //   ONE (exactly 1 node of a spline selected) -> bake-to-Bezier + align (case b).
+  //     The node is converted to explicit handles (same tension-stripping path as
+  //     convertPointToBezier), then BOTH handles rotate toward colinear with the
+  //     prev->next chord, blended by `amount`. Magnitudes are preserved, so the
+  //     curve doesn't collapse; at amount=1 the node is a clean tangent pass-through
+  //     aligned to its neighbors. A lone node with no two neighbors (e.g. an open
+  //     spline endpoint) has no defined chord, so it is skipped.
+  //
+  // `originalPositions` and `originalHandles` are keyed by identity. A node absent
+  // from the maps (shouldn't happen for a captured selection) is skipped safely.
+  void smoothNodes(
+    Set<CompassPoint> selected,
+    Map<CompassPoint, Offset> originalPositions,
+    Map<CompassSplineNode, (Offset?, Offset?)> originalHandles,
+    double amount,
+  ) {
+    if (selected.isEmpty) return;
+    final a = amount.clamp(0.0, 1.0);
+
+    bool changed = false;
+
+    for (var layer in layers) {
+      if (layer.isLocked) continue;
+      for (var shape in layer.shapes) {
+        if (shape is! CompassXSpline) continue;
+        final spline = shape;
+        final n = spline.nodes.length;
+        if (n < 2) continue;
+
+        // Which of THIS spline's nodes are selected (with their indices)?
+        final sel = <int>[];
+        for (int i = 0; i < n; i++) {
+          if (selected.contains(spline.nodes[i].point)) sel.add(i);
+        }
+        if (sel.isEmpty) continue;
+
+        // Original position of node i, falling back to live if somehow uncaptured.
+        Offset origPos(int i) {
+          final p = spline.nodes[i].point;
+          return originalPositions[p] ?? Offset(p.x.value, p.y.value);
+        }
+
+        if (sel.length >= 2) {
+          // --- MANY: Laplacian relax toward neighbor midpoint, points only. ---
+          for (final i in sel) {
+            // Endpoint of an open spline -> pinned (only one neighbor).
+            if (!spline.isClosed && (i == 0 || i == n - 1)) continue;
+
+            final prev = origPos((i - 1 + n) % n);
+            final next = origPos((i + 1) % n);
+            final mid = Offset((prev.dx + next.dx) / 2, (prev.dy + next.dy) / 2);
+
+            final start = origPos(i);
+            final target = Offset.lerp(start, mid, a)!;
+
+            final node = spline.nodes[i];
+            if ((node.point.x.value - target.dx).abs() > 1e-9 ||
+                (node.point.y.value - target.dy).abs() > 1e-9) {
+              node.point.x.value = target.dx;
+              node.point.y.value = target.dy;
+              changed = true;
+            }
+          }
+        } else {
+          // --- ONE: bake to Bezier, rotate handles toward the prev->next chord. ---
+          final i = sel.first;
+
+          // A lone open-spline endpoint has no two-sided chord -> nothing to align.
+          if (!spline.isClosed && (i == 0 || i == n - 1)) continue;
+
+          final node = spline.nodes[i];
+
+          // Baseline handles: prefer the captured originals; if this node wasn't
+          // explicit at capture, bake its fluid tangent now (tension-stripped, so
+          // re-evaluation reproduces the same curve) and use that as the baseline.
+          Offset? baseIn, baseOut;
+          final cap = originalHandles[node];
+          if (cap != null && (cap.$1 != null || cap.$2 != null)) {
+            baseIn = cap.$1;
+            baseOut = cap.$2;
+          } else {
+            final controls = spline.getEvaluatedControls();
+            final t = node.tension.value;
+            Offset stripDiv(Offset v) =>
+                t > 0.001 ? Offset(v.dx / t, v.dy / t) : v;
+            baseOut = stripDiv(controls[i].$1);
+            baseIn = stripDiv(controls[i].$2);
+          }
+
+          baseIn ??= Offset.zero;
+          baseOut ??= Offset.zero;
+
+          // Chord direction through the (original) neighbors.
+          final prev = origPos((i - 1 + n) % n);
+          final next = origPos((i + 1) % n);
+          final chord = next - prev;
+          final chordLen = chord.distance;
+          if (chordLen < 1e-6) continue; // neighbors coincide -> no defined tangent
+
+          final dir = Offset(chord.dx / chordLen, chord.dy / chordLen);
+
+          // handleOut should point ALONG +dir, handleIn along -dir, each keeping its
+          // own original magnitude. Rotate from the baseline toward that aligned
+          // target by `amount` (slerp-ish via vector lerp + renormalize-to-original-
+          // length; good enough and stable for handle visuals).
+          Offset alignTo(Offset base, Offset unitTarget) {
+            final len = base.distance;
+            if (len < 1e-6) return base; // zero handle stays zero
+            final aligned = Offset(unitTarget.dx * len, unitTarget.dy * len);
+            final blended = Offset.lerp(base, aligned, a)!;
+            // Renormalize to the ORIGINAL length so magnitude is preserved across
+            // the rotation (pure lerp would shrink the vector mid-arc).
+            final bl = blended.distance;
+            if (bl < 1e-6) return aligned;
+            return Offset(blended.dx / bl * len, blended.dy / bl * len);
+          }
+
+          final newOut = alignTo(baseOut, dir);
+          final newIn = alignTo(baseIn, Offset(-dir.dx, -dir.dy));
+
+          // Commit the node to explicit tension-1.0 space (mirrors how a handle grab
+          // commits), then store the rotated handles directly.
+          if ((node.tension.value - 1.0).abs() > 1e-6) {
+            node.tension.value = 1.0;
+          }
+          node.handleOut = newOut;
+          node.handleIn = newIn;
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) notifyListeners();
+  }
+
+  // --- WIDTH SMOOTH (SHIFT + Z key) --------------------------------------------
+  //
+  // Applies a Laplacian relax specifically to the width properties (widthLeft and
+  // widthRight) of the selected nodes. Recomputed from the original widths each tick.
+  void smoothWidths(
+    Set<CompassPoint> selected,
+    Map<CompassSplineNode, (double, double)> originalWidths,
+    double amount,
+  ) {
+    if (selected.isEmpty) return;
+    final a = amount.clamp(0.0, 1.0);
+
+    bool changed = false;
+
+    for (var layer in layers) {
+      if (layer.isLocked) continue;
+      for (var shape in layer.shapes) {
+        if (shape is! CompassXSpline) continue;
+        final spline = shape;
+        final n = spline.nodes.length;
+        if (n < 2) continue;
+
+        // Which of THIS spline's nodes are selected?
+        final sel = <int>[];
+        for (int i = 0; i < n; i++) {
+          if (selected.contains(spline.nodes[i].point)) sel.add(i);
+        }
+        if (sel.isEmpty) continue;
+
+        // Fallback to live width if somehow uncaptured
+        (double, double) origW(int i) {
+          final node = spline.nodes[i];
+          return originalWidths[node] ?? (node.widthLeft.value, node.widthRight.value);
+        }
+
+        for (final i in sel) {
+          // Endpoints of an open spline -> pinned (only one neighbor).
+          if (!spline.isClosed && (i == 0 || i == n - 1)) continue;
+
+          final prev = origW((i - 1 + n) % n);
+          final next = origW((i + 1) % n);
+
+          // Target is the average of the two neighbors' original widths
+          final targetL = (prev.$1 + next.$1) / 2.0;
+          final targetR = (prev.$2 + next.$2) / 2.0;
+
+          final startW = origW(i);
+
+          // Standard lerp towards the target
+          final newL = startW.$1 + (targetL - startW.$1) * a;
+          final newR = startW.$2 + (targetR - startW.$2) * a;
+
+          final node = spline.nodes[i];
+
+          if ((node.widthLeft.value - newL).abs() > 1e-6 ||
+              (node.widthRight.value - newR).abs() > 1e-6) {
+            node.widthLeft.value = newL;
+            node.widthRight.value = newR;
+            changed = true;
+          }
+        }
+      }
+    }
+
+    if (changed) notifyListeners();
+  }
+
   // -------------------------------------
 
   void addPoint(CompassPoint p) {

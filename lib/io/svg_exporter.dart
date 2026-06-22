@@ -9,7 +9,7 @@ import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
-import '../models/geometry/rectangle.dart'; // <--- ADDED
+import '../models/geometry/rectangle.dart';
 
 class SVGExporter {
   static String sanitizeId(String rawId) {
@@ -42,7 +42,7 @@ class SVGExporter {
            if (cy - r < minY) minY = cy - r;
            if (cx + r > maxX) maxX = cx + r;
            if (cy + r > maxY) maxY = cy + r;
-        } else if (shape is CompassRectangle) { // <--- ADDED
+        } else if (shape is CompassRectangle) { 
            double minXP = min(shape.p1.x.value, shape.p2.x.value);
            double minYP = min(shape.p1.y.value, shape.p2.y.value);
            double maxXP = max(shape.p1.x.value, shape.p2.x.value);
@@ -51,6 +51,17 @@ class SVGExporter {
            if (minYP < minY) minY = minYP;
            if (maxXP > maxX) maxX = maxXP;
            if (maxYP > maxY) maxY = maxYP;
+        } else if (shape is CompassXSpline) {
+           // A variable-width ribbon bulges past its node points; include its full
+           // visual extent so the viewBox can't clip it. Mirrors the PNG exporter.
+           // (A non-width spline is bounded by its points, already covered above.)
+           if (shape.hasWidthProfile) {
+             final bounds = shape.getPath().getBounds();
+             if (bounds.left < minX) minX = bounds.left;
+             if (bounds.top < minY) minY = bounds.top;
+             if (bounds.right > maxX) maxX = bounds.right;
+             if (bounds.bottom > maxY) maxY = bounds.bottom;
+           }
         }
       }
     }
@@ -95,7 +106,7 @@ class SVGExporter {
         for (var shape in subShapes) {
           if (shape is CompassCircle) {
             buffer.writeln('      <circle cx="${shape.center.x.value}" cy="${shape.center.y.value}" r="${shape.radius.value}" fill="black" />');
-          } else if (shape is CompassRectangle) { // <--- ADDED
+          } else if (shape is CompassRectangle) { 
             final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
             buffer.writeln('      <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="black" />');
           } else if (shape is CompassXSpline) {
@@ -129,11 +140,26 @@ class SVGExporter {
              }
           }
           buffer.writeln('" fill="none" stroke="$strokeHex" stroke-width="$sWidth" />');
-        } else if (shape is CompassRectangle) { // <--- ADDED
+        } else if (shape is CompassRectangle) { 
           final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
           buffer.writeln('    <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="$fillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
         } else if (shape is CompassXSpline) {
-          buffer.writeln('    <path d="${shape.getSvgPathData()}" fill="${shape.isClosed ? fillHex : 'none'}" fill-rule="evenodd" stroke="$strokeHex" stroke-width="$sWidth" />');
+          // NEW: Distinguish between standard strokes/fills and variable-width Area Strokes
+          if (shape.hasWidthProfile) {
+            // A CLOSED width spline is now a first-class stroke: its centerline
+            // region is an inner fill (fill color), with the variable-width ribbon
+            // (stroke color) drawn ON TOP. Emit the centerline fill first so the
+            // ribbon paints over it, matching the renderer's z-order (fill in 1a,
+            // area stroke in 1c). Gate on a real fill color, mirroring the renderer's
+            // `if (layer.color != Colors.transparent)`. An OPEN width spline encloses
+            // no area, so it gets only the ribbon.
+            if (shape.isClosed && fillHex != 'none') {
+              buffer.writeln('    <path d="${shape.getCenterSvgPathData()}" fill="$fillHex" fill-rule="evenodd" stroke="none" />');
+            }
+            buffer.writeln('    <path d="${shape.getSvgPathData()}" fill="$strokeHex" fill-rule="evenodd" stroke="none" />');
+          } else {
+            buffer.writeln('    <path d="${shape.getSvgPathData()}" fill="${shape.isClosed ? fillHex : 'none'}" fill-rule="evenodd" stroke="$strokeHex" stroke-width="$sWidth" />');
+          }
         }
       }
 

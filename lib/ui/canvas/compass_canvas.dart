@@ -112,11 +112,19 @@ class _CompassCanvasState extends State<CompassCanvas> {
                         rotationPivotOffset: _controller.rotationPivotOffset,     
                         isRPressed: _controller.isRPressed,           
                         isShiftRPressed: _controller.isShiftRPressed,
+                        isCtrlRPressed: _controller.isCtrlRPressed, // <--- ADDED CTRL+R STATE
                         isAPressed: _controller.isAPressed, 
                         activeFilletNode: _controller.activeFilletNode,
                         activeFilletSpline: _controller.activeFilletSpline,
                         activeFilletRadius: _controller.activeFilletRadius,
                         isFPressed: _controller.isFPressed,
+                        // --- NEW: Width tool (W key) state, wired through so the
+                        // width diamonds actually draw. The controller has tracked
+                        // these all along; they simply were never passed in, so they
+                        // defaulted to false and the handles never rendered. ---
+                        isWPressed: _controller.isWPressed,
+                        activeWidthNode: _controller.activeWidthNode,
+                        activeWidthIsLeft: _controller.activeWidthIsLeft,
                         addVertexPreviewPos: _controller.addVertexPreviewPos,
                         addVertexSpline: _controller.addVertexSpline,
                         addVertexSegmentIndex: _controller.addVertexSegmentIndex,
@@ -170,9 +178,13 @@ class _CompassCanvasState extends State<CompassCanvas> {
                 onToolSelected: _controller.setTool,
                 isRPressed: _controller.isRPressed,
                 isShiftRPressed: _controller.isShiftRPressed,
+                isCtrlRPressed: _controller.isCtrlRPressed, // <--- ADDED CTRL+R STATE
                 isShiftPressed: _controller.isShiftPressed,
                 isAPressed: _controller.isAPressed, 
                 isFPressed: _controller.isFPressed,
+                isZPressed: _controller.isZPressed, 
+                isShiftZPressed: _controller.isShiftZPressed, // <--- NEW: Passed down to HUD
+                isWPressed: _controller.isWPressed, // <--- NEW: Passed down to HUD
                 is1Pressed: _controller.is1Pressed,
                 is2Pressed: _controller.is2Pressed,
                 addVertexActive: _controller.addVertexPreviewPos != null,

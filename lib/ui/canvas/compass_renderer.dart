@@ -21,6 +21,7 @@ class CompassRenderer extends CustomPainter {
   final Offset? rotationPivotOffset;
   final bool isRPressed;
   final bool isShiftRPressed;
+  final bool isCtrlRPressed; // <--- NEW
   final bool isAPressed; 
   
   // --- NEW: Receive the active fillet state from the controller
@@ -28,6 +29,11 @@ class CompassRenderer extends CustomPainter {
   final CompassXSpline? activeFilletSpline;
   final double activeFilletRadius;
   final bool isFPressed;
+
+  // --- NEW: Width Tool (W Key) State
+  final bool isWPressed;
+  final CompassSplineNode? activeWidthNode;
+  final bool activeWidthIsLeft;
 
   // --- NEW: Shift-hover "Add Resolution" preview ---
   // addVertexPreviewPos is the exact on-curve center of the segment under the
@@ -65,11 +71,15 @@ class CompassRenderer extends CustomPainter {
     this.rotationPivotOffset,
     this.isRPressed = false,
     this.isShiftRPressed = false,
+    this.isCtrlRPressed = false, // <--- NEW
     this.isAPressed = false, 
     this.activeFilletNode,
     this.activeFilletSpline,
     this.activeFilletRadius = 0.0,
     this.isFPressed = false,
+    this.isWPressed = false, // <--- Added W Key
+    this.activeWidthNode,    // <--- Added Width Node
+    this.activeWidthIsLeft = false, // <--- Added Width Side
     this.addVertexPreviewPos,
     this.addVertexSpline,
     this.addVertexSegmentIndex = -1,
@@ -118,23 +128,42 @@ class CompassRenderer extends CustomPainter {
     // ==========================================
     for (var layer in engine.layers) {
       if (layer.isVisible) {
+        // fillPath: fillable geometry PLUS closed width-spline centerlines. This is
+        //   what makes an area stroke a first-class stroke -- the centerline is the
+        //   fill, so a closed width spline can carry an inner fill and a ribbon at
+        //   once. Open width splines enclose no area and contribute nothing here.
+        // layerPath: unchanged -- excludes width splines, so the uniform stroke pass
+        //   (1b) never paints a hairline along the ribbon's inner edge.
+        // strokeAreaPath: the variable-width ribbon (1c), unchanged.
+        final fillPath = layer.getLayerFillPath();
         final layerPath = layer.getLayerPath();
+        final strokeAreaPath = layer.getLayerStrokeAreaPath();
 
-        // 1a. Fill
+        // 1a. Fill Standard Geometry (now sourced from the fill path)
         if (layer.color != Colors.transparent) {
           final fillPaint = Paint()
             ..color = layer.color
             ..style = PaintingStyle.fill;
-          canvas.drawPath(layerPath, fillPaint);
+          canvas.drawPath(fillPath, fillPaint);
         }
 
-        // 1b. Stroke
+        // 1b. Stroke Standard Geometry (Uniform outlines)
         if (layer.strokeColor != Colors.transparent && layer.strokeWidth > 0) {
           final strokePaint = Paint()
             ..color = layer.strokeColor
             ..strokeWidth = layer.strokeWidth
             ..style = PaintingStyle.stroke;
           canvas.drawPath(layerPath, strokePaint);
+        }
+
+        // 1c. Area Strokes (Variable-Width Geometry)
+        // This is mathematically a stroke, so we color it using the Stroke Color,
+        // but physically it is a 2D mesh, so we use PaintingStyle.fill.
+        if (layer.strokeColor != Colors.transparent) {
+          final areaStrokePaint = Paint()
+            ..color = layer.strokeColor
+            ..style = PaintingStyle.fill;
+          canvas.drawPath(strokeAreaPath, areaStrokePaint);
         }
       }
     }
@@ -216,10 +245,15 @@ class CompassRenderer extends CustomPainter {
         }
       }
 
-      // --- BEZIER HANDLES for the selected X-Spline ---
       final selForHandles = engine.selectedShape;
-      // <--- NEW: Checks if showHandles is true before rendering the handles
-      if (selForHandles is CompassXSpline && showHandles) { 
+
+      // --- WIDTH HANDLES for the selected X-Spline (W KEY) ---
+      if (selForHandles is CompassXSpline && showHandles && isWPressed) {
+        _drawWidthHandles(canvas, selForHandles, invScale);
+      }
+
+      // --- BEZIER HANDLES for the selected X-Spline ---
+      if (selForHandles is CompassXSpline && showHandles && !isWPressed) { 
         _drawBezierHandles(canvas, selForHandles, invScale);
       }
 
@@ -269,11 +303,13 @@ class CompassRenderer extends CustomPainter {
         canvas.drawCircle(targetOffset, 10.0 * invScale, tensionPaint);
       }
       
-      // --- ROTATION GUIDE LINE (R KEY) ---
-      else if ((isRPressed || isShiftRPressed) && hoverPosition != null) {
+      // --- ROTATION GUIDE LINE (R KEY & CTRL+R KEY) ---
+      else if ((isRPressed || isShiftRPressed || isCtrlRPressed) && hoverPosition != null) {
         if (rotationPivotOffset != null) {
           final rotPaint = Paint()
-            ..color = isShiftRPressed ? Colors.deepOrangeAccent : Colors.orangeAccent
+            ..color = isCtrlRPressed 
+                ? Colors.purpleAccent 
+                : (isShiftRPressed ? Colors.deepOrangeAccent : Colors.orangeAccent)
             ..strokeWidth = 2.0 * invScale
             ..style = PaintingStyle.stroke;
             
@@ -433,6 +469,105 @@ class CompassRenderer extends CustomPainter {
     }
 
     canvas.restore();
+  }
+
+  // --- NEW: Draws the Width Handles (Diamonds) for the Width Tool ---
+  void _drawWidthHandles(Canvas canvas, CompassXSpline spline, double invScale) {
+    final controls = spline.getEvaluatedControls();
+    int n = spline.nodes.length;
+    
+    final guideLinePaint = Paint()
+      ..color = Colors.tealAccent.withOpacity(0.3)
+      ..strokeWidth = 1.0 * invScale
+      ..style = PaintingStyle.stroke;
+
+    final linePaint = Paint()
+      ..color = Colors.tealAccent.withOpacity(0.8)
+      ..strokeWidth = 1.5 * invScale
+      ..style = PaintingStyle.stroke;
+
+    final dotPaint = Paint()
+      ..color = Colors.teal
+      ..style = PaintingStyle.fill;
+      
+    final activeFillPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+
+    final borderPaint = Paint()
+      ..color = pointBorderColor
+      ..strokeWidth = 1.0 * invScale
+      ..style = PaintingStyle.stroke;
+
+    void drawDiamond(Offset center, bool isActive) {
+      final size = isActive ? 8.0 * invScale : 6.0 * invScale;
+      final path = Path()
+        ..moveTo(center.dx, center.dy - size)
+        ..lineTo(center.dx + size, center.dy)
+        ..lineTo(center.dx, center.dy + size)
+        ..lineTo(center.dx - size, center.dy)
+        ..close();
+      if (isActive) {
+        canvas.drawPath(path, activeFillPaint);
+        canvas.drawPath(path, Paint()..color = Colors.teal..strokeWidth = 2.0 * invScale..style = PaintingStyle.stroke);
+      } else {
+        canvas.drawPath(path, dotPaint);
+        canvas.drawPath(path, borderPaint);
+      }
+    }
+
+    for (int i = 0; i < n; i++) {
+      final node = spline.nodes[i];
+      final pt = Offset(node.point.x.value, node.point.y.value);
+      
+      Offset prevPt = spline.isClosed ? Offset(spline.nodes[(i - 1 + n) % n].point.x.value, spline.nodes[(i - 1 + n) % n].point.y.value) : (i > 0 ? Offset(spline.nodes[i - 1].point.x.value, spline.nodes[i - 1].point.y.value) : pt);
+      Offset nextPt = spline.isClosed ? Offset(spline.nodes[(i + 1) % n].point.x.value, spline.nodes[(i + 1) % n].point.y.value) : (i < n - 1 ? Offset(spline.nodes[i + 1].point.x.value, spline.nodes[i + 1].point.y.value) : pt);
+
+      final hOut = controls[i].$1;
+      final hIn = controls[i].$2;
+
+      Offset vOut = hOut;
+      if (vOut.distance < 0.001) vOut = nextPt - pt;
+      Offset vIn = Offset(-hIn.dx, -hIn.dy);
+      if (vIn.distance < 0.001) vIn = pt - prevPt;
+
+      if (!spline.isClosed) {
+        if (i == 0) vIn = vOut;
+        if (i == n - 1) vOut = vIn;
+      }
+
+      double lenOut = vOut.distance;
+      double lenIn = vIn.distance;
+      Offset tOut = lenOut > 0.001 ? vOut / lenOut : Offset.zero;
+      Offset tIn = lenIn > 0.001 ? vIn / lenIn : Offset.zero;
+
+      Offset T = tIn + tOut;
+      double lenT = T.distance;
+      if (lenT > 0.001) T = T / lenT; else T = tOut;
+      
+      Offset N = Offset(-T.dy, T.dx);
+
+      // Faint normal guide lines extending from center (at least 30px so you can always see the axis)
+      final leftGuide = pt + N * max(30.0 * invScale, node.widthLeft.value);
+      final rightGuide = pt - N * max(30.0 * invScale, node.widthRight.value);
+      
+      canvas.drawLine(pt, leftGuide, guideLinePaint);
+      canvas.drawLine(pt, rightGuide, guideLinePaint);
+
+      final leftActual = pt + N * node.widthLeft.value;
+      final rightActual = pt - N * node.widthRight.value;
+      
+      // Dashed line explicitly from the center outward to each handle
+      if (node.widthLeft.value > 0.1) {
+        _drawDashedLine(canvas, pt, leftActual, linePaint, invScale);
+      }
+      if (node.widthRight.value > 0.1) {
+        _drawDashedLine(canvas, pt, rightActual, linePaint, invScale);
+      }
+      
+      drawDiamond(leftActual, node == activeWidthNode && activeWidthIsLeft);
+      drawDiamond(rightActual, node == activeWidthNode && !activeWidthIsLeft);
+    }
   }
 
   // --- NEW: Draws the dashed, corner-ticked bounding box around a 2+ selection. ---

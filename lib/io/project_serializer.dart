@@ -5,7 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import '../engine.dart';
-import '../constraints.dart'; // <--- ADDED to instantiate SquareConstraint on load
+import '../constraints.dart'; 
 import '../models/geometry/point.dart';
 import '../models/geometry/shape.dart';
 import '../models/geometry/line.dart';
@@ -53,19 +53,21 @@ class ProjectSerializer {
         } else if (shape is CompassSpiral) {
           buffer.writeln('SHAPE,SPIRAL,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.startPoint.id},${shape.isClockwise},${shape.revolutions}');
         } else if (shape is CompassRectangle) {
-          // NEW: Added isSquare to the serialization string
           buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}');
         } else if (shape is CompassXSpline) {
-          // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY 
-          // when the node carries explicit Bezier handles. The handles are omitted 
-          // entirely when null, so legacy 2-field tokens are emitted unchanged.
-          // Note: double.toString() always uses '.' (locale-independent), so no
-          // comma ever leaks into the CSV field.
+          // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR
+          // when the node carries explicit Bezier handles or variable width. 
+          // "null" is used for handles that remain fluid, preserving Catmull-Rom math.
           final nodesStr = shape.nodes.map((n) {
-            if (n.handleIn != null || n.handleOut != null) {
-              final hI = n.handleIn ?? const Offset(0, 0);
-              final hO = n.handleOut ?? const Offset(0, 0);
-              return '${n.point.id}:${n.tension.value}:${hI.dx}:${hI.dy}:${hO.dx}:${hO.dy}';
+            final hasHandles = n.handleIn != null || n.handleOut != null;
+            final hasWidth = n.widthLeft.value > 0.001 || n.widthRight.value > 0.001;
+
+            if (hasHandles || hasWidth) {
+              final hIX = n.handleIn?.dx.toString() ?? 'null';
+              final hIY = n.handleIn?.dy.toString() ?? 'null';
+              final hOX = n.handleOut?.dx.toString() ?? 'null';
+              final hOY = n.handleOut?.dy.toString() ?? 'null';
+              return '${n.point.id}:${n.tension.value}:$hIX:$hIY:$hOX:$hOY:${n.widthLeft.value}:${n.widthRight.value}';
             }
             return '${n.point.id}:${n.tension.value}';
           }).join('|');
@@ -256,7 +258,6 @@ class ProjectSerializer {
             final p2 = pointMap[parts[argOffset + 1]];
             final radius = double.tryParse(parts[argOffset + 2]) ?? 0.0;
             
-            // NEW: Load the isSquare boolean correctly
             bool isSquare = false;
             if (parts.length > argOffset + 3) {
               isSquare = parts[argOffset + 3] == 'true';
@@ -267,7 +268,6 @@ class ProjectSerializer {
                 ..operation = op
                 ..isVisible = isVisible;
                 
-              // If it's saved as a square, bind the constraint immediately upon loading
               if (isSquare) {
                 SquareConstraint(rect: rect);
               }
@@ -301,19 +301,38 @@ class ProjectSerializer {
                 final tension = double.tryParse(np[1]) ?? 1.0;
                 if (pt != null) {
                   Offset? hIn, hOut;
+                  double wL = 0.0;
+                  double wR = 0.0;
                   
                   if (np.length == 4) { // Legacy symmetric fallback
                     final hx = double.tryParse(np[2]) ?? 0.0;
                     final hy = double.tryParse(np[3]) ?? 0.0;
                     hOut = Offset(hx, hy);
                     hIn = Offset(-hx, -hy);
-                  } else if (np.length >= 6) { // New dual explicit handles
-                    hIn = Offset(double.tryParse(np[2]) ?? 0.0, double.tryParse(np[3]) ?? 0.0);
-                    hOut = Offset(double.tryParse(np[4]) ?? 0.0, double.tryParse(np[5]) ?? 0.0);
+                  } else if (np.length >= 6) { // Dual explicit handles + Width
+                    if (np[2] != 'null' && np[2].isNotEmpty) {
+                      hIn = Offset(double.tryParse(np[2]) ?? 0.0, double.tryParse(np[3]) ?? 0.0);
+                    }
+                    if (np[4] != 'null' && np[4].isNotEmpty) {
+                      hOut = Offset(double.tryParse(np[4]) ?? 0.0, double.tryParse(np[5]) ?? 0.0);
+                    }
+                    if (np.length >= 8) {
+                      wL = double.tryParse(np[6]) ?? 0.0;
+                      wR = double.tryParse(np[7]) ?? 0.0;
+                    }
                   }
                   
-                  final node = CompassSplineNode(point: pt, tension: tension, handleIn: hIn, handleOut: hOut);
+                  final node = CompassSplineNode(
+                    point: pt, 
+                    tension: tension, 
+                    handleIn: hIn, 
+                    handleOut: hOut,
+                    widthLeft: wL,
+                    widthRight: wR,
+                  );
                   node.tension.addListener(onUpdate); 
+                  node.widthLeft.addListener(onUpdate);
+                  node.widthRight.addListener(onUpdate);
                   spline.addNode(node);
                 } else {
                   valid = false;

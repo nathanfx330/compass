@@ -15,11 +15,15 @@ class CanvasHUD extends StatelessWidget {
   
   final bool isRPressed;
   final bool isShiftRPressed;
+  final bool isCtrlRPressed; // <--- NEW
   final bool isShiftPressed;
   final bool isAPressed;
   final bool isFPressed;
-  final bool is1Pressed; // --- NEW
-  final bool is2Pressed; // --- NEW
+  final bool isZPressed; 
+  final bool isShiftZPressed; 
+  final bool isWPressed;      
+  final bool is1Pressed; 
+  final bool is2Pressed; 
 
   final bool addVertexActive;
   final Offset panOffset;
@@ -33,11 +37,15 @@ class CanvasHUD extends StatelessWidget {
     required this.onToolSelected,
     required this.isRPressed,
     required this.isShiftRPressed,
+    required this.isCtrlRPressed, // <--- NEW
     required this.isShiftPressed,
     required this.isAPressed,
     required this.isFPressed,
-    required this.is1Pressed, // --- NEW
-    required this.is2Pressed, // --- NEW
+    required this.isZPressed, 
+    required this.isShiftZPressed, 
+    required this.isWPressed,      
+    required this.is1Pressed, 
+    required this.is2Pressed, 
     required this.addVertexActive,
     required this.panOffset,
     required this.canvasScale,
@@ -54,6 +62,9 @@ class CanvasHUD extends StatelessWidget {
     if (isShiftRPressed) {
       overlayText = 'SHIFT+R : ROTATE HIERARCHY';
       overlayColor = Colors.deepOrangeAccent;
+    } else if (isCtrlRPressed) { // <--- NEW
+      overlayText = 'CTRL+R : ROTATE HANDLES';
+      overlayColor = Colors.purpleAccent;
     } else if (isRPressed) {
       overlayText = 'R : ROTATE LOCAL';
       overlayColor = Colors.orangeAccent;
@@ -63,16 +74,25 @@ class CanvasHUD extends StatelessWidget {
     } else if (isFPressed) { 
       overlayText = 'F : FILLET CORNER';
       overlayColor = Colors.greenAccent.shade700;
+    } else if (isShiftZPressed) { 
+      overlayText = 'SHIFT+Z : SMOOTH WIDTHS';
+      overlayColor = Colors.teal;
+    } else if (isZPressed) { 
+      overlayText = 'Z : SMOOTH';
+      overlayColor = Colors.tealAccent.shade700;
+    } else if (isWPressed) { 
+      overlayText = 'W : WIDTH TOOL';
+      overlayColor = Colors.teal;
     } else if (addVertexActive) { 
       overlayText = 'Q : ADD VERTEX';
       overlayColor = Colors.green.shade600;
     } else if (isShiftPressed && currentTool == CompassTool.select) {
       overlayText = 'SHIFT : PAN SHAPE';
       overlayColor = Colors.blueAccent;
-    } else if (is1Pressed) { // --- NEW HUD LOGIC
+    } else if (is1Pressed) { 
       overlayText = '1 : LOCK HORIZONTAL AXIS';
       overlayColor = Colors.blueGrey;
-    } else if (is2Pressed) { // --- NEW HUD LOGIC
+    } else if (is2Pressed) { 
       overlayText = '2 : LOCK VERTICAL AXIS';
       overlayColor = Colors.blueGrey;
     }

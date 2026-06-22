@@ -39,7 +39,7 @@ If you drag Point A, the line moves, and the circle moves. If you drag Point B, 
 Compass is rapidly evolving into a desktop-grade parametric engine. It currently supports:
 
 * **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines. Splines live in two mathematical modes: a *fluid* Catmull-Rom curve whose vertex tension you adjust with the `A` key via a global distance tether, or *explicit* Bézier—right-click any vertex to **Convert to Bézier** and freeze its current tangent into independently draggable in/out handles for exact, asymmetric control. Right-click again to **Reset Handles** and dissolve back into fluid curvature. Conversion is loss-free: the curve never jumps, it simply becomes editable.
-* **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, `R` to rotate a shape locally, or `Shift+Drag` to translate complex shape groupings. Explicit Bézier handles rotate in perfect lockstep with their points, so a hand-tuned corner stays mathematically true through any rotation.
+* **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, `R` to rotate a shape locally, `Ctrl/Cmd+R` to explicitly rotate isolated Bézier handles, or `Shift+Drag` to translate complex shape groupings. Explicit Bézier handles rotate in perfect lockstep with their points, so a hand-tuned corner stays mathematically true through any rotation.
 * **Axis-Locked Editing:** Hold `1` or `2` while dragging a vertex to constrain its motion to a single axis—horizontal or vertical—anchored exactly to the point where the drag began, for pixel-true orthogonal moves without guesswork.
 * **Infinite Mathematical Canvas:** Pan infinitely using the middle mouse button and zoom seamlessly without breaking underlying coordinate math.
 * **Reference Imagery:** Load, scale, position, and lock underlying raster sketches to trace over with perfect mathematics.
@@ -67,6 +67,7 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 * **`Shift + Drag`**: Pan a rigid-body shape hierarchy.
 * **`R + Drag`**: Rotate a selected shape or point locally around its centroid.
 * **`Shift + R + Drag`**: Rotate an entire hierarchical rigid-body system around the targeted centroid.
+* **`Ctrl/Cmd + R + Drag`**: Rotate the explicit Bézier handles of a selected vertex (or group of vertices) around their local centroid without moving the underlying points. Automatically converts fluid Catmull-Rom nodes to explicit handles.
 * **`A + Drag`**: Target an X-Spline vertex and drag anywhere on the screen to fluidly adjust its Catmull-Rom curve tension.
 * **`F + Drag`**: With an X-Spline vertex selected, hold F and drag horizontally anywhere on the screen to dynamically apply a curve-aware fillet (corner rounding).
 * **`1 + Drag`**: Constrain a point or vertex drag to the **horizontal** axis. The Y coordinate is frozen at the drag's origin, so the point can only travel left and right.
