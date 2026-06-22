@@ -75,6 +75,8 @@ class CompassEngine extends ChangeNotifier {
     for (var node in spline.nodes) {
       node.widthLeft.value = width;
       node.widthRight.value = width;
+      node.isLeftWidthPinned = false; // Destroy flags
+      node.isRightWidthPinned = false; // Destroy flags
     }
     _saveSnapshot();
     notifyListeners();
@@ -87,6 +89,8 @@ class CompassEngine extends ChangeNotifier {
     if (n == 1) {
       spline.nodes[0].widthLeft.value = startWidth;
       spline.nodes[0].widthRight.value = startWidth;
+      spline.nodes[0].isLeftWidthPinned = false;
+      spline.nodes[0].isRightWidthPinned = false;
     } else {
       for (int i = 0; i < n; i++) {
         // Calculate parametric 't' (0.0 at start, 1.0 at end)
@@ -95,10 +99,65 @@ class CompassEngine extends ChangeNotifier {
         
         spline.nodes[i].widthLeft.value = currentWidth;
         spline.nodes[i].widthRight.value = currentWidth;
+        spline.nodes[i].isLeftWidthPinned = false; // Destroy flags
+        spline.nodes[i].isRightWidthPinned = false; // Destroy flags
       }
     }
     _saveSnapshot();
     notifyListeners();
+  }
+
+  // --- NEW: Width Constraint Logic ---
+  void setWidthConstraint(CompassXSpline spline, CompassSplineNode node, bool isLeft, bool isPinned) {
+    if (isLeft) {
+      node.isLeftWidthPinned = isPinned;
+    } else {
+      node.isRightWidthPinned = isPinned;
+    }
+    _enforceWidthConstraints(spline, isLeft);
+    _saveSnapshot();
+    notifyListeners();
+  }
+
+  void updateNodeWidth(CompassXSpline spline, CompassSplineNode node, double newWidth, bool isLeft) {
+    if (isLeft) {
+      node.widthLeft.value = newWidth;
+    } else {
+      node.widthRight.value = newWidth;
+    }
+    // If we are dragging a pinned node, instantly update all nodes between it and the next pin
+    if ((isLeft && node.isLeftWidthPinned) || (!isLeft && node.isRightWidthPinned)) {
+      _enforceWidthConstraints(spline, isLeft);
+    }
+    notifyListeners();
+  }
+
+  void _enforceWidthConstraints(CompassXSpline spline, bool isLeft) {
+    List<int> pinnedIndices = [];
+    for (int i = 0; i < spline.nodes.length; i++) {
+      bool pinned = isLeft ? spline.nodes[i].isLeftWidthPinned : spline.nodes[i].isRightWidthPinned;
+      if (pinned) pinnedIndices.add(i);
+    }
+
+    if (pinnedIndices.length < 2) return; // Need at least 2 flags to interpolate
+
+    for (int p = 0; p < pinnedIndices.length - 1; p++) {
+      int startIdx = pinnedIndices[p];
+      int endIdx = pinnedIndices[p + 1];
+      
+      double startW = isLeft ? spline.nodes[startIdx].widthLeft.value : spline.nodes[startIdx].widthRight.value;
+      double endW = isLeft ? spline.nodes[endIdx].widthLeft.value : spline.nodes[endIdx].widthRight.value;
+
+      for (int i = startIdx + 1; i < endIdx; i++) {
+        double t = (i - startIdx) / (endIdx - startIdx);
+        double w = startW + (endW - startW) * t;
+        if (isLeft) {
+          spline.nodes[i].widthLeft.value = w;
+        } else {
+          spline.nodes[i].widthRight.value = w;
+        }
+      }
+    }
   }
 
   void _saveSnapshot() {

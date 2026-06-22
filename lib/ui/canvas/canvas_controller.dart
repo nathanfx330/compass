@@ -61,6 +61,7 @@ class CanvasController extends ChangeNotifier {
   bool isWPressed = false;
   CompassSplineNode? activeWidthNode;
   bool activeWidthIsLeft = false;
+  CompassXSpline? _activeWidthSpline; // <--- NEW: Track the spline being dragged
 
   // First-pull-from-zero unification: when a width drag begins on a node whose
   // both sides are ~zero, that drag pushes BOTH sides out together (you tune each
@@ -221,6 +222,7 @@ class CanvasController extends ChangeNotifier {
       if (!isW) {
         activeWidthNode = null;
         _isUnifiedWidthPull = false;
+        _activeWidthSpline = null;
       }
 
       if (hoverPosition != null) {
@@ -379,7 +381,6 @@ class CanvasController extends ChangeNotifier {
     return Offset(cx / pts.length, cy / pts.length);
   }
 
-  // --- NEW: handlesOnly prevents the greedy fallback to the entire selected shape
   void _setupRotationState({required bool hierarchy, bool handlesOnly = false}) {
     if (selectedPoints.length >= 2) {
       rotationPivotOffset = _centroidOfPoints(selectedPoints);
@@ -397,7 +398,6 @@ class CanvasController extends ChangeNotifier {
 
     CompassPoint? explicitPoint = selectedPoints.isNotEmpty ? selectedPoints.first : hoveredPoint;
     
-    // If we only want handles, isolate the explicit point and DO NOT check the shape!
     if (handlesOnly) {
       if (explicitPoint != null) {
         rotationPivotOffset = Offset(explicitPoint.x.value, explicitPoint.y.value);
@@ -507,7 +507,6 @@ class CanvasController extends ChangeNotifier {
           final node = shape.nodes[i];
           if (!selectedPoints.contains(node.point)) continue;
           controls ??= shape.getEvaluatedControls();
-          // controls[i] is (out, in); store as (in, out) to match smoothNodes.
           _smoothOrigHandles[node] = (controls[i].$2, controls[i].$1);
         }
       }
@@ -708,6 +707,24 @@ class CanvasController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // --- NEW: Helper method to show the width constraint popup ---
+  void _showWidthConstraintMenu(BuildContext context, Offset globalPos, CompassXSpline spline, CompassSplineNode node, bool isLeft) async {
+     final isPinned = isLeft ? node.isLeftWidthPinned : node.isRightWidthPinned;
+     final selected = await showMenu<String>(
+        context: context,
+        position: RelativeRect.fromLTRB(globalPos.dx, globalPos.dy, globalPos.dx, globalPos.dy),
+        items: [
+           PopupMenuItem(
+              value: 'toggle',
+              child: Text(isPinned ? 'Remove Width Constraint' : 'Set Width Constraint Flag'),
+           )
+        ]
+     );
+     if (selected == 'toggle') {
+        engine.setWidthConstraint(spline, node, isLeft, !isPinned);
+     }
+  }
+
   Future<void> onSecondaryTapDown(
     TapDownDetails details, 
     BuildContext context, 
@@ -719,6 +736,24 @@ class CanvasController extends ChangeNotifier {
     final RenderBox renderBox = context.findRenderObject() as RenderBox;
     final localPosition = renderBox.globalToLocal(details.globalPosition);
     final logicalPosition = _getLogicalPosition(localPosition);
+
+    // --- NEW: Right-Click Width Constraint Hit Test ---
+    final selForHandles = engine.selectedShape;
+    if (isWPressed && selForHandles is CompassXSpline && showScaffolding && showHandles) {
+      final handleThreshold = 24.0 / canvasScale;
+      for (var node in selForHandles.nodes) {
+         final leftDot = _getWidthHandlePosition(node, true, selForHandles);
+         if (leftDot != null && (logicalPosition - leftDot).distance < handleThreshold) {
+            _showWidthConstraintMenu(context, details.globalPosition, selForHandles, node, true);
+            return;
+         }
+         final rightDot = _getWidthHandlePosition(node, false, selForHandles);
+         if (rightDot != null && (logicalPosition - rightDot).distance < handleThreshold) {
+            _showWidthConstraintMenu(context, details.globalPosition, selForHandles, node, false);
+            return;
+         }
+      }
+    }
 
     if (currentTool == CompassTool.addPen && _activeSpline != null) {
       _activeSpline = null;
@@ -1647,6 +1682,7 @@ class CanvasController extends ChangeNotifier {
             activeWidthNode = node;
             activeWidthIsLeft = true; // arbitrary; a unified pull ignores side
             _isUnifiedWidthPull = true;
+            _activeWidthSpline = selForHandles; // <--- NEW
             notifyListeners();
             return;
           }
@@ -1658,6 +1694,7 @@ class CanvasController extends ChangeNotifier {
           activeWidthNode = node;
           activeWidthIsLeft = true;
           _isUnifiedWidthPull = false;
+          _activeWidthSpline = selForHandles; // <--- NEW
           notifyListeners();
           return;
         }
@@ -1667,6 +1704,7 @@ class CanvasController extends ChangeNotifier {
           activeWidthNode = node;
           activeWidthIsLeft = false;
           _isUnifiedWidthPull = false;
+          _activeWidthSpline = selForHandles; // <--- NEW
           notifyListeners();
           return;
         }
@@ -1857,7 +1895,7 @@ class CanvasController extends ChangeNotifier {
     }
 
     // --- Width Drag Logic ---
-    if (activeWidthNode != null) {
+    if (activeWidthNode != null && _activeWidthSpline != null) {
       final node = activeWidthNode!;
       final pt = Offset(node.point.x.value, node.point.y.value);
       final newWidth = (logicalPosition - pt).distance;
@@ -1874,14 +1912,10 @@ class CanvasController extends ChangeNotifier {
       // Unified first-pull (both sides ~zero at grab) OR an explicit Shift re-link
       // drives both sides together; otherwise each handle is independent.
       if (_isUnifiedWidthPull || liveShift) {
-        node.widthLeft.value = newWidth;
-        node.widthRight.value = newWidth;
+        engine.updateNodeWidth(_activeWidthSpline!, node, newWidth, true);
+        engine.updateNodeWidth(_activeWidthSpline!, node, newWidth, false);
       } else {
-        if (activeWidthIsLeft) {
-          node.widthLeft.value = newWidth;
-        } else {
-          node.widthRight.value = newWidth;
-        }
+        engine.updateNodeWidth(_activeWidthSpline!, node, newWidth, activeWidthIsLeft);
       }
       _lastPanPosition = logicalPosition;
       return;
@@ -1978,6 +2012,7 @@ class CanvasController extends ChangeNotifier {
     } else if (activeWidthNode != null) { 
       activeWidthNode = null;
       _isUnifiedWidthPull = false;
+      _activeWidthSpline = null;
       engine.finalizePointDrag();
       notifyListeners();
     } else if (activeHandleNode != null) {
@@ -2022,6 +2057,7 @@ class CanvasController extends ChangeNotifier {
     activeHandleNode = null;
     activeWidthNode = null; 
     _isUnifiedWidthPull = false;
+    _activeWidthSpline = null;
     _activeTensionNode = null;
 
     _isWidthSmoothing = false;

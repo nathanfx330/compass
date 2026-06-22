@@ -525,7 +525,7 @@ class CompassRenderer extends CustomPainter {
       ..strokeWidth = 1.0 * invScale
       ..style = PaintingStyle.stroke;
 
-    void drawDiamond(Offset center, bool isActive) {
+    void drawDiamond(Offset center, bool isActive, bool isPinned) { // <--- UPDATED
       final size = isActive ? 8.0 * invScale : 6.0 * invScale;
       final path = Path()
         ..moveTo(center.dx, center.dy - size)
@@ -533,12 +533,23 @@ class CompassRenderer extends CustomPainter {
         ..lineTo(center.dx, center.dy + size)
         ..lineTo(center.dx - size, center.dy)
         ..close();
-      if (isActive) {
-        canvas.drawPath(path, activeFillPaint);
-        canvas.drawPath(path, Paint()..color = Colors.teal..strokeWidth = 2.0 * invScale..style = PaintingStyle.stroke);
+        
+      if (isPinned) {
+        if (isActive) {
+          canvas.drawPath(path, Paint()..color = Colors.white..style = PaintingStyle.fill);
+          canvas.drawPath(path, Paint()..color = Colors.orangeAccent..strokeWidth = 2.0 * invScale..style = PaintingStyle.stroke);
+        } else {
+          canvas.drawPath(path, Paint()..color = Colors.orangeAccent..style = PaintingStyle.fill);
+          canvas.drawPath(path, Paint()..color = pointBorderColor..strokeWidth = 1.0 * invScale..style = PaintingStyle.stroke);
+        }
       } else {
-        canvas.drawPath(path, dotPaint);
-        canvas.drawPath(path, borderPaint);
+        if (isActive) {
+          canvas.drawPath(path, activeFillPaint);
+          canvas.drawPath(path, Paint()..color = Colors.teal..strokeWidth = 2.0 * invScale..style = PaintingStyle.stroke);
+        } else {
+          canvas.drawPath(path, dotPaint);
+          canvas.drawPath(path, borderPaint);
+        }
       }
     }
 
@@ -591,8 +602,8 @@ class CompassRenderer extends CustomPainter {
         _drawDashedLine(canvas, pt, rightActual, linePaint, invScale);
       }
       
-      drawDiamond(leftActual, node == activeWidthNode && activeWidthIsLeft);
-      drawDiamond(rightActual, node == activeWidthNode && !activeWidthIsLeft);
+      drawDiamond(leftActual, node == activeWidthNode && activeWidthIsLeft, node.isLeftWidthPinned); // <--- UPDATED
+      drawDiamond(rightActual, node == activeWidthNode && !activeWidthIsLeft, node.isRightWidthPinned); // <--- UPDATED
     }
   }
 

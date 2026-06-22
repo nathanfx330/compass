@@ -36,6 +36,10 @@ class CompassSplineNode {
   final ValueNotifier<double> widthLeft;
   final ValueNotifier<double> widthRight;
 
+  // --- NEW: Width Constraint Flags ---
+  bool isLeftWidthPinned;
+  bool isRightWidthPinned;
+
   CompassSplineNode({
     required this.point, 
     double tension = 1.0, 
@@ -43,6 +47,8 @@ class CompassSplineNode {
     this.handleOut,
     double widthLeft = 0.0,
     double widthRight = 0.0,
+    this.isLeftWidthPinned = false,
+    this.isRightWidthPinned = false,
   }) : tension = ValueNotifier(tension),
        widthLeft = ValueNotifier(widthLeft),
        widthRight = ValueNotifier(widthRight);

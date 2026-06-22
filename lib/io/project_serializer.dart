@@ -55,19 +55,20 @@ class ProjectSerializer {
         } else if (shape is CompassRectangle) {
           buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}');
         } else if (shape is CompassXSpline) {
-          // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR
-          // when the node carries explicit Bezier handles or variable width. 
+          // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR:pinL:pinR
+          // when the node carries explicit Bezier handles, variable width, or width pins. 
           // "null" is used for handles that remain fluid, preserving Catmull-Rom math.
           final nodesStr = shape.nodes.map((n) {
             final hasHandles = n.handleIn != null || n.handleOut != null;
             final hasWidth = n.widthLeft.value > 0.001 || n.widthRight.value > 0.001;
+            final hasPins = n.isLeftWidthPinned || n.isRightWidthPinned;
 
-            if (hasHandles || hasWidth) {
+            if (hasHandles || hasWidth || hasPins) {
               final hIX = n.handleIn?.dx.toString() ?? 'null';
               final hIY = n.handleIn?.dy.toString() ?? 'null';
               final hOX = n.handleOut?.dx.toString() ?? 'null';
               final hOY = n.handleOut?.dy.toString() ?? 'null';
-              return '${n.point.id}:${n.tension.value}:$hIX:$hIY:$hOX:$hOY:${n.widthLeft.value}:${n.widthRight.value}';
+              return '${n.point.id}:${n.tension.value}:$hIX:$hIY:$hOX:$hOY:${n.widthLeft.value}:${n.widthRight.value}:${n.isLeftWidthPinned}:${n.isRightWidthPinned}';
             }
             return '${n.point.id}:${n.tension.value}';
           }).join('|');
@@ -303,6 +304,8 @@ class ProjectSerializer {
                   Offset? hIn, hOut;
                   double wL = 0.0;
                   double wR = 0.0;
+                  bool pinL = false;
+                  bool pinR = false;
                   
                   if (np.length == 4) { // Legacy symmetric fallback
                     final hx = double.tryParse(np[2]) ?? 0.0;
@@ -320,6 +323,10 @@ class ProjectSerializer {
                       wL = double.tryParse(np[6]) ?? 0.0;
                       wR = double.tryParse(np[7]) ?? 0.0;
                     }
+                    if (np.length >= 10) { // Constraint Flags
+                      pinL = np[8] == 'true';
+                      pinR = np[9] == 'true';
+                    }
                   }
                   
                   final node = CompassSplineNode(
@@ -329,6 +336,8 @@ class ProjectSerializer {
                     handleOut: hOut,
                     widthLeft: wL,
                     widthRight: wR,
+                    isLeftWidthPinned: pinL,
+                    isRightWidthPinned: pinR,
                   );
                   node.tension.addListener(onUpdate); 
                   node.widthLeft.addListener(onUpdate);

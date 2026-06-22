@@ -39,6 +39,7 @@ If you drag Point A, the line moves, and the circle moves. If you drag Point B, 
 Compass is rapidly evolving into a desktop-grade parametric engine. It currently supports:
 
 * **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines. Splines live in two mathematical modes: a *fluid* Catmull-Rom curve whose vertex tension you adjust with the `A` key via a global distance tether, or *explicit* Bézier—right-click any vertex to **Convert to Bézier** and freeze its current tangent into independently draggable in/out handles for exact, asymmetric control. Right-click again to **Reset Handles** and dissolve back into fluid curvature. Conversion is loss-free: the curve never jumps, it simply becomes editable.
+* **Parametric Area Strokes & Width Constraints:** Hold `W` to sculpt variable-width ribbon strokes. Instead of manually smoothing hundreds of points, **Right-click a width handle** to drop a Constraint Flag (turning it orange). Drop two flags, and Compass dynamically calculates the parametric distance between them, fluidly interpolating the width of every node in-between. Dragging a pinned flag mathematically updates the entire tapered section in real-time. 
 * **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, `R` to rotate a shape locally, `Ctrl/Cmd+R` to explicitly rotate isolated Bézier handles, or `Shift+Drag` to translate complex shape groupings. Explicit Bézier handles rotate in perfect lockstep with their points, so a hand-tuned corner stays mathematically true through any rotation.
 * **Axis-Locked Editing:** Hold `1` or `2` while dragging a vertex to constrain its motion to a single axis—horizontal or vertical—anchored exactly to the point where the drag began, for pixel-true orthogonal moves without guesswork.
 * **Infinite Mathematical Canvas:** Pan infinitely using the middle mouse button and zoom seamlessly without breaking underlying coordinate math.
@@ -60,7 +61,7 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 
 **Mouse Controls:**
 * **Left Click:** Select shapes, drag points. Drag the purple in/out dots of a Bézier vertex to sculpt its curve handles directly.
-* **Right Click:** Context menu for Boolean operations, baking a layer into editable X-Splines, exporting to OBJ, converting geometry to splines, converting a vertex to or from Bézier handles, and hiding scaffolding.
+* **Right Click:** Context menu for Boolean operations, baking a layer into editable X-Splines, exporting to OBJ, converting geometry to splines, converting a vertex to or from Bézier handles, **toggling parametric width constraint flags**, and hiding scaffolding.
 * **Middle Click & Drag:** Pan the infinite canvas.
 * **Scroll Wheel:** Zoom the infinite canvas.
 
@@ -70,7 +71,7 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 * **`Shift + R + Drag`**: Rotate an entire hierarchical rigid-body system around the targeted centroid.
 * **`Ctrl/Cmd + R + Drag`**: Rotate the explicit Bézier handles of a selected vertex (or group of vertices) around their local centroid without moving the underlying points. Automatically converts fluid Catmull-Rom nodes to explicit handles.
 * **`A + Drag`**: Target an X-Spline vertex and drag anywhere on the screen to fluidly adjust its Catmull-Rom curve tension.
-* **`W + Drag`**: Target an X-Spline vertex and drag to adjust its variable stroke width. Shift+Drag to symmetrically scale both sides.
+* **`W + Drag`**: Target an X-Spline vertex and drag to adjust its variable stroke width. Shift+Drag to symmetrically scale both sides. Right-click the width handle to drop an Orange Width Constraint flag for automatic parametric tapering.
 * **`F + Drag`**: With an X-Spline vertex selected, hold F and drag horizontally anywhere on the screen to dynamically apply a curve-aware fillet (corner rounding).
 * **`Z + Drag`**: Select multiple nodes, hold Z, and drag to Laplacian smooth them. Hold `Shift+Z` to smooth variable widths.
 * **`1 + Drag`**: Constrain a point or vertex drag to the **horizontal** axis. The Y coordinate is frozen at the drag's origin, so the point can only travel left and right.
