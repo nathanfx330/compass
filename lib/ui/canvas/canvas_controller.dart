@@ -1,4 +1,4 @@
-// /lib/ui/canvas/canvas_controller.dart
+// lib/ui/canvas/canvas_controller.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -6,19 +6,15 @@ import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart'; 
 
 import '../../engine.dart';
-import '../../constraints.dart';
 
 import '../../models/geometry/point.dart';
 import '../../models/geometry/shape.dart';
-import '../../models/geometry/line.dart';
-import '../../models/geometry/circle.dart';
-import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
-import '../../models/geometry/rectangle.dart';
 
 // --- Imports ---
-import '../../ui/workspace/dialogs.dart';
-import 'canvas_hit_tester.dart';
+import 'canvas_geometry.dart';       
+import 'canvas_keyboard_handler.dart'; 
+import 'canvas_gesture_handler.dart'; // <--- NEW: Extracted Gestures
 
 // Defines the current interaction mode for the canvas
 enum CompassTool { select, addPoint, addLine, addCircle, addSpiral, addPen, addRect } 
@@ -27,16 +23,20 @@ class CanvasController extends ChangeNotifier {
   final CompassEngine engine;
 
   CanvasController(this.engine) {
-    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
+    HardwareKeyboard.instance.addHandler(_onKeyEvent);
   }
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
+    HardwareKeyboard.instance.removeHandler(_onKeyEvent);
     super.dispose();
   }
 
-  // --- PUBLIC STATE FOR UI ---
+  bool _onKeyEvent(KeyEvent event) {
+    return CanvasKeyboardHandler.handleKeyEvent(event, this, engine);
+  }
+
+  // --- PUBLIC STATE FOR UI & HANDLERS ---
   CompassTool currentTool = CompassTool.select;
   CompassPoint? shapeStartPoint; 
   
@@ -52,40 +52,26 @@ class CanvasController extends ChangeNotifier {
   CompassSplineNode? activeHandleNode;
   bool activeHandleIsOut = false;
 
-  // --- NEW: Live Fillet State ---
   CompassSplineNode? activeFilletNode;
   CompassXSpline? activeFilletSpline;
   double activeFilletRadius = 0.0;
 
-  // --- NEW: Width Tool (W Key) State ---
   bool isWPressed = false;
   CompassSplineNode? activeWidthNode;
   bool activeWidthIsLeft = false;
-  CompassXSpline? _activeWidthSpline; // <--- NEW: Track the spline being dragged
+  CompassXSpline? activeWidthSpline; 
+  bool isUnifiedWidthPull = false;
 
-  // First-pull-from-zero unification: when a width drag begins on a node whose
-  // both sides are ~zero, that drag pushes BOTH sides out together (you tune each
-  // side independently only after a stroke exists). Reset on drag end/cancel and
-  // on W release.
-  bool _isUnifiedWidthPull = false;
-
-  // --- NEW: Smooth Tool (Z key) State ---
-  // Lasso-then-smooth: the user selects nodes first, then holds Z and drags; the
-  // drag distance is the smoothing amount (same magnitude-from-drag pattern as A
-  // and F). isZPressed is exposed for the HUD overlay. The originals maps are
-  // captured ONCE at pan-start so smoothNodes can recompute from the starting
-  // state every tick (reversible within the drag, no compounding).
   bool isZPressed = false;
-  bool isShiftZPressed = false; // <--- NEW: Track Shift+Z separately for widths
+  bool isShiftZPressed = false; 
   
-  bool _isSmoothing = false;
-  final Map<CompassPoint, Offset> _smoothOrigPositions = {};
-  final Map<CompassSplineNode, (Offset?, Offset?)> _smoothOrigHandles = {};
+  bool isSmoothing = false;
+  final Map<CompassPoint, Offset> smoothOrigPositions = {};
+  final Map<CompassSplineNode, (Offset?, Offset?)> smoothOrigHandles = {};
 
-  bool _isWidthSmoothing = false; // <--- NEW: Width smoothing state
-  final Map<CompassSplineNode, (double, double)> _smoothOrigWidths = {}; // <--- NEW: Capture starting widths
+  bool isWidthSmoothing = false; 
+  final Map<CompassSplineNode, (double, double)> smoothOrigWidths = {}; 
 
-  // --- Q-hover "Add Resolution" preview state ---
   CompassXSpline? addVertexSpline;
   int addVertexSegmentIndex = -1;
   Offset? addVertexPreviewPos;
@@ -96,149 +82,76 @@ class CanvasController extends ChangeNotifier {
 
   bool isRPressed = false;
   bool isShiftRPressed = false;
-  bool isCtrlRPressed = false; // <--- NEW: Ctrl+R / Cmd+R State
+  bool isCtrlRPressed = false; 
   bool isShiftPressed = false;
   bool isAPressed = false; 
   bool isFPressed = false; 
   bool isQPressed = false; 
-  
-  // --- NEW: Axis Locking State ---
   bool is1Pressed = false; 
   bool is2Pressed = false; 
 
   Offset? rotationPivotOffset; 
 
-  // --- PRIVATE INTERNAL STATE ---
-  Offset? _lastPanPosition; 
-  Offset? _dragStartLogicalPosition; 
-  Set<CompassPoint> _initialSelectionBeforeBox = {};
-  bool _isPanningSelectedPoints = false;
+  // Made public so CanvasGestureHandler can access them
+  Offset? lastPanPosition; 
+  Offset? dragStartLogicalPosition; 
+  Set<CompassPoint> initialSelectionBeforeBox = {};
+  bool isPanningSelectedPoints = false;
+  bool isStrictPanningSelection = false;
 
-  bool _isStrictPanningSelection = false;
-
-  (CompassPoint?, bool)? _pendingSelectPress;
+  (CompassPoint?, bool)? pendingSelectPress;
   
-  CompassXSpline? _activeSpline;
-  CompassSplineNode? _activeTensionNode; 
+  CompassXSpline? activeSpline;
+  CompassSplineNode? activeTensionNode; 
 
-  bool _isRotating = false;
-  bool _isPanningShape = false;
+  bool isRotating = false;
+  bool isPanningShape = false;
   
-  Set<CompassPoint> _transformingPoints = {}; 
-  final List<CompassSplineNode> _rotatingHandleNodes = [];
-  final double _hitThreshold = 20.0; 
+  Set<CompassPoint> transformingPoints = {}; 
+  final List<CompassSplineNode> rotatingHandleNodes = [];
+  final double hitThreshold = 20.0; 
 
   // --- TOOL MANAGEMENT ---
   void setTool(CompassTool tool) {
     currentTool = tool;
     selectedPoints.clear(); 
     shapeStartPoint = null; 
-    _activeSpline = null;
-    _pendingSelectPress = null;
-    _clearAddVertexHover();
+    activeSpline = null;
+    pendingSelectPress = null;
+    clearAddVertexHover();
     notifyListeners();
   }
 
-  // --- KEYBOARD HANDLING ---
-  bool _handleKeyEvent(KeyEvent event) {
-    final keys = HardwareKeyboard.instance.logicalKeysPressed;
-    final isR = keys.contains(LogicalKeyboardKey.keyR);
-    final isShift = keys.contains(LogicalKeyboardKey.shiftLeft) || keys.contains(LogicalKeyboardKey.shiftRight);
-    final isA = keys.contains(LogicalKeyboardKey.keyA);
-    final isF = keys.contains(LogicalKeyboardKey.keyF); 
-    final isQ = keys.contains(LogicalKeyboardKey.keyQ); 
-    final isW = keys.contains(LogicalKeyboardKey.keyW); 
-
-    // Handle Ctrl/Cmd for the new rotation mode
-    final isCtrl = keys.contains(LogicalKeyboardKey.controlLeft) || keys.contains(LogicalKeyboardKey.controlRight);
-    final isMeta = keys.contains(LogicalKeyboardKey.metaLeft) || keys.contains(LogicalKeyboardKey.metaRight);
-    final isCtrlOrMeta = isCtrl || isMeta;
-
-    // Plain Z only -- exclude Ctrl/Cmd so the smooth modifier never collides with
-    // Ctrl+Z / Cmd+Z undo (handled at the workspace level via CallbackShortcuts).
-    final isZ = keys.contains(LogicalKeyboardKey.keyZ) && !isCtrlOrMeta;
-
-    final isShiftZ = isZ && isShift;
-    final isPlainZ = isZ && !isShift;
-
-    final is1 = keys.contains(LogicalKeyboardKey.digit1) || keys.contains(LogicalKeyboardKey.numpad1);
-    final is2 = keys.contains(LogicalKeyboardKey.digit2) || keys.contains(LogicalKeyboardKey.numpad2);
-
-    final isDelete = keys.contains(LogicalKeyboardKey.delete) || keys.contains(LogicalKeyboardKey.backspace);
-
-    if (isDelete && selectedPoints.isNotEmpty && event is KeyDownEvent) {
-       for (var p in selectedPoints.toList()) {
-         engine.removePoint(p);
-       }
-       selectedPoints.clear();
-       notifyListeners();
-    }
-
-    final bool shiftR = isR && isShift && !isCtrlOrMeta;
-    final bool ctrlR = isR && isCtrlOrMeta && !isShift;
-    final bool justR = isR && !isShift && !isCtrlOrMeta;
-    
-    // Don't trigger standard shift-pan if we are using the Width tool symmetrically, or smoothing widths
-    final bool justShift = isShift && !isR && !isA && !isF && !isW && !isZ; 
-
-    if (isRPressed != justR || isShiftRPressed != shiftR || isCtrlRPressed != ctrlR || isShiftPressed != justShift || 
-        isAPressed != isA || isFPressed != isF || isQPressed != isQ || isWPressed != isW ||
-        isZPressed != isPlainZ || isShiftZPressed != isShiftZ ||
-        is1Pressed != is1 || is2Pressed != is2) {
-      
-      isRPressed = justR;
-      isShiftRPressed = shiftR;
-      isCtrlRPressed = ctrlR;
-      isShiftPressed = justShift;
-      isAPressed = isA; 
-      isFPressed = isF; 
-      isQPressed = isQ; 
-      isWPressed = isW; 
-      isZPressed = isPlainZ; 
-      isShiftZPressed = isShiftZ;
-      is1Pressed = is1; 
-      is2Pressed = is2; 
-
-      if (justR || shiftR || ctrlR) {
-        _setupRotationState(hierarchy: shiftR, handlesOnly: ctrlR);
-      } else {
-        rotationPivotOffset = null;
-        _transformingPoints.clear();
-        _isRotating = false; 
-      }
-
-      if (isA) {
-        _setupTensionState();
-      } else {
-        targetTensionNode = null;
-      }
-
-      if (!isF && activeFilletNode != null) {
-        activeFilletNode = null;
-        activeFilletSpline = null;
-        activeFilletRadius = 0.0;
-      }
-
-      if (!isW) {
-        activeWidthNode = null;
-        _isUnifiedWidthPull = false;
-        _activeWidthSpline = null;
-      }
-
-      if (hoverPosition != null) {
-        _updateAddVertexHover(hoverPosition!);
-      } else {
-        _clearAddVertexHover();
-      }
-      
+  void removePointFromSelection(CompassPoint point) {
+    if (selectedPoints.contains(point)) {
+      selectedPoints.remove(point);
       notifyListeners();
     }
-    return false; 
   }
 
-  // --- RIGID BODY & MATH LOGIC ---
+  void startSplineFrom(CompassPoint point) {
+    currentTool = CompassTool.addPen;
+    selectedPoints.clear(); 
+    shapeStartPoint = null;
+    
+    activeSpline = CompassXSpline(isClosed: false);
+    final node = CompassSplineNode(point: point, tension: 1.0);
+    node.tension.addListener(engine.notifyListeners);
+    activeSpline!.addNode(node);
+    engine.addShape(activeSpline!);
+    notifyListeners();
+  }
 
-  void _setupTensionState() {
+  void startCircleFrom(CompassPoint point) {
+    currentTool = CompassTool.addCircle;
+    shapeStartPoint = point;
+    selectedPoints.clear();
+    activeSpline = null;
+    notifyListeners();
+  }
+
+  // --- STATE SETUP & TEARDOWN HELPERS ---
+  void setupTensionState() {
     CompassPoint? explicitPoint = selectedPoints.isNotEmpty ? selectedPoints.first : hoveredPoint;
     if (explicitPoint != null) {
       for (var layer in engine.layers) {
@@ -258,140 +171,17 @@ class CanvasController extends ChangeNotifier {
     }
   }
 
-  List<CompassPoint> _getPointsOfShape(CompassShape shape) {
-    if (shape is CompassLine) return [shape.start, shape.end];
-    if (shape is CompassCircle) return [shape.center, if (shape.radiusPoint != null) shape.radiusPoint!];
-    if (shape is CompassSpiral) return [shape.center, shape.startPoint];
-    if (shape is CompassRectangle) return [shape.p1, shape.p2];
-    if (shape is CompassXSpline) {
-      final points = shape.nodes.map((n) => n.point).toList();
-      if (shape.anchorPoint != null) points.add(shape.anchorPoint!);
-      return points;
-    }
-    return [];
-  }
-
-  Offset? _getShapeCentroid(CompassShape shape) {
-    if (shape is CompassXSpline) {
-      if (shape.anchorPoint != null) {
-        return Offset(shape.anchorPoint!.x.value, shape.anchorPoint!.y.value);
-      }
-      if (shape.nodes.isNotEmpty) {
-        double cx = 0, cy = 0;
-        for (var n in shape.nodes) {
-          cx += n.point.x.value;
-          cy += n.point.y.value;
-        }
-        return Offset(cx / shape.nodes.length, cy / shape.nodes.length);
-      }
-      return null;
-    } else if (shape is CompassCircle) {
-      return Offset(shape.center.x.value, shape.center.y.value);
-    } else if (shape is CompassSpiral) {
-      return Offset(shape.center.x.value, shape.center.y.value);
-    } else if (shape is CompassRectangle) {
-      return Offset((shape.p1.x.value + shape.p2.x.value) / 2, (shape.p1.y.value + shape.p2.y.value) / 2);
-    } else if (shape is CompassLine) {
-      return Offset((shape.start.x.value + shape.end.x.value) / 2, (shape.start.y.value + shape.end.y.value) / 2);
-    }
-    return null;
-  }
-
-  Set<CompassPoint> _getRigidBody(CompassShape? shape, CompassPoint? explicitPoint, bool hierarchy) {
-    Set<CompassPoint> rigidBody = {};
-    
-    if (shape != null) {
-      rigidBody.addAll(_getPointsOfShape(shape));
-    } else if (explicitPoint != null) {
-      rigidBody.add(explicitPoint);
-    }
-
-    if (hierarchy) {
-      Set<CompassShape> visitedShapes = shape != null ? {shape} : {};
-      List<CompassPoint> queue = rigidBody.toList();
-
-      while (queue.isNotEmpty) {
-        CompassPoint p = queue.removeLast();
-
-        for (var child in p.attachedPoints) {
-          if (!rigidBody.contains(child)) {
-            rigidBody.add(child);
-            queue.add(child);
-          }
-        }
-
-        for (var other in engine.points) {
-          if (other == p) continue;
-          if (other.attachedPoints.contains(p) && !rigidBody.contains(other)) {
-            rigidBody.add(other);
-            queue.add(other);
-          }
-        }
-
-        for (var layer in engine.layers) {
-          if (!layer.isVisible || layer.isLocked) continue; 
-          for (var s in layer.shapes) {
-            if (!s.isVisible || visitedShapes.contains(s)) continue;
-            
-            final shapePts = _getPointsOfShape(s);
-            if (shapePts.contains(p)) {
-              visitedShapes.add(s);
-              for (var sp in shapePts) {
-                if (!rigidBody.contains(sp)) {
-                  rigidBody.add(sp);
-                  queue.add(sp);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    return rigidBody;
-  }
-
-  Set<CompassPoint> _expandForShapeCohesion(Set<CompassPoint> pts) {
-    final expanded = Set<CompassPoint>.from(pts);
-    for (var layer in engine.layers) {
-      if (layer.isLocked) continue;
-      for (var shape in layer.shapes) {
-        if (shape is CompassCircle && shape.radiusPoint != null) {
-          if (expanded.contains(shape.center) || expanded.contains(shape.radiusPoint)) {
-            expanded.add(shape.center);
-            expanded.add(shape.radiusPoint!);
-          }
-        } else if (shape is CompassSpiral) {
-          if (expanded.contains(shape.center) || expanded.contains(shape.startPoint)) {
-            expanded.add(shape.center);
-            expanded.add(shape.startPoint);
-          }
-        }
-      }
-    }
-    return expanded;
-  }
-
-  Offset? _centroidOfPoints(Set<CompassPoint> pts) {
-    if (pts.isEmpty) return null;
-    double cx = 0, cy = 0;
-    for (var p in pts) {
-      cx += p.x.value;
-      cy += p.y.value;
-    }
-    return Offset(cx / pts.length, cy / pts.length);
-  }
-
-  void _setupRotationState({required bool hierarchy, bool handlesOnly = false}) {
+  void setupRotationState({required bool hierarchy, bool handlesOnly = false}) {
     if (selectedPoints.length >= 2) {
-      rotationPivotOffset = _centroidOfPoints(selectedPoints);
+      rotationPivotOffset = CanvasGeometry.centroidOfPoints(selectedPoints); 
       if (hierarchy && !handlesOnly) {
         Set<CompassPoint> body = {};
         for (var p in selectedPoints) {
-          body.addAll(_getRigidBody(null, p, true));
+          body.addAll(CanvasGeometry.getRigidBody(engine, null, p, true)); 
         }
-        _transformingPoints = _expandForShapeCohesion(body);
+        transformingPoints = CanvasGeometry.expandForShapeCohesion(engine, body); 
       } else {
-        _transformingPoints = Set<CompassPoint>.from(selectedPoints);
+        transformingPoints = Set<CompassPoint>.from(selectedPoints);
       }
       return;
     }
@@ -401,10 +191,10 @@ class CanvasController extends ChangeNotifier {
     if (handlesOnly) {
       if (explicitPoint != null) {
         rotationPivotOffset = Offset(explicitPoint.x.value, explicitPoint.y.value);
-        _transformingPoints = {explicitPoint};
+        transformingPoints = {explicitPoint};
       } else {
         rotationPivotOffset = null;
-        _transformingPoints = {};
+        transformingPoints = {};
       }
       return;
     }
@@ -414,7 +204,7 @@ class CanvasController extends ChangeNotifier {
 
     if (hierarchy) {
       if (selShape != null) {
-        pivotOffset = _getShapeCentroid(selShape);
+        pivotOffset = CanvasGeometry.getShapeCentroid(selShape); 
       } else if (explicitPoint != null) {
         pivotOffset = Offset(explicitPoint.x.value, explicitPoint.y.value);
       }
@@ -422,109 +212,38 @@ class CanvasController extends ChangeNotifier {
       if (explicitPoint != null) {
         pivotOffset = Offset(explicitPoint.x.value, explicitPoint.y.value);
       } else if (selShape != null) {
-        pivotOffset = _getShapeCentroid(selShape);
+        pivotOffset = CanvasGeometry.getShapeCentroid(selShape); 
       }
     }
 
     rotationPivotOffset = pivotOffset;
-    _transformingPoints = _expandForShapeCohesion(_getRigidBody(selShape, explicitPoint, hierarchy));
-  }
-
-  Offset _getLogicalPosition(Offset localPosition) {
-    return (localPosition - panOffset) / canvasScale;
-  }
-
-  Offset? _handleDotPosition(CompassSplineNode node, bool isOut) {
-    final handle = isOut ? node.handleOut : node.handleIn;
-    if (handle == null) return null;
-    final t = node.tension.value;
-    return Offset(
-      node.point.x.value + handle.dx * t,
-      node.point.y.value + handle.dy * t,
+    transformingPoints = CanvasGeometry.expandForShapeCohesion(
+      engine, CanvasGeometry.getRigidBody(engine, selShape, explicitPoint, hierarchy) 
     );
   }
 
-  bool _nodeHasZeroWidth(CompassSplineNode node) {
-    return node.widthLeft.value < 0.01 && node.widthRight.value < 0.01;
+  void clearRotationState() {
+    rotationPivotOffset = null;
+    transformingPoints.clear();
+    isRotating = false;
   }
 
-  Offset? _getWidthHandlePosition(CompassSplineNode node, bool isLeft, CompassXSpline spline) {
-    int i = spline.nodes.indexOf(node);
-    if (i == -1) return null;
-    
-    final controls = spline.getEvaluatedControls();
-    int n = spline.nodes.length;
-    
-    final pt = Offset(node.point.x.value, node.point.y.value);
-    Offset prevPt = spline.isClosed ? Offset(spline.nodes[(i - 1 + n) % n].point.x.value, spline.nodes[(i - 1 + n) % n].point.y.value) : (i > 0 ? Offset(spline.nodes[i - 1].point.x.value, spline.nodes[i - 1].point.y.value) : pt);
-    Offset nextPt = spline.isClosed ? Offset(spline.nodes[(i + 1) % n].point.x.value, spline.nodes[(i + 1) % n].point.y.value) : (i < n - 1 ? Offset(spline.nodes[i + 1].point.x.value, spline.nodes[i + 1].point.y.value) : pt);
-
-    final hOut = controls[i].$1;
-    final hIn = controls[i].$2;
-
-    Offset vOut = hOut;
-    if (vOut.distance < 0.001) vOut = nextPt - pt;
-    Offset vIn = Offset(-hIn.dx, -hIn.dy);
-    if (vIn.distance < 0.001) vIn = pt - prevPt;
-
-    if (!spline.isClosed) {
-      if (i == 0) vIn = vOut;
-      if (i == n - 1) vOut = vIn;
-    }
-
-    double lenOut = vOut.distance;
-    double lenIn = vIn.distance;
-    Offset tOut = lenOut > 0.001 ? vOut / lenOut : Offset.zero;
-    Offset tIn = lenIn > 0.001 ? vIn / lenIn : Offset.zero;
-
-    Offset T = tIn + tOut;
-    double lenT = T.distance;
-    if (lenT > 0.001) T = T / lenT; else T = tOut;
-    
-    Offset N = Offset(-T.dy, T.dx);
-    
-    if (isLeft) {
-      return pt + N * node.widthLeft.value;
-    } else {
-      return pt - N * node.widthRight.value;
-    }
+  void clearFilletState() {
+    activeFilletNode = null;
+    activeFilletSpline = null;
+    activeFilletRadius = 0.0;
   }
 
-  void _captureSmoothOriginals() {
-    _smoothOrigPositions.clear();
-    _smoothOrigHandles.clear();
-
-    for (var p in selectedPoints) {
-      _smoothOrigPositions[p] = Offset(p.x.value, p.y.value);
-    }
-
-    for (var layer in engine.layers) {
-      if (layer.isLocked) continue;
-      for (var shape in layer.shapes) {
-        if (shape is! CompassXSpline) continue;
-        List<(Offset, Offset)>? controls;
-        for (int i = 0; i < shape.nodes.length; i++) {
-          final node = shape.nodes[i];
-          if (!selectedPoints.contains(node.point)) continue;
-          controls ??= shape.getEvaluatedControls();
-          _smoothOrigHandles[node] = (controls[i].$2, controls[i].$1);
-        }
-      }
-    }
+  void clearWidthState() {
+    activeWidthNode = null;
+    isUnifiedWidthPull = false;
+    activeWidthSpline = null;
   }
 
-  void _captureSmoothOriginalWidths() {
-    _smoothOrigWidths.clear();
-    for (var layer in engine.layers) {
-      if (layer.isLocked) continue;
-      for (var shape in layer.shapes) {
-        if (shape is! CompassXSpline) continue;
-        for (var node in shape.nodes) {
-          if (!selectedPoints.contains(node.point)) continue;
-          _smoothOrigWidths[node] = (node.widthLeft.value, node.widthRight.value);
-        }
-      }
-    }
+  // --- INTERNAL MATH & HIT TESTING ---
+
+  Offset getLogicalPosition(Offset localPosition) {
+    return (localPosition - panOffset) / canvasScale;
   }
 
   Rect? get selectionBounds {
@@ -540,28 +259,15 @@ class CanvasController extends ChangeNotifier {
     return Rect.fromLTRB(minX, minY, maxX, maxY);
   }
 
-  bool _isPressOnSelection(Offset logical) {
-    if (selectedPoints.length < 2) return false;
-    final scaledThreshold = _hitThreshold / canvasScale;
-    for (var p in selectedPoints) {
-      if ((Offset(p.x.value, p.y.value) - logical).distance <= scaledThreshold) {
-        return true;
-      }
-    }
-    final b = selectionBounds;
-    if (b == null) return false;
-    return b.inflate(scaledThreshold).contains(logical);
-  }
-
   // --- Q-HOVER "ADD RESOLUTION" HELPERS ---
-  void _updateAddVertexHover(Offset logical) {
+  void updateAddVertexHover(Offset logical) {
     if (currentTool != CompassTool.select || !isQPressed || hoveredPoint != null) {
-      _clearAddVertexHover();
+      clearAddVertexHover();
       return;
     }
     final hit = _findNearestSplineSegment(logical);
     if (hit == null) {
-      _clearAddVertexHover();
+      clearAddVertexHover();
       return;
     }
     addVertexSpline = hit.$1;
@@ -569,14 +275,14 @@ class CanvasController extends ChangeNotifier {
     addVertexPreviewPos = hit.$3;
   }
 
-  void _clearAddVertexHover() {
+  void clearAddVertexHover() {
     addVertexSpline = null;
     addVertexSegmentIndex = -1;
     addVertexPreviewPos = null;
   }
 
   (CompassXSpline, int, Offset)? _findNearestSplineSegment(Offset logical) {
-    final scaledThreshold = _hitThreshold / canvasScale;
+    final scaledThreshold = hitThreshold / canvasScale;
 
     CompassXSpline? bestSpline;
     int bestSeg = -1;
@@ -604,7 +310,7 @@ class CanvasController extends ChangeNotifier {
           const samples = 16;
           double segMinDist = double.infinity;
           for (int s = 0; s <= samples; s++) {
-            final pt = _cubicAt(p0, p1, p2, p3, s / samples);
+            final pt = CanvasGeometry.cubicAt(p0, p1, p2, p3, s / samples); 
             final d = (pt - logical).distance;
             if (d < segMinDist) segMinDist = d;
           }
@@ -613,7 +319,7 @@ class CanvasController extends ChangeNotifier {
             bestDist = segMinDist;
             bestSpline = shape;
             bestSeg = i;
-            bestCenter = _cubicAt(p0, p1, p2, p3, 0.5);
+            bestCenter = CanvasGeometry.cubicAt(p0, p1, p2, p3, 0.5); 
           }
         }
       }
@@ -623,1456 +329,26 @@ class CanvasController extends ChangeNotifier {
     return (bestSpline, bestSeg, bestCenter);
   }
 
-  Offset _cubicAt(Offset p0, Offset p1, Offset p2, Offset p3, double t) {
-    final u = 1.0 - t;
-    final a = u * u * u;
-    final b = 3 * u * u * t;
-    final c = 3 * u * t * t;
-    final d = t * t * t;
-    return Offset(
-      a * p0.dx + b * p1.dx + c * p2.dx + d * p3.dx,
-      a * p0.dy + b * p1.dy + c * p2.dy + d * p3.dy,
-    );
-  }
-
-  // --- GESTURE ROUTING ---
-
-  void startCanvasPan() {
-    isPanningCanvas = true;
-    notifyListeners();
-  }
-
-  void updateCanvasPan(Offset delta) {
-    if (isPanningCanvas) {
-      panOffset += delta;
-      notifyListeners();
-    }
-  }
-
-  void endCanvasPan() {
-    if (isPanningCanvas) {
-      isPanningCanvas = false;
-      notifyListeners();
-    }
-  }
-
-  void handleScroll(PointerScrollEvent event, BuildContext context) {
-    final isRefUnlocked = engine.referenceLayer != null && !engine.referenceLayer!.isLocked;
-    
-    if (isRefUnlocked) {
-      final double zoomDelta = event.scrollDelta.dy > 0 ? -0.1 : 0.1;
-      engine.updateReferenceTransform(Offset.zero, zoomDelta, 0);
-    } else {
-      final RenderBox renderBox = context.findRenderObject() as RenderBox;
-      final localPosition = renderBox.globalToLocal(event.position);
-      final logicalPoint = _getLogicalPosition(localPosition);
-      
-      final double zoomFactor = event.scrollDelta.dy > 0 ? 0.9 : 1.1;
-      double newScale = canvasScale * zoomFactor;
-      newScale = newScale.clamp(0.05, 50.0); 
-      
-      canvasScale = newScale;
-      panOffset = localPosition - logicalPoint * canvasScale;
-      notifyListeners();
-    }
-  }
-
-  void onHover(PointerHoverEvent event, BuildContext context, bool showScaffolding) {
-    if (!showScaffolding) return;
-
-    final RenderBox renderBox = context.findRenderObject() as RenderBox;
-    final localPosition = renderBox.globalToLocal(event.position);
-    final logicalPosition = _getLogicalPosition(localPosition);
-
-    hoverPosition = logicalPosition;
-    hoveredPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
-
-    _updateAddVertexHover(logicalPosition);
-    
-    if ((isRPressed || isShiftRPressed || isCtrlRPressed) && rotationPivotOffset == null && hoveredPoint != null) {
-      _setupRotationState(hierarchy: isShiftRPressed, handlesOnly: isCtrlRPressed);
-    }
-
-    if (isAPressed && targetTensionNode == null && hoveredPoint != null) {
-      _setupTensionState();
-    }
-    
-    notifyListeners();
-  }
-
-  void clearHover() {
-    hoverPosition = null;
-    hoveredPoint = null;
-    _clearAddVertexHover();
-    notifyListeners();
-  }
-
-  // --- NEW: Helper method to show the width constraint popup ---
-  void _showWidthConstraintMenu(BuildContext context, Offset globalPos, CompassXSpline spline, CompassSplineNode node, bool isLeft) async {
-     final isPinned = isLeft ? node.isLeftWidthPinned : node.isRightWidthPinned;
-     final selected = await showMenu<String>(
-        context: context,
-        position: RelativeRect.fromLTRB(globalPos.dx, globalPos.dy, globalPos.dx, globalPos.dy),
-        items: [
-           PopupMenuItem(
-              value: 'toggle',
-              child: Text(isPinned ? 'Remove Width Constraint' : 'Set Width Constraint Flag'),
-           )
-        ]
-     );
-     if (selected == 'toggle') {
-        engine.setWidthConstraint(spline, node, isLeft, !isPinned);
-     }
-  }
-
-  Future<void> onSecondaryTapDown(
-    TapDownDetails details, 
-    BuildContext context, 
-    bool showScaffolding, 
-    VoidCallback onToggleScaffolding,
-    bool showHandles,
-    VoidCallback onToggleHandles
-  ) async {
-    final RenderBox renderBox = context.findRenderObject() as RenderBox;
-    final localPosition = renderBox.globalToLocal(details.globalPosition);
-    final logicalPosition = _getLogicalPosition(localPosition);
-
-    // --- NEW: Right-Click Width Constraint Hit Test ---
-    final selForHandles = engine.selectedShape;
-    if (isWPressed && selForHandles is CompassXSpline && showScaffolding && showHandles) {
-      final handleThreshold = 24.0 / canvasScale;
-      for (var node in selForHandles.nodes) {
-         final leftDot = _getWidthHandlePosition(node, true, selForHandles);
-         if (leftDot != null && (logicalPosition - leftDot).distance < handleThreshold) {
-            _showWidthConstraintMenu(context, details.globalPosition, selForHandles, node, true);
-            return;
-         }
-         final rightDot = _getWidthHandlePosition(node, false, selForHandles);
-         if (rightDot != null && (logicalPosition - rightDot).distance < handleThreshold) {
-            _showWidthConstraintMenu(context, details.globalPosition, selForHandles, node, false);
-            return;
-         }
-      }
-    }
-
-    if (currentTool == CompassTool.addPen && _activeSpline != null) {
-      _activeSpline = null;
-      currentTool = CompassTool.select;
-      notifyListeners();
-      return;
-    }
-
-    CompassShape? clickedShape;
-    final scaledThreshold = _hitThreshold / canvasScale;
-
-    CompassPoint? clickedPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, scaledThreshold);
-
-    if (clickedPoint == null) {
-      for (var layer in engine.layers.reversed) {
-        if (!layer.isVisible || layer.isLocked) continue; 
-
-        for (var shape in layer.shapes.reversed) {
-          if (!shape.isVisible) continue; 
-
-          if (shape is CompassLine) {
-            final start = Offset(shape.start.x.value, shape.start.y.value);
-            final end = Offset(shape.end.x.value, shape.end.y.value);
-            final tap = Offset(logicalPosition.dx, logicalPosition.dy);
-            
-            final dx = end.dx - start.dx;
-            final dy = end.dy - start.dy;
-            final l2 = dx * dx + dy * dy;
-            
-            double t = 0;
-            if (l2 != 0) {
-              t = ((tap.dx - start.dx) * dx + (tap.dy - start.dy) * dy) / l2;
-              t = max(0, min(1, t)); 
-            }
-            
-            final projX = start.dx + t * dx;
-            final projY = start.dy + t * dy;
-            
-            final dist = sqrt((tap.dx - projX) * (tap.dx - projX) + (tap.dy - projY) * (tap.dy - projY));
-            if (dist <= scaledThreshold) {
-              clickedShape = shape;
-              break;
-            }
-
-          } else if (shape is CompassCircle) {
-            final cx = shape.center.x.value;
-            final cy = shape.center.y.value;
-            final r = shape.radius.value;
-            
-            final distToCenter = sqrt(pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2));
-            final distToCircumference = (distToCenter - r).abs();
-            
-            if (distToCircumference <= scaledThreshold || distToCenter <= r) {
-              clickedShape = shape;
-              break;
-            }
-          } else if (shape is CompassSpiral) {
-            final cx = shape.center.x.value;
-            final cy = shape.center.y.value;
-            final sx = shape.startPoint.x.value;
-            final sy = shape.startPoint.y.value;
-            
-            final initialR = sqrt(pow(sx - cx, 2) + pow(sy - cy, 2));
-            final distToCenter = sqrt(pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2));
-            
-            if (distToCenter <= initialR * CompassSpiral.phi * 4) {
-              clickedShape = shape;
-              break;
-            }
-          } else if (shape is CompassRectangle) {
-             if (shape.getPath().contains(logicalPosition)) {
-                clickedShape = shape;
-                break;
-             }
-          } else if (shape is CompassXSpline) {
-             if (shape.getPath().contains(logicalPosition)) {
-                clickedShape = shape;
-                break;
-             }
-          }
-        }
-        if (clickedShape != null) break;
-      }
-    }
-
-    final RelativeRect position = RelativeRect.fromLTRB(
-      details.globalPosition.dx,
-      details.globalPosition.dy,
-      details.globalPosition.dx,
-      details.globalPosition.dy,
-    );
-
-    if (clickedPoint != null) {
-      CompassXSpline? parentSpline;
-      CompassSplineNode? clickedNode;
-      
-      for (var layer in engine.layers) {
-        if (layer.isLocked) continue; 
-        for (var shape in layer.shapes) {
-          if (shape is CompassXSpline) {
-            for (var n in shape.nodes) {
-              if (n.point == clickedPoint) {
-                parentSpline = shape;
-                clickedNode = n;
-                break;
-              }
-            }
-          }
-          if (parentSpline != null) break;
-        }
-        if (parentSpline != null) break;
-      }
-
-      final List<PopupMenuEntry<String>> pointMenuItems = [];
-
-      if (parentSpline != null) {
-        pointMenuItems.add(PopupMenuItem(
-          value: 'toggle_closed',
-          child: Text(parentSpline.isClosed ? 'Open Spline' : 'Close Spline (Connect Last to First)'),
-        ));
-        
-        if (clickedNode != null && (clickedNode.handleIn != null || clickedNode.handleOut != null)) {
-          pointMenuItems.add(const PopupMenuItem(
-            value: 'reset_handles',
-            child: Text('Reset Handles (Make Fluid)'), 
-          ));
-        } else {
-          pointMenuItems.add(const PopupMenuItem(
-            value: 'convert_to_bezier',
-            child: Text('Convert to Bézier (Edit Handles)'),
-          ));
-        }
-
-        if (clickedNode != null) {
-          pointMenuItems.add(const PopupMenuItem(
-            value: 'fillet_corner',
-            child: Text('Fillet Corner Dialog...'),
-          ));
-        }
-        
-        pointMenuItems.add(const PopupMenuDivider());
-      }
-
-      pointMenuItems.add(const PopupMenuItem(
-        value: 'start_spline',
-        child: Text('Start X-Spline from here'),
-      ));
-      pointMenuItems.add(const PopupMenuItem(
-        value: 'start_circle',
-        child: Text('Start Circle from here'),
-      ));
-      pointMenuItems.add(const PopupMenuDivider());
-
-      pointMenuItems.add(const PopupMenuItem(
-        value: 'delete_point', 
-        child: Text('Delete Point (and dependent shapes)', style: TextStyle(color: Colors.red)),
-      ));
-
-      final selectedAction = await showMenu<String>(
-        context: context,
-        position: position,
-        items: pointMenuItems,
-      );
-
-      if (selectedAction == 'delete_point') {
-        engine.removePoint(clickedPoint);
-        if (selectedPoints.contains(clickedPoint)) {
-          selectedPoints.remove(clickedPoint);
-          notifyListeners();
-        }
-      } else if (selectedAction == 'reset_handles') {
-        engine.resetPointHandles(clickedPoint);
-      } else if (selectedAction == 'convert_to_bezier') {
-        engine.convertPointToBezier(clickedPoint);
-      } else if (selectedAction == 'fillet_corner' && parentSpline != null && clickedNode != null) {
-        CompassDialogs.showFilletDialog(context, engine, parentSpline, clickedNode);
-      } else if (selectedAction == 'toggle_closed' && parentSpline != null) {
-        engine.toggleSplineClosed(parentSpline);
-      } else if (selectedAction == 'start_spline') {
-        currentTool = CompassTool.addPen;
-        selectedPoints.clear(); 
-        shapeStartPoint = null;
-        
-        _activeSpline = CompassXSpline(isClosed: false);
-        final node = CompassSplineNode(point: clickedPoint, tension: 1.0);
-        node.tension.addListener(engine.notifyListeners);
-        _activeSpline!.addNode(node);
-        engine.addShape(_activeSpline!);
-        notifyListeners();
-      } else if (selectedAction == 'start_circle') {
-        currentTool = CompassTool.addCircle;
-        shapeStartPoint = clickedPoint;
-        selectedPoints.clear();
-        _activeSpline = null;
-        notifyListeners();
-      }
-    } else if (clickedShape != null) {
-      engine.selectShape(clickedShape);
-
-      final List<PopupMenuEntry<String>> menuItems = [
-        const PopupMenuItem(value: 'add_point', child: Text('Add Point to Shape')),
-        const PopupMenuDivider(),
-        const PopupMenuItem(value: 'add', child: Text('Union (Add)')),
-        const PopupMenuItem(value: 'subtract', child: Text('Subtract')),
-        const PopupMenuItem(value: 'intersect', child: Text('Intersect')),
-        const PopupMenuItem(value: 'none', child: Text('None (Construction)')), 
-        const PopupMenuDivider(),
-      ];
-
-      if (clickedShape is CompassXSpline) {
-        menuItems.insert(6, PopupMenuItem(
-          value: 'toggle_closed', 
-          child: Text(clickedShape.isClosed ? 'Open Spline' : 'Close Spline (Connect Last to First)'),
-        ));
-      } else if (clickedShape is CompassCircle || clickedShape is CompassRectangle) {
-        menuItems.insert(6, const PopupMenuItem(
-          value: 'convert_to_spline',
-          child: Text('Convert to X-Spline'),
-        ));
-      }
-
-      menuItems.add(const PopupMenuItem(
-        value: 'delete', 
-        child: Text('Delete Shape', style: TextStyle(color: Colors.red)),
-      ));
-
-      final selectedAction = await showMenu<String>(
-        context: context,
-        position: position,
-        items: menuItems,
-      );
-
-      if (selectedAction != null) {
-        if (selectedAction == 'delete') {
-          engine.removeShape(clickedShape);
-        } else if (selectedAction == 'toggle_closed' && clickedShape is CompassXSpline) {
-          engine.toggleSplineClosed(clickedShape);
-        } else if (selectedAction == 'convert_to_spline' && clickedShape is CompassCircle) {
-          engine.convertCircleToSpline(clickedShape);
-        } else if (selectedAction == 'convert_to_spline' && clickedShape is CompassRectangle) { 
-          engine.convertRectangleToSpline(clickedShape);
-        } else if (selectedAction == 'add_point') {
-          final newPoint = CompassPoint(x: logicalPosition.dx, y: logicalPosition.dy);
-          engine.addPoint(newPoint);
-
-          if (clickedShape is CompassLine) {
-            clickedShape.start.attach(newPoint); 
-            engine.addPointOnLine(newPoint, clickedShape);
-          } else if (clickedShape is CompassCircle) {
-            clickedShape.center.attach(newPoint); 
-            engine.addPointOnCircle(newPoint, clickedShape);
-          } else if (clickedShape is CompassSpiral) {
-            clickedShape.center.attach(newPoint); 
-            engine.addPointOnSpiral(newPoint, clickedShape);
-          } else if (clickedShape is CompassRectangle) {
-            engine.convertRectangleToSpline(clickedShape);
-            
-            CompassXSpline? newSpline;
-            for (var layer in engine.layers) {
-              for (var s in layer.shapes) {
-                if (s is CompassXSpline && s.anchorPoint != null) {
-                  final cx = (clickedShape.p1.x.value + clickedShape.p2.x.value) / 2;
-                  final cy = (clickedShape.p1.y.value + clickedShape.p2.y.value) / 2;
-                  if ((s.anchorPoint!.x.value - cx).abs() < 0.1 && (s.anchorPoint!.y.value - cy).abs() < 0.1) {
-                    newSpline = s;
-                    break;
-                  }
-                }
-              }
-              if (newSpline != null) break;
-            }
-            if (newSpline != null) {
-              engine.insertPointIntoSpline(newPoint, newSpline);
-            }
-          } else if (clickedShape is CompassXSpline) {
-            engine.insertPointIntoSpline(newPoint, clickedShape);
-          }
-        } else {
-          final op = CompassBooleanOp.values.firstWhere((e) => e.name == selectedAction);
-          engine.changeShapeOperation(clickedShape, op);
-        }
-      }
-    } else {
-      final selectedAction = await showMenu<String>(
-        context: context,
-        position: position,
-        items: [
-          PopupMenuItem(
-            value: 'toggle_scaffolding', 
-            child: Text(showScaffolding ? 'Hide Scaffolding (Clean View)' : 'Show Scaffolding'),
-          ), 
-          PopupMenuItem(
-            value: 'toggle_handles', 
-            child: Text(showHandles ? 'Hide Handles' : 'Show Handles'),
-          ), 
-        ],
-      );
-
-      if (selectedAction == 'toggle_scaffolding') {
-        onToggleScaffolding();
-      } else if (selectedAction == 'toggle_handles') {
-        onToggleHandles();
-      }
-    }
-  }
-
-  void onTapDown(TapDownDetails details, BuildContext context, bool showScaffolding) {
-    final RenderBox renderBox = context.findRenderObject() as RenderBox;
-    final localPosition = renderBox.globalToLocal(details.globalPosition);
-    final logicalPosition = _getLogicalPosition(localPosition);
-
-    final bool isShiftPressed = HardwareKeyboard.instance.logicalKeysPressed
-            .contains(LogicalKeyboardKey.shiftLeft) ||
-        HardwareKeyboard.instance.logicalKeysPressed
-            .contains(LogicalKeyboardKey.shiftRight);
-
-    if (addVertexSpline != null && addVertexSegmentIndex >= 0) {
-      final spline = addVertexSpline!;
-      final segIndex = addVertexSegmentIndex;
-
-      final created = engine.subdivideSplineSegment(spline, segIndex, t: 0.5);
-      if (created != null) {
-        engine.selectShape(spline);
-        selectedPoints = {created};
-      }
-
-      if (hoverPosition != null) {
-        _updateAddVertexHover(hoverPosition!);
-      } else {
-        _clearAddVertexHover();
-      }
-
-      notifyListeners();
-      return;
-    }
-
-    if (currentTool == CompassTool.select) {
-      CompassPoint? hitPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
-
-      final pressOnSelectionMember = hitPoint != null && selectedPoints.contains(hitPoint);
-      final pressInsideBox = hitPoint == null && _isPressOnSelection(logicalPosition);
-      if (selectedPoints.length >= 2 && (pressOnSelectionMember || pressInsideBox)) {
-        _pendingSelectPress = (hitPoint, isShiftPressed);
-        return;
-      }
-
-      if (hitPoint != null) {
-        if (isShiftPressed) {
-          if (selectedPoints.contains(hitPoint)) {
-            selectedPoints.remove(hitPoint);
-          } else {
-            selectedPoints.add(hitPoint); 
-          }
-        } else {
-          selectedPoints = {hitPoint}; 
-        }
-        notifyListeners();
-
-        CompassShape? ownerShape;
-        for (var layer in engine.layers.reversed) {
-          if (!layer.isVisible || layer.isLocked) continue; 
-          for (var shape in layer.shapes.reversed) {
-            if (!shape.isVisible) continue;
-            if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) {
-              ownerShape = shape; break;
-            } else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) {
-              ownerShape = shape; break;
-            } else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { 
-              ownerShape = shape; break;
-            } else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) {
-              ownerShape = shape; break;
-            } else if (shape is CompassSpiral && (shape.center == hitPoint || shape.startPoint == hitPoint)) {
-              ownerShape = shape; break;
-            }
-          }
-          if (ownerShape != null) break;
-        }
-
-        if (ownerShape != null) {
-          engine.selectShape(ownerShape);
-        } else {
-          engine.selectShape(null);
-        }
-        return;
-      }
-
-      CompassShape? hitShape;
-      for (var layer in engine.layers.reversed) {
-        if (!layer.isVisible || layer.isLocked) continue; 
-        for (var shape in layer.shapes.reversed) {
-          if (!shape.isVisible) continue; 
-
-          if (shape is CompassCircle) {
-            final cx = shape.center.x.value;
-            final cy = shape.center.y.value;
-            final r = shape.radius.value;
-            final dist2 = pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2);
-            if (dist2 <= r * r) {
-              hitShape = shape;
-              break;
-            }
-          } else if (shape is CompassSpiral) {
-            final cx = shape.center.x.value;
-            final cy = shape.center.y.value;
-            final sx = shape.startPoint.x.value;
-            final sy = shape.startPoint.y.value;
-            final initialR = sqrt(pow(sx - cx, 2) + pow(sy - cy, 2));
-            final distToCenter = sqrt(pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2));
-            if (distToCenter <= initialR * CompassSpiral.phi * 4) {
-              hitShape = shape;
-              break;
-            }
-          } else if (shape is CompassRectangle) { 
-             if (shape.getPath().contains(logicalPosition)) {
-                hitShape = shape;
-                break;
-             }
-          } else if (shape is CompassXSpline) {
-             if (shape.getPath().contains(logicalPosition)) {
-                hitShape = shape;
-                break;
-             }
-          }
-        }
-        if (hitShape != null) break;
-      }
-
-      if (hitShape == null && hoveredPoint == null) {
-        engine.selectShape(null);
-        selectedPoints.clear(); 
-        notifyListeners();
-      } else if (hitShape != null) {
-        engine.selectShape(hitShape);
-        selectedPoints.clear(); 
-        notifyListeners();
-      }
-    }
-    else if (currentTool == CompassTool.addPoint) {
-      CompassShape? closestShape;
-      double minDistance = _hitThreshold / canvasScale;
-
-      for (var layer in engine.layers) {
-        if (!layer.isVisible || layer.isLocked) continue; 
-
-        for (var shape in layer.shapes) {
-          if (!shape.isVisible) continue; 
-
-          if (shape is CompassLine) {
-            final start = Offset(shape.start.x.value, shape.start.y.value);
-            final end = Offset(shape.end.x.value, shape.end.y.value);
-            final tap = Offset(logicalPosition.dx, logicalPosition.dy);
-            
-            final dx = end.dx - start.dx;
-            final dy = end.dy - start.dy;
-            final l2 = dx * dx + dy * dy;
-            
-            double t = 0;
-            if (l2 != 0) {
-              t = ((tap.dx - start.dx) * dx + (tap.dy - start.dy) * dy) / l2;
-              t = max(0, min(1, t)); 
-            }
-            
-            final projX = start.dx + t * dx;
-            final projY = start.dy + t * dy;
-            
-            final dist = sqrt((tap.dx - projX) * (tap.dx - projX) + (tap.dy - projY) * (tap.dy - projY));
-            
-            if (dist < minDistance) {
-              minDistance = dist;
-              closestShape = shape;
-            }
-          } else if (shape is CompassCircle) {
-            final cx = shape.center.x.value;
-            final cy = shape.center.y.value;
-            final r = shape.radius.value;
-            final tap = Offset(logicalPosition.dx, logicalPosition.dy);
-
-            final distToCenter = sqrt((tap.dx - cx) * (tap.dx - cx) + (tap.dy - cy) * (tap.dy - cy));
-            final distToCircumference = (distToCenter - r).abs();
-
-            if (distToCircumference < minDistance) {
-              minDistance = distToCircumference;
-              closestShape = shape;
-            }
-          } else if (shape is CompassSpiral) {
-            final cx = shape.center.x.value;
-            final cy = shape.center.y.value;
-            final sx = shape.startPoint.x.value;
-            final sy = shape.startPoint.y.value;
-            final initialR = sqrt(pow(sx - cx, 2) + pow(sy - cy, 2));
-            final distToCenter = sqrt(pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2));
-            if (distToCenter <= initialR * CompassSpiral.phi * 4) {
-              minDistance = 0; 
-              closestShape = shape;
-            }
-          } else if (shape is CompassRectangle) {
-            final p1 = Offset(shape.p1.x.value, shape.p1.y.value);
-            final p2 = Offset(shape.p2.x.value, shape.p2.y.value);
-            final tap = Offset(logicalPosition.dx, logicalPosition.dy);
-            
-            final corners = [
-              p1,
-              Offset(p2.dx, p1.dy),
-              p2,
-              Offset(p1.dx, p2.dy),
-            ];
-            
-            double minDistToRect = double.infinity;
-            for (int i = 0; i < 4; i++) {
-              final a = corners[i];
-              final b = corners[(i + 1) % 4];
-              
-              final l2 = (b.dx - a.dx) * (b.dx - a.dx) + (b.dy - a.dy) * (b.dy - a.dy);
-              double t = 0;
-              if (l2 != 0) {
-                t = ((tap.dx - a.dx) * (b.dx - a.dx) + (tap.dy - a.dy) * (b.dy - a.dy)) / l2;
-                t = max(0, min(1, t));
-              }
-              final proj = Offset(a.dx + t * (b.dx - a.dx), a.dy + t * (b.dy - a.dy));
-              final dist = (tap - proj).distance;
-              if (dist < minDistToRect) {
-                minDistToRect = dist;
-              }
-            }
-            if (minDistToRect < minDistance) {
-              minDistance = minDistToRect;
-              closestShape = shape;
-            }
-          } else if (shape is CompassXSpline) {
-            final tap = Offset(logicalPosition.dx, logicalPosition.dy);
-            double minDistToSpline = double.infinity;
-            
-            int loopCount = shape.isClosed ? shape.nodes.length : shape.nodes.length - 1;
-            for (int i = 0; i < loopCount; i++) {
-              final p1 = Offset(shape.nodes[i].point.x.value, shape.nodes[i].point.y.value);
-              final p2 = Offset(shape.nodes[(i + 1) % shape.nodes.length].point.x.value, shape.nodes[(i + 1) % shape.nodes.length].point.y.value);
-              
-              final l2 = (p2.dx - p1.dx) * (p2.dx - p1.dx) + (p2.dy - p1.dy) * (p2.dy - p1.dy);
-              double t = 0;
-              if (l2 != 0) {
-                t = ((tap.dx - p1.dx) * (p2.dx - p1.dx) + (tap.dy - p1.dy) * (p2.dy - p1.dy)) / l2;
-                t = max(0, min(1, t));
-              }
-              final proj = Offset(p1.dx + t * (p2.dx - p1.dx), p1.dy + t * (p2.dy - p1.dy));
-              final dist = (tap - proj).distance;
-              
-              if (dist < minDistToSpline) {
-                minDistToSpline = dist;
-              }
-            }
-            if (minDistToSpline < minDistance) {
-              minDistance = minDistToSpline;
-              closestShape = shape;
-            }
-          }
-        }
-      }
-
-      final newPoint = CompassPoint(x: logicalPosition.dx, y: logicalPosition.dy);
-      engine.addPoint(newPoint);
-
-      if (closestShape is CompassLine) {
-        engine.addPointOnLine(newPoint, closestShape);
-      } else if (closestShape is CompassCircle) {
-        engine.addPointOnCircle(newPoint, closestShape);
-      } else if (closestShape is CompassSpiral) {
-        engine.addPointOnSpiral(newPoint, closestShape);
-      } else if (closestShape is CompassRectangle) {
-        engine.convertRectangleToSpline(closestShape);
-        
-        CompassXSpline? newSpline;
-        for (var layer in engine.layers) {
-          for (var s in layer.shapes) {
-            if (s is CompassXSpline && s.anchorPoint != null) {
-              final cx = (closestShape.p1.x.value + closestShape.p2.x.value) / 2;
-              final cy = (closestShape.p1.y.value + closestShape.p2.y.value) / 2;
-              if ((s.anchorPoint!.x.value - cx).abs() < 0.1 && (s.anchorPoint!.y.value - cy).abs() < 0.1) {
-                newSpline = s;
-                break;
-              }
-            }
-          }
-          if (newSpline != null) break;
-        }
-        if (newSpline != null) {
-          engine.insertPointIntoSpline(newPoint, newSpline);
-        }
-      } else if (closestShape is CompassXSpline) {
-        engine.insertPointIntoSpline(newPoint, closestShape);
-      }
-    } 
-    else if (currentTool == CompassTool.addPen) {
-      CompassPoint tappedPoint;
-      
-      if (hoveredPoint != null) {
-        tappedPoint = hoveredPoint!;
-      } else {
-        tappedPoint = CompassPoint(x: logicalPosition.dx, y: logicalPosition.dy);
-        engine.addPoint(tappedPoint);
-      }
-
-      if (_activeSpline == null) {
-        _activeSpline = CompassXSpline(isClosed: false);
-        final node = CompassSplineNode(point: tappedPoint, tension: 1.0); 
-        node.tension.addListener(engine.notifyListeners);
-        _activeSpline!.addNode(node);
-        engine.addShape(_activeSpline!);
-      } else {
-        if (_activeSpline!.nodes.isNotEmpty && _activeSpline!.nodes.first.point == tappedPoint) {
-          engine.toggleSplineClosed(_activeSpline!);
-          _activeSpline = null;
-          currentTool = CompassTool.select;
-          notifyListeners();
-        } else {
-          final node = CompassSplineNode(point: tappedPoint, tension: 1.0);
-          node.tension.addListener(engine.notifyListeners);
-          _activeSpline!.addNode(node);
-          engine.notifyListeners();
-        }
-      }
-    }
-    else if (currentTool == CompassTool.addLine || currentTool == CompassTool.addCircle || currentTool == CompassTool.addSpiral || currentTool == CompassTool.addRect) {
-      
-      if (isShiftPressed) {
-        final quickOffset = 100 / canvasScale; 
-        if (currentTool == CompassTool.addLine) {
-          final p1 = CompassPoint(x: logicalPosition.dx, y: logicalPosition.dy);
-          final p2 = CompassPoint(x: logicalPosition.dx + quickOffset, y: logicalPosition.dy + quickOffset);
-          engine.addPoint(p1);
-          engine.addPoint(p2);
-          engine.addShape(CompassLine(start: p1, end: p2));
-        } else if (currentTool == CompassTool.addCircle) {
-          final center = CompassPoint(x: logicalPosition.dx, y: logicalPosition.dy);
-          final radiusPoint = CompassPoint(x: logicalPosition.dx + quickOffset, y: logicalPosition.dy);
-          engine.addPoint(center);
-          engine.addPoint(radiusPoint);
-          
-          center.attach(radiusPoint); 
-
-          final circle = CompassCircle(center: center, radiusPoint: radiusPoint, radius: 0);
-          DistanceRadiusConstraint(
-            p1: center,
-            p2: radiusPoint,
-            targetRadius: circle.radius,
-          );
-          engine.addShape(circle);
-        } else if (currentTool == CompassTool.addSpiral) {
-          final center = CompassPoint(x: logicalPosition.dx, y: logicalPosition.dy);
-          final startPoint = CompassPoint(x: logicalPosition.dx + quickOffset, y: logicalPosition.dy);
-          engine.addPoint(center);
-          engine.addPoint(startPoint);
-          
-          center.attach(startPoint);
-
-          final spiral = CompassSpiral(center: center, startPoint: startPoint);
-          engine.addShape(spiral);
-        } else if (currentTool == CompassTool.addRect) {
-          final p1 = CompassPoint(x: logicalPosition.dx, y: logicalPosition.dy);
-          final p2 = CompassPoint(x: logicalPosition.dx + quickOffset, y: logicalPosition.dy + quickOffset);
-          engine.addPoint(p1);
-          engine.addPoint(p2);
-          
-          final rect = CompassRectangle(p1: p1, p2: p2, isSquare: true);
-          SquareConstraint(rect: rect);
-          engine.addShape(rect);
-        }
-        
-        shapeStartPoint = null;
-        notifyListeners();
-        return; 
-      }
-
-      CompassPoint? tappedPoint;
-      
-      if (hoveredPoint != null) {
-        tappedPoint = hoveredPoint;
-      } else {
-        tappedPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
-      }
-
-      if (tappedPoint == null) {
-        tappedPoint = CompassPoint(
-          x: logicalPosition.dx,
-          y: logicalPosition.dy,
-        );
-        engine.addPoint(tappedPoint);
-      }
-
-      if (shapeStartPoint == null) {
-        shapeStartPoint = tappedPoint;
-        notifyListeners();
-      } else {
-        if (shapeStartPoint != tappedPoint) {
-          if (currentTool == CompassTool.addLine) {
-            engine.addShape(CompassLine(
-              start: shapeStartPoint!,
-              end: tappedPoint!,
-            ));
-          } else if (currentTool == CompassTool.addCircle) {
-            final circle = CompassCircle(center: shapeStartPoint!, radiusPoint: tappedPoint!, radius: 0);
-            shapeStartPoint!.attach(tappedPoint!);
-
-            DistanceRadiusConstraint(
-              p1: shapeStartPoint!,
-              p2: tappedPoint!,
-              targetRadius: circle.radius,
-            );
-            
-            engine.addShape(circle);
-          } else if (currentTool == CompassTool.addSpiral) {
-            final spiral = CompassSpiral(center: shapeStartPoint!, startPoint: tappedPoint!);
-            shapeStartPoint!.attach(tappedPoint!);
-            engine.addShape(spiral);
-          } else if (currentTool == CompassTool.addRect) { 
-            final rect = CompassRectangle(
-              p1: shapeStartPoint!,
-              p2: tappedPoint!,
-            );
-            SquareConstraint(rect: rect); 
-            engine.addShape(rect);
-          }
-        }
-        shapeStartPoint = null;
-        notifyListeners();
-      }
-    }
-  }
-
-  void onTap() {
-    final pending = _pendingSelectPress;
-    _pendingSelectPress = null;
-    if (pending == null) return;
-
-    final (hitPoint, wasShift) = pending;
-
-    if (hitPoint != null) {
-      if (wasShift) {
-        if (selectedPoints.contains(hitPoint)) {
-          selectedPoints.remove(hitPoint);
-        } else {
-          selectedPoints.add(hitPoint);
-        }
-      } else {
-        selectedPoints = {hitPoint};
-
-        CompassShape? ownerShape;
-        for (var layer in engine.layers.reversed) {
-          if (!layer.isVisible || layer.isLocked) continue;
-          for (var shape in layer.shapes.reversed) {
-            if (!shape.isVisible) continue;
-            if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) {
-              ownerShape = shape; break;
-            } else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) {
-              ownerShape = shape; break;
-            } else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) {
-              ownerShape = shape; break;
-            } else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) {
-              ownerShape = shape; break;
-            } else if (shape is CompassSpiral && (shape.center == hitPoint || shape.startPoint == hitPoint)) {
-              ownerShape = shape; break;
-            }
-          }
-          if (ownerShape != null) break;
-        }
-        engine.selectShape(ownerShape);
-      }
-    } else {
-      if (!wasShift) {
-        selectedPoints.clear();
-        engine.selectShape(null);
-      }
-    }
-    notifyListeners();
-  }
-
-  void onTapCancel() {
-    _pendingSelectPress = null;
-  }
-
-  void onPanStart(
-    DragStartDetails details, 
-    BuildContext context, 
-    bool showScaffolding,
-    bool showHandles
-  ) {
-    if (currentTool != CompassTool.select) return;
-
-    final RenderBox renderBox = context.findRenderObject() as RenderBox;
-    final localPosition = renderBox.globalToLocal(details.globalPosition);
-    final logicalPosition = _getLogicalPosition(localPosition);
-
-    _lastPanPosition = logicalPosition;
-    _dragStartLogicalPosition = logicalPosition;
-    hoverPosition = logicalPosition; 
-    notifyListeners();
-
-    if ((isRPressed || isShiftRPressed || isCtrlRPressed) && rotationPivotOffset != null) {
-      _isRotating = true;
-      
-      // Only mark points as dragged if we are moving them physically (Not Ctrl+R)
-      if (!isCtrlRPressed) {
-        for (var p in _transformingPoints) p.isBeingDragged = true;
-      }
-
-      _rotatingHandleNodes.clear();
-      for (var layer in engine.layers) {
-        if (layer.isLocked) continue; // Don't modify locked handles
-        for (var shape in layer.shapes) {
-          if (shape is CompassXSpline) {
-            for (var node in shape.nodes) {
-              if (_transformingPoints.contains(node.point)) {
-                
-                // If Ctrl+R, we MUST ensure they are explicit handles first so they don't snap back
-                if (isCtrlRPressed && node.handleIn == null && node.handleOut == null) {
-                  engine.convertPointToBezier(node.point);
-                }
-
-                if (node.handleIn != null || node.handleOut != null) {
-                  _rotatingHandleNodes.add(node);
-                }
-              }
-            }
-          }
-        }
-      }
-      return; 
-    }
-
-    // --- SHIFT+Z SMOOTH: Width smoothing ---
-    if (isShiftZPressed && selectedPoints.isNotEmpty) {
-      _captureSmoothOriginalWidths();
-      _isWidthSmoothing = true;
-      notifyListeners();
-      return;
-    }
-
-    // --- Z SMOOTH: lasso-then-smooth. The nodes are already selected; capture
-    // their starting state and let the drag distance drive the amount. Placed
-    // BEFORE the multi-point pan path so Z+drag smooths the selection rather than
-    // translating it. No-op (falls through to normal drag) if nothing is selected.
-    if (isZPressed && selectedPoints.isNotEmpty) {
-      _captureSmoothOriginals();
-      _isSmoothing = true;
-      notifyListeners();
-      return;
-    }
-
-    if (selectedPoints.length >= 2 &&
-        !isRPressed && !isShiftRPressed && !isCtrlRPressed && !isAPressed && !isFPressed && !isWPressed && !isZPressed && !isShiftZPressed) {
-      final hp = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
-      final onMember = hp != null && selectedPoints.contains(hp);
-      final inBoxNoDot = hp == null && _isPressOnSelection(logicalPosition);
-
-      if (onMember || inBoxNoDot) {
-        _pendingSelectPress = null; 
-
-        final liveShift = HardwareKeyboard.instance.logicalKeysPressed
-                .contains(LogicalKeyboardKey.shiftLeft) ||
-            HardwareKeyboard.instance.logicalKeysPressed
-                .contains(LogicalKeyboardKey.shiftRight);
-
-        _transformingPoints = Set<CompassPoint>.from(selectedPoints);
-        for (var p in _transformingPoints) p.isBeingDragged = true;
-
-        if (liveShift) {
-          _isStrictPanningSelection = true;
-        } else {
-          _isPanningSelectedPoints = true;
-        }
-        return;
-      }
-    }
-
-    if (isShiftPressed && !isRPressed && !isShiftRPressed && !isCtrlRPressed && !isAPressed && !isWPressed && !isShiftZPressed) {
-      if (hoveredPoint != null || engine.selectedShape != null) {
-        _transformingPoints = _getRigidBody(engine.selectedShape, hoveredPoint, true);
-        if (_transformingPoints.isNotEmpty) {
-          _isPanningShape = true;
-          for (var p in _transformingPoints) p.isBeingDragged = true;
-          return;
-        }
-      }
-    }
-
-    if (isAPressed && targetTensionNode != null) {
-      _activeTensionNode = targetTensionNode;
-      return;
-    }
-
-    if (isFPressed && selectedPoints.isNotEmpty) {
-      final targetPoint = selectedPoints.first;
-      for (var layer in engine.layers) {
-        if (!layer.isVisible || layer.isLocked) continue; 
-        for (var shape in layer.shapes) {
-          if (shape is CompassXSpline) {
-            for (int i = 0; i < shape.nodes.length; i++) {
-              final node = shape.nodes[i];
-              if (node.point == targetPoint) {
-                if (!shape.isClosed && (i == 0 || i == shape.nodes.length - 1)) continue;
-                
-                activeFilletNode = node;
-                activeFilletSpline = shape;
-                activeFilletRadius = 0.0;
-                notifyListeners();
-                return;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    final selForHandles = engine.selectedShape;
-    
-    // --- Width Handle Hit Testing (W Key) ---
-    if (selForHandles is CompassXSpline && showScaffolding && showHandles && isWPressed) {
-      final handleThreshold = 24.0 / canvasScale;
-      for (var node in selForHandles.nodes) {
-        // Zero-width node: both handles sit on the node center, so there is no
-        // meaningful side to grab yet. A press near the center begins a UNIFIED
-        // pull -- the first drag pushes both sides out together. Side independence
-        // only comes into play once a stroke exists.
-        if (_nodeHasZeroWidth(node)) {
-          final center = Offset(node.point.x.value, node.point.y.value);
-          if ((logicalPosition - center).distance < handleThreshold) {
-            activeWidthNode = node;
-            activeWidthIsLeft = true; // arbitrary; a unified pull ignores side
-            _isUnifiedWidthPull = true;
-            _activeWidthSpline = selForHandles; // <--- NEW
-            notifyListeners();
-            return;
-          }
-          continue; // don't fall through to per-side tests for a zero-width node
-        }
-
-        final leftDot = _getWidthHandlePosition(node, true, selForHandles);
-        if (leftDot != null && (logicalPosition - leftDot).distance < handleThreshold) {
-          activeWidthNode = node;
-          activeWidthIsLeft = true;
-          _isUnifiedWidthPull = false;
-          _activeWidthSpline = selForHandles; // <--- NEW
-          notifyListeners();
-          return;
-        }
-
-        final rightDot = _getWidthHandlePosition(node, false, selForHandles);
-        if (rightDot != null && (logicalPosition - rightDot).distance < handleThreshold) {
-          activeWidthNode = node;
-          activeWidthIsLeft = false;
-          _isUnifiedWidthPull = false;
-          _activeWidthSpline = selForHandles; // <--- NEW
-          notifyListeners();
-          return;
-        }
-      }
-    }
-
-    // Explicit Bezier Handles hit test
-    if (selForHandles is CompassXSpline && showScaffolding && showHandles && 
-        !isShiftPressed && !isRPressed && !isShiftRPressed && !isCtrlRPressed && !isAPressed && !isFPressed && !isWPressed && !isZPressed && !isShiftZPressed) {
-      final handleThreshold = 24.0 / canvasScale;
-      for (var node in selForHandles.nodes) {
-        if (node.handleIn == null && node.handleOut == null) continue;
-
-        final outDot = _handleDotPosition(node, true);
-        if (outDot != null && (logicalPosition - outDot).distance < handleThreshold) {
-          engine.commitNodeToBezierEdit(node);
-          activeHandleNode = node;
-          activeHandleIsOut = true;
-          notifyListeners();
-          return;
-        }
-
-        final inDot = _handleDotPosition(node, false);
-        if (inDot != null && (logicalPosition - inDot).distance < handleThreshold) {
-          engine.commitNodeToBezierEdit(node);
-          activeHandleNode = node;
-          activeHandleIsOut = false;
-          notifyListeners();
-          return;
-        }
-      }
-    }
-
-    if (selForHandles is CompassXSpline && showScaffolding) {
-       for (var node in selForHandles.nodes) {
-          final pt = Offset(node.point.x.value, node.point.y.value);
-          final handlePt = pt + const Offset(20, -30); 
-          final dist = (logicalPosition - handlePt).distance;
-          
-          if (dist < (15.0 / canvasScale)) {
-            _activeTensionNode = node;
-            return; 
-          }
-       }
-    }
-
-    CompassPoint? hitPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, _hitThreshold / canvasScale);
-
-    if (hitPoint != null) {
-      if (!selectedPoints.contains(hitPoint)) {
-        if (!isShiftPressed) selectedPoints.clear();
-        selectedPoints.add(hitPoint); 
-      }
-      notifyListeners();
-      
-      _isPanningSelectedPoints = true;
-      _transformingPoints = Set.from(selectedPoints);
-      for (var p in _transformingPoints) p.isBeingDragged = true;
-    } else {
-      isDraggingSelectionBox = true;
-      selectionBoxStart = logicalPosition;
-      selectionBoxCurrent = logicalPosition;
-      if (!isShiftPressed) selectedPoints.clear();
-      _initialSelectionBeforeBox = Set.from(selectedPoints);
-      notifyListeners();
-    }
-  }
-
-  void onPanUpdate(DragUpdateDetails details, BuildContext context, bool showScaffolding) {
-    if (currentTool != CompassTool.select || _lastPanPosition == null) return;
-
-    final RenderBox renderBox = context.findRenderObject() as RenderBox;
-    final localPosition = renderBox.globalToLocal(details.globalPosition);
-    Offset logicalPosition = _getLogicalPosition(localPosition);
-
-    if (_dragStartLogicalPosition != null) {
-      if (is1Pressed) {
-        logicalPosition = Offset(logicalPosition.dx, _dragStartLogicalPosition!.dy);
-      }
-      if (is2Pressed) {
-        logicalPosition = Offset(_dragStartLogicalPosition!.dx, logicalPosition.dy);
-      }
-    }
-
-    hoverPosition = logicalPosition; 
-    notifyListeners();
-
-    final dx = logicalPosition.dx - _lastPanPosition!.dx;
-    final dy = logicalPosition.dy - _lastPanPosition!.dy;
-
-    if (_isRotating && rotationPivotOffset != null) {
-      final pivot = rotationPivotOffset!;
-      final startAngle = atan2(_lastPanPosition!.dy - pivot.dy, _lastPanPosition!.dx - pivot.dx);
-      final currentAngle = atan2(logicalPosition.dy - pivot.dy, logicalPosition.dx - pivot.dx);
-      final deltaAngle = currentAngle - startAngle;
-
-      final cosA = cos(deltaAngle);
-      final sinA = sin(deltaAngle);
-
-      // Only rotate underlying points if NOT holding Ctrl
-      if (!isCtrlRPressed) {
-        for (var child in _transformingPoints) {
-          final pointDx = child.x.value - pivot.dx;
-          final pointDy = child.y.value - pivot.dy;
-          
-          child.x.value = pivot.dx + (pointDx * cosA - pointDy * sinA);
-          child.y.value = pivot.dy + (pointDx * sinA + pointDy * cosA);
-        }
-      }
-
-      // Always rotate the handles
-      for (var node in _rotatingHandleNodes) {
-        if (node.handleIn != null) {
-          final h = node.handleIn!;
-          node.handleIn = Offset(
-            h.dx * cosA - h.dy * sinA,
-            h.dx * sinA + h.dy * cosA,
-          );
-        }
-        if (node.handleOut != null) {
-          final h = node.handleOut!;
-          node.handleOut = Offset(
-            h.dx * cosA - h.dy * sinA,
-            h.dx * sinA + h.dy * cosA,
-          );
-        }
-      }
-      
-      _lastPanPosition = logicalPosition;
-      return;
-    }
-
-    if (_isPanningShape) {
-      for (var p in _transformingPoints) {
-        p.x.value += dx;
-        p.y.value += dy;
-      }
-      _lastPanPosition = logicalPosition;
-      return;
-    }
-
-    if (_isStrictPanningSelection) {
-      for (var p in _transformingPoints) {
-        p.x.value += dx;
-        p.y.value += dy;
-      }
-      _lastPanPosition = logicalPosition;
-      return;
-    }
-
-    // --- SHIFT+Z SMOOTH drag: Width smoothing ---
-    if (_isWidthSmoothing) {
-      final start = _dragStartLogicalPosition ?? _lastPanPosition!;
-      final dist = (logicalPosition - start).distance;
-      final amount = (dist * 0.01).clamp(0.0, 1.0);
-      engine.smoothWidths(
-        selectedPoints,
-        _smoothOrigWidths,
-        amount,
-      );
-      _lastPanPosition = logicalPosition;
-      return;
-    }
-
-    // --- Z SMOOTH drag: drag distance from the drag origin is the amount. ---
-    // Always recomputed from the captured originals (not from live geometry), so
-    // dragging back un-smooths cleanly. 0.01 -> ~100 logical px for a full smooth,
-    // matching the tension drag's feel; tune here if it's too sensitive.
-    if (_isSmoothing) {
-      final start = _dragStartLogicalPosition ?? _lastPanPosition!;
-      final dist = (logicalPosition - start).distance;
-      final amount = (dist * 0.01).clamp(0.0, 1.0);
-      engine.smoothNodes(
-        selectedPoints,
-        _smoothOrigPositions,
-        _smoothOrigHandles,
-        amount,
-      );
-      _lastPanPosition = logicalPosition;
-      return;
-    }
-
-    if (activeFilletNode != null && activeFilletSpline != null) {
-      activeFilletRadius += dx;
-      if (activeFilletRadius < 0.0) activeFilletRadius = 0.0;
-      _lastPanPosition = logicalPosition;
-      return;
-    }
-
-    // --- Width Drag Logic ---
-    if (activeWidthNode != null && _activeWidthSpline != null) {
-      final node = activeWidthNode!;
-      final pt = Offset(node.point.x.value, node.point.y.value);
-      final newWidth = (logicalPosition - pt).distance;
-
-      // Shift re-links the two sides symmetrically. NOTE: the gated isShiftPressed
-      // is forced false whenever W is held (see _handleKeyEvent, where justShift
-      // excludes W to suppress shift-pan), so it can't be used here -- we read the
-      // live hardware Shift state directly, the same pattern onPanStart uses.
-      final liveShift = HardwareKeyboard.instance.logicalKeysPressed
-              .contains(LogicalKeyboardKey.shiftLeft) ||
-          HardwareKeyboard.instance.logicalKeysPressed
-              .contains(LogicalKeyboardKey.shiftRight);
-
-      // Unified first-pull (both sides ~zero at grab) OR an explicit Shift re-link
-      // drives both sides together; otherwise each handle is independent.
-      if (_isUnifiedWidthPull || liveShift) {
-        engine.updateNodeWidth(_activeWidthSpline!, node, newWidth, true);
-        engine.updateNodeWidth(_activeWidthSpline!, node, newWidth, false);
-      } else {
-        engine.updateNodeWidth(_activeWidthSpline!, node, newWidth, activeWidthIsLeft);
-      }
-      _lastPanPosition = logicalPosition;
-      return;
-    }
-
-    if (activeHandleNode != null) {
-      final node = activeHandleNode!;
-      final newHandle = Offset(
-        logicalPosition.dx - node.point.x.value,
-        logicalPosition.dy - node.point.y.value,
-      );
-      engine.updateNodeHandle(node, activeHandleIsOut, newHandle);
-      _lastPanPosition = logicalPosition;
-      return;
-    }
-
-    if (isDraggingSelectionBox && selectionBoxStart != null) {
-       selectionBoxCurrent = logicalPosition;
-       final rect = Rect.fromPoints(selectionBoxStart!, selectionBoxCurrent!);
-       final newSelection = Set<CompassPoint>.from(_initialSelectionBeforeBox);
-       
-       for(var p in engine.points) {
-         if (CanvasHitTester.isPointLocked(engine, p)) continue;
-         if (rect.contains(Offset(p.x.value, p.y.value))) {
-           newSelection.add(p);
-         }
-       }
-       
-       selectedPoints = newSelection;
-       notifyListeners();
-       _lastPanPosition = logicalPosition;
-       return;
-    }
-
-    if (_activeTensionNode != null) {
-       if (isAPressed) {
-         final nodePos = Offset(_activeTensionNode!.point.x.value, _activeTensionNode!.point.y.value);
-         final dist = (logicalPosition - nodePos).distance;
-         
-         double newTension = dist * 0.01;
-         
-         _activeTensionNode!.tension.value = max(0.0, newTension);
-       } else {
-         final physicalDy = details.delta.dy; 
-         final tensionDelta = -physicalDy * 0.005; 
-         double newTension = _activeTensionNode!.tension.value + tensionDelta;
-         
-         _activeTensionNode!.tension.value = max(0.0, newTension);
-       }
-    } 
-    else if (_isPanningSelectedPoints) {
-      final visited = <CompassPoint>{};
-      for (var p in _transformingPoints) {
-        p.moveBy(dx, dy, visited: visited);
-      }
-    } 
-    else if (engine.referenceLayer != null && !engine.referenceLayer!.isLocked) {
-      engine.updateReferenceTransform(Offset(dx * canvasScale, dy * canvasScale), 0, 0);
-    }
-
-    _lastPanPosition = logicalPosition;
-  }
-
-  void onPanEnd(DragEndDetails details) {
-    if (_isRotating || _isPanningShape) {
-      _isRotating = false;
-      _isPanningShape = false;
-      _rotatingHandleNodes.clear();
-      for (var p in _transformingPoints) p.isBeingDragged = false;
-      engine.finalizePointDrag(); 
-    } else if (_isStrictPanningSelection) {
-      _isStrictPanningSelection = false;
-      for (var p in _transformingPoints) p.isBeingDragged = false;
-      engine.finalizePointDrag();
-    } else if (_isWidthSmoothing) {
-      _isWidthSmoothing = false;
-      _smoothOrigWidths.clear();
-      engine.finalizePointDrag();
-      notifyListeners();
-    } else if (_isSmoothing) {
-      _isSmoothing = false;
-      _smoothOrigPositions.clear();
-      _smoothOrigHandles.clear();
-      engine.finalizePointDrag();
-      notifyListeners();
-    } else if (activeFilletNode != null && activeFilletSpline != null) {
-      if (activeFilletRadius > 0.1) {
-        engine.applyFilletToNode(activeFilletSpline!, activeFilletNode!, activeFilletRadius);
-      }
-      activeFilletNode = null;
-      activeFilletSpline = null;
-      activeFilletRadius = 0.0;
-      notifyListeners();
-    } else if (activeWidthNode != null) { 
-      activeWidthNode = null;
-      _isUnifiedWidthPull = false;
-      _activeWidthSpline = null;
-      engine.finalizePointDrag();
-      notifyListeners();
-    } else if (activeHandleNode != null) {
-      activeHandleNode = null;
-      engine.finalizePointDrag();
-      notifyListeners();
-    } else if (isDraggingSelectionBox) {
-      isDraggingSelectionBox = false;
-      selectionBoxStart = null;
-      selectionBoxCurrent = null;
-      notifyListeners();
-    } else if (_isPanningSelectedPoints) {
-      _isPanningSelectedPoints = false;
-      for (var p in _transformingPoints) p.isBeingDragged = false;
-      engine.finalizePointDrag();
-    } else if (_activeTensionNode != null) {
-      _activeTensionNode = null;
-      engine.finalizePointDrag(); 
-    }
-    _lastPanPosition = null;
-    _dragStartLogicalPosition = null;
-  }
+  // ===========================================================================
+  // GESTURE DELEGATES (Routed to CanvasGestureHandler)
+  // ===========================================================================
+
+  void startCanvasPan() => CanvasGestureHandler.startCanvasPan(this);
+  void updateCanvasPan(Offset delta) => CanvasGestureHandler.updateCanvasPan(this, delta);
+  void endCanvasPan() => CanvasGestureHandler.endCanvasPan(this);
+  void handleScroll(PointerScrollEvent event, BuildContext context) => CanvasGestureHandler.handleScroll(this, engine, event, context);
+  void onHover(PointerHoverEvent event, BuildContext context, bool showScaffolding) => CanvasGestureHandler.onHover(this, engine, event, context, showScaffolding);
+  void clearHover() => CanvasGestureHandler.clearHover(this);
   
-  void onPanCancel() {
-    if (_isRotating || _isPanningShape) {
-      _isRotating = false;
-      _isPanningShape = false;
-      _rotatingHandleNodes.clear();
-      for (var p in _transformingPoints) p.isBeingDragged = false;
-    } else if (_isStrictPanningSelection) {
-      _isStrictPanningSelection = false;
-      for (var p in _transformingPoints) p.isBeingDragged = false;
-    } else if (isDraggingSelectionBox) {
-      isDraggingSelectionBox = false;
-      selectionBoxStart = null;
-      selectionBoxCurrent = null;
-      notifyListeners();
-    } else if (_isPanningSelectedPoints) {
-      _isPanningSelectedPoints = false;
-      for (var p in _transformingPoints) p.isBeingDragged = false;
-    }
-    activeHandleNode = null;
-    activeWidthNode = null; 
-    _isUnifiedWidthPull = false;
-    _activeWidthSpline = null;
-    _activeTensionNode = null;
-
-    _isWidthSmoothing = false;
-    _smoothOrigWidths.clear();
-
-    _isSmoothing = false;
-    _smoothOrigPositions.clear();
-    _smoothOrigHandles.clear();
-    
-    activeFilletNode = null;
-    activeFilletSpline = null;
-    activeFilletRadius = 0.0;
-
-    _pendingSelectPress = null;
-    _lastPanPosition = null;
-    _dragStartLogicalPosition = null;
-  }
+  Future<void> onSecondaryTapDown(TapDownDetails details, BuildContext context, bool showScaffolding, VoidCallback onToggleScaffolding, bool showHandles, VoidCallback onToggleHandles) => 
+      CanvasGestureHandler.onSecondaryTapDown(this, engine, details, context, showScaffolding, onToggleScaffolding, showHandles, onToggleHandles);
+  
+  void onTapDown(TapDownDetails details, BuildContext context, bool showScaffolding) => CanvasGestureHandler.onTapDown(this, engine, details, context, showScaffolding);
+  void onTap() => CanvasGestureHandler.onTap(this, engine);
+  void onTapCancel() => CanvasGestureHandler.onTapCancel(this);
+  
+  void onPanStart(DragStartDetails details, BuildContext context, bool showScaffolding, bool showHandles) => CanvasGestureHandler.onPanStart(this, engine, details, context, showScaffolding, showHandles);
+  void onPanUpdate(DragUpdateDetails details, BuildContext context, bool showScaffolding) => CanvasGestureHandler.onPanUpdate(this, engine, details, context, showScaffolding);
+  void onPanEnd(DragEndDetails details) => CanvasGestureHandler.onPanEnd(this, engine, details);
+  void onPanCancel() => CanvasGestureHandler.onPanCancel(this);
 }

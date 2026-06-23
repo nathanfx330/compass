@@ -1,6 +1,5 @@
 // lib/ui/canvas/compass_renderer.dart
 
-import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../../engine.dart';
@@ -13,6 +12,7 @@ import '../../models/geometry/rectangle.dart';
 
 // Import CompassTool from the canvas controller
 import 'canvas_controller.dart';
+import 'renderer_helpers.dart'; // <--- NEW
 
 class CompassRenderer extends CustomPainter {
   final CompassEngine engine;
@@ -21,24 +21,18 @@ class CompassRenderer extends CustomPainter {
   final Offset? rotationPivotOffset;
   final bool isRPressed;
   final bool isShiftRPressed;
-  final bool isCtrlRPressed; // <--- NEW
+  final bool isCtrlRPressed; 
   final bool isAPressed; 
   
-  // --- NEW: Receive the active fillet state from the controller
   final CompassSplineNode? activeFilletNode;
   final CompassXSpline? activeFilletSpline;
   final double activeFilletRadius;
   final bool isFPressed;
 
-  // --- NEW: Width Tool (W Key) State
   final bool isWPressed;
   final CompassSplineNode? activeWidthNode;
   final bool activeWidthIsLeft;
 
-  // --- NEW: Shift-hover "Add Resolution" preview ---
-  // addVertexPreviewPos is the exact on-curve center of the segment under the
-  // cursor (t=0.5 on its cubic). The spline + segment index are carried for
-  // context/future use; the marker itself is drawn purely from the preview pos.
   final Offset? addVertexPreviewPos;
   final CompassXSpline? addVertexSpline;
   final int addVertexSegmentIndex;
@@ -49,7 +43,7 @@ class CompassRenderer extends CustomPainter {
   final Offset? hoverPosition;
   final CompassTool currentTool;
   final bool showScaffolding;
-  final bool showHandles; // <--- NEW ARGUMENT
+  final bool showHandles; 
   final Offset panOffset;
   final double canvasScale;
   final Color pointBorderColor;
@@ -57,12 +51,7 @@ class CompassRenderer extends CustomPainter {
   final CompassSplineNode? activeHandleNode;
   final bool activeHandleIsOut;
 
-  // --- NEW: bounding box of the active 2+ selection (logical space), or null. ---
-  // Drawn as a dashed, corner-ticked box framing the highlighted group -- the
-  // visible affordance for "grab anywhere in here to move the whole selection."
-  // Orange to match the rigid-body/centroid visual language and stay distinct from
-  // the blue transient marquee. Null (and thus undrawn) for 0- or 1-point selections.
-  final Rect? selectionBounds;
+  final Rect? selectionBounds; 
 
   CompassRenderer({
     required this.engine, 
@@ -71,15 +60,15 @@ class CompassRenderer extends CustomPainter {
     this.rotationPivotOffset,
     this.isRPressed = false,
     this.isShiftRPressed = false,
-    this.isCtrlRPressed = false, // <--- NEW
+    this.isCtrlRPressed = false, 
     this.isAPressed = false, 
     this.activeFilletNode,
     this.activeFilletSpline,
     this.activeFilletRadius = 0.0,
     this.isFPressed = false,
-    this.isWPressed = false, // <--- Added W Key
-    this.activeWidthNode,    // <--- Added Width Node
-    this.activeWidthIsLeft = false, // <--- Added Width Side
+    this.isWPressed = false, 
+    this.activeWidthNode,    
+    this.activeWidthIsLeft = false, 
     this.addVertexPreviewPos,
     this.addVertexSpline,
     this.addVertexSegmentIndex = -1,
@@ -89,13 +78,13 @@ class CompassRenderer extends CustomPainter {
     this.hoverPosition,
     required this.currentTool,
     required this.showScaffolding,
-    required this.showHandles, // <--- NEW ARGUMENT
+    required this.showHandles, 
     required this.panOffset,
     required this.canvasScale,
     required this.pointBorderColor,
     this.activeHandleNode,
     this.activeHandleIsOut = false,
-    this.selectionBounds, // <--- NEW ARGUMENT
+    this.selectionBounds, 
   }) : super(repaint: engine);
 
   @override
@@ -128,18 +117,11 @@ class CompassRenderer extends CustomPainter {
     // ==========================================
     for (var layer in engine.layers) {
       if (layer.isVisible) {
-        // fillPath: fillable geometry PLUS closed width-spline centerlines. This is
-        //   what makes an area stroke a first-class stroke -- the centerline is the
-        //   fill, so a closed width spline can carry an inner fill and a ribbon at
-        //   once. Open width splines enclose no area and contribute nothing here.
-        // layerPath: unchanged -- excludes width splines, so the uniform stroke pass
-        //   (1b) never paints a hairline along the ribbon's inner edge.
-        // strokeAreaPath: the variable-width ribbon (1c), unchanged.
         final fillPath = layer.getLayerFillPath();
         final layerPath = layer.getLayerPath();
         final strokeAreaPath = layer.getLayerStrokeAreaPath();
 
-        // 1a. Fill Standard Geometry (now sourced from the fill path)
+        // 1a. Fill Standard Geometry 
         if (layer.color != Colors.transparent) {
           final fillPaint = Paint()
             ..color = layer.color
@@ -147,7 +129,7 @@ class CompassRenderer extends CustomPainter {
           canvas.drawPath(fillPath, fillPaint);
         }
 
-        // 1b. Stroke Standard Geometry (Uniform outlines)
+        // 1b. Stroke Standard Geometry
         if (layer.strokeColor != Colors.transparent && layer.strokeWidth > 0) {
           final strokePaint = Paint()
             ..color = layer.strokeColor
@@ -156,9 +138,7 @@ class CompassRenderer extends CustomPainter {
           canvas.drawPath(layerPath, strokePaint);
         }
 
-        // 1c. Area Strokes (Variable-Width Geometry)
-        // This is mathematically a stroke, so we color it using the Stroke Color,
-        // but physically it is a 2D mesh, so we use PaintingStyle.fill.
+        // 1c. Area Strokes 
         if (layer.strokeColor != Colors.transparent) {
           final areaStrokePaint = Paint()
             ..color = layer.strokeColor
@@ -196,7 +176,7 @@ class CompassRenderer extends CustomPainter {
             canvas.drawCircle(Offset(shape.center.x.value, shape.center.y.value), shape.radius.value, isSelected ? selectedWireframePaint : wireframePaint);
             if (isSelected && shape.radiusPoint != null) {
               final scaffoldPaint = Paint()..color = Colors.blue.withOpacity(0.5)..strokeWidth = 1.5 * invScale..style = PaintingStyle.stroke;
-              _drawDashedLine(canvas, Offset(shape.center.x.value, shape.center.y.value), Offset(shape.radiusPoint!.x.value, shape.radiusPoint!.y.value), scaffoldPaint, invScale);
+              RendererHelpers.drawDashedLine(canvas, Offset(shape.center.x.value, shape.center.y.value), Offset(shape.radiusPoint!.x.value, shape.radiusPoint!.y.value), scaffoldPaint, invScale); // <--- UPDATED
             }
           } else if (shape is CompassRectangle) {
             shape.paint(canvas, isSelected ? selectedWireframePaint : wireframePaint, showScaffolding: true, isSelected: isSelected);
@@ -238,10 +218,10 @@ class CompassRenderer extends CustomPainter {
                
                if (shape.anchorPoint != null && shape.nodes.isNotEmpty) {
                  final scaffoldPaint = Paint()..color = Colors.orangeAccent.withOpacity(0.3)..strokeWidth = 1.0 * invScale..style = PaintingStyle.stroke;
-                 _drawDashedLine(canvas, Offset(cx, cy), Offset(shape.nodes.first.point.x.value, shape.nodes.first.point.y.value), scaffoldPaint, invScale);
+                 RendererHelpers.drawDashedLine(canvas, Offset(cx, cy), Offset(shape.nodes.first.point.x.value, shape.nodes.first.point.y.value), scaffoldPaint, invScale); // <--- UPDATED
                }
 
-               // --- NEW: DRAW VERTEX NUMBERS IF TOGGLED ---
+               // --- DRAW VERTEX NUMBERS IF TOGGLED ---
                if (engine.showNodeIndices) {
                  for (int i = 0; i < shape.nodes.length; i++) {
                    final pt = Offset(shape.nodes[i].point.x.value, shape.nodes[i].point.y.value);
@@ -262,7 +242,6 @@ class CompassRenderer extends CustomPainter {
                    );
                    textPainter.layout();
                    
-                   // Draw offset slightly to the bottom right of the point so it doesn't obscure the handle
                    textPainter.paint(canvas, pt + Offset(8 * invScale, 8 * invScale));
                  }
                }
@@ -275,21 +254,17 @@ class CompassRenderer extends CustomPainter {
 
       // --- WIDTH HANDLES for the selected X-Spline (W KEY) ---
       if (selForHandles is CompassXSpline && showHandles && isWPressed) {
-        _drawWidthHandles(canvas, selForHandles, invScale);
+        RendererHelpers.drawWidthHandles(canvas, selForHandles, invScale, pointBorderColor, activeWidthNode, activeWidthIsLeft); // <--- UPDATED
       }
 
       // --- BEZIER HANDLES for the selected X-Spline ---
       if (selForHandles is CompassXSpline && showHandles && !isWPressed) { 
-        _drawBezierHandles(canvas, selForHandles, invScale);
+        RendererHelpers.drawBezierHandles(canvas, selForHandles, invScale, pointBorderColor, activeHandleNode, activeHandleIsOut); // <--- UPDATED
       }
 
-      // --- NEW: MULTI-SELECTION BOUNDING BOX ---
-      // Framed dashed box + corner ticks around a 2+ point selection. Drawn after the
-      // wireframes (so it frames the whole group) but before the point dots (so the
-      // selected dots render on top of the box edge). This is the grabbable affordance
-      // that the controller's _isPressOnSelection hit-tests against.
+      // --- MULTI-SELECTION BOUNDING BOX ---
       if (selectionBounds != null) {
-        _drawSelectionBounds(canvas, selectionBounds!, invScale);
+        RendererHelpers.drawSelectionBounds(canvas, selectionBounds!, invScale); // <--- UPDATED
       }
 
       // --- EXPLICITLY SELECTED POINT(S) HIGHLIGHT ---
@@ -313,7 +288,7 @@ class CompassRenderer extends CustomPainter {
 
       // --- F KEY LIVE FILLET PREVIEW ---
       if (isFPressed && activeFilletNode != null && activeFilletSpline != null && activeFilletRadius > 0) {
-        _drawFilletPreview(canvas, activeFilletSpline!, activeFilletNode!, activeFilletRadius, invScale);
+        RendererHelpers.drawFilletPreview(canvas, activeFilletSpline!, activeFilletNode!, activeFilletRadius, invScale); // <--- UPDATED
       }
       
       // --- TENSION GUIDE LINE (A KEY) ---
@@ -325,7 +300,7 @@ class CompassRenderer extends CustomPainter {
           ..strokeWidth = 2.0 * invScale
           ..style = PaintingStyle.stroke;
           
-        _drawDashedLine(canvas, targetOffset, hoverPosition!, tensionPaint, invScale);
+        RendererHelpers.drawDashedLine(canvas, targetOffset, hoverPosition!, tensionPaint, invScale); // <--- UPDATED
         canvas.drawCircle(targetOffset, 10.0 * invScale, tensionPaint);
       }
       
@@ -339,7 +314,7 @@ class CompassRenderer extends CustomPainter {
             ..strokeWidth = 2.0 * invScale
             ..style = PaintingStyle.stroke;
             
-          _drawDashedLine(canvas, rotationPivotOffset!, hoverPosition!, rotPaint, invScale);
+          RendererHelpers.drawDashedLine(canvas, rotationPivotOffset!, hoverPosition!, rotPaint, invScale); // <--- UPDATED
           canvas.drawCircle(rotationPivotOffset!, 8.0 * invScale, rotPaint..style = PaintingStyle.fill);
         }
       }
@@ -358,7 +333,7 @@ class CompassRenderer extends CustomPainter {
         } else if (currentTool == CompassTool.addCircle) {
           final radius = (hoverPosition! - startOffset).distance;
           canvas.drawCircle(startOffset, radius, previewPaint);
-          _drawDashedLine(canvas, startOffset, hoverPosition!, previewPaint, invScale);
+          RendererHelpers.drawDashedLine(canvas, startOffset, hoverPosition!, previewPaint, invScale); // <--- UPDATED
         } else if (currentTool == CompassTool.addSpiral) {
           final dummyPoint = CompassPoint(x: hoverPosition!.dx, y: hoverPosition!.dy);
           final dummySpiral = CompassSpiral(center: shapeStartPoint!, startPoint: dummyPoint);
@@ -461,11 +436,7 @@ class CompassRenderer extends CustomPainter {
         canvas.drawLine(previewOffset + Offset(0, -3.5 * invScale), previewOffset + Offset(0, 3.5 * invScale), plusPaint);
       }
 
-      // --- NEW: Shift-hover "Add Resolution" preview marker ---
-      // A green ringed "+" sitting exactly on the segment's parametric center.
-      // The outer ring reads as "snapped to the curve -- click to insert a vertex
-      // here," distinguishing it from the Add-Point tool's solid disc and from the
-      // solid blue structural points. Drawn last so it sits on top of everything.
+      // --- Shift-hover "Add Resolution" preview marker ---
       if (addVertexPreviewPos != null) {
         final pos = addVertexPreviewPos!;
 
@@ -497,302 +468,6 @@ class CompassRenderer extends CustomPainter {
     canvas.restore();
   }
 
-  // --- NEW: Draws the Width Handles (Diamonds) for the Width Tool ---
-  void _drawWidthHandles(Canvas canvas, CompassXSpline spline, double invScale) {
-    final controls = spline.getEvaluatedControls();
-    int n = spline.nodes.length;
-    
-    final guideLinePaint = Paint()
-      ..color = Colors.tealAccent.withOpacity(0.3)
-      ..strokeWidth = 1.0 * invScale
-      ..style = PaintingStyle.stroke;
-
-    final linePaint = Paint()
-      ..color = Colors.tealAccent.withOpacity(0.8)
-      ..strokeWidth = 1.5 * invScale
-      ..style = PaintingStyle.stroke;
-
-    final dotPaint = Paint()
-      ..color = Colors.teal
-      ..style = PaintingStyle.fill;
-      
-    final activeFillPaint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.fill;
-
-    final borderPaint = Paint()
-      ..color = pointBorderColor
-      ..strokeWidth = 1.0 * invScale
-      ..style = PaintingStyle.stroke;
-
-    void drawDiamond(Offset center, bool isActive, bool isPinned) { // <--- UPDATED
-      final size = isActive ? 8.0 * invScale : 6.0 * invScale;
-      final path = Path()
-        ..moveTo(center.dx, center.dy - size)
-        ..lineTo(center.dx + size, center.dy)
-        ..lineTo(center.dx, center.dy + size)
-        ..lineTo(center.dx - size, center.dy)
-        ..close();
-        
-      if (isPinned) {
-        if (isActive) {
-          canvas.drawPath(path, Paint()..color = Colors.white..style = PaintingStyle.fill);
-          canvas.drawPath(path, Paint()..color = Colors.orangeAccent..strokeWidth = 2.0 * invScale..style = PaintingStyle.stroke);
-        } else {
-          canvas.drawPath(path, Paint()..color = Colors.orangeAccent..style = PaintingStyle.fill);
-          canvas.drawPath(path, Paint()..color = pointBorderColor..strokeWidth = 1.0 * invScale..style = PaintingStyle.stroke);
-        }
-      } else {
-        if (isActive) {
-          canvas.drawPath(path, activeFillPaint);
-          canvas.drawPath(path, Paint()..color = Colors.teal..strokeWidth = 2.0 * invScale..style = PaintingStyle.stroke);
-        } else {
-          canvas.drawPath(path, dotPaint);
-          canvas.drawPath(path, borderPaint);
-        }
-      }
-    }
-
-    for (int i = 0; i < n; i++) {
-      final node = spline.nodes[i];
-      final pt = Offset(node.point.x.value, node.point.y.value);
-      
-      Offset prevPt = spline.isClosed ? Offset(spline.nodes[(i - 1 + n) % n].point.x.value, spline.nodes[(i - 1 + n) % n].point.y.value) : (i > 0 ? Offset(spline.nodes[i - 1].point.x.value, spline.nodes[i - 1].point.y.value) : pt);
-      Offset nextPt = spline.isClosed ? Offset(spline.nodes[(i + 1) % n].point.x.value, spline.nodes[(i + 1) % n].point.y.value) : (i < n - 1 ? Offset(spline.nodes[i + 1].point.x.value, spline.nodes[i + 1].point.y.value) : pt);
-
-      final hOut = controls[i].$1;
-      final hIn = controls[i].$2;
-
-      Offset vOut = hOut;
-      if (vOut.distance < 0.001) vOut = nextPt - pt;
-      Offset vIn = Offset(-hIn.dx, -hIn.dy);
-      if (vIn.distance < 0.001) vIn = pt - prevPt;
-
-      if (!spline.isClosed) {
-        if (i == 0) vIn = vOut;
-        if (i == n - 1) vOut = vIn;
-      }
-
-      double lenOut = vOut.distance;
-      double lenIn = vIn.distance;
-      Offset tOut = lenOut > 0.001 ? vOut / lenOut : Offset.zero;
-      Offset tIn = lenIn > 0.001 ? vIn / lenIn : Offset.zero;
-
-      Offset T = tIn + tOut;
-      double lenT = T.distance;
-      if (lenT > 0.001) T = T / lenT; else T = tOut;
-      
-      Offset N = Offset(-T.dy, T.dx);
-
-      // Faint normal guide lines extending from center (at least 30px so you can always see the axis)
-      final leftGuide = pt + N * max(30.0 * invScale, node.widthLeft.value);
-      final rightGuide = pt - N * max(30.0 * invScale, node.widthRight.value);
-      
-      canvas.drawLine(pt, leftGuide, guideLinePaint);
-      canvas.drawLine(pt, rightGuide, guideLinePaint);
-
-      final leftActual = pt + N * node.widthLeft.value;
-      final rightActual = pt - N * node.widthRight.value;
-      
-      // Dashed line explicitly from the center outward to each handle
-      if (node.widthLeft.value > 0.1) {
-        _drawDashedLine(canvas, pt, leftActual, linePaint, invScale);
-      }
-      if (node.widthRight.value > 0.1) {
-        _drawDashedLine(canvas, pt, rightActual, linePaint, invScale);
-      }
-      
-      drawDiamond(leftActual, node == activeWidthNode && activeWidthIsLeft, node.isLeftWidthPinned); // <--- UPDATED
-      drawDiamond(rightActual, node == activeWidthNode && !activeWidthIsLeft, node.isRightWidthPinned); // <--- UPDATED
-    }
-  }
-
-  // --- NEW: Draws the dashed, corner-ticked bounding box around a 2+ selection. ---
-  // Padded a few px beyond the literal point extents so the outer dots sit inside the
-  // frame rather than on its edge. Orange keeps it in the rigid-body visual family and
-  // distinct from the blue marquee. The corner ticks are short solid right-angle marks
-  // that make it read as a manipulable box ("grab me") instead of a plain outline.
-  void _drawSelectionBounds(Canvas canvas, Rect bounds, double invScale) {
-    final pad = 10.0 * invScale;
-    final box = bounds.inflate(pad);
-
-    final boxPaint = Paint()
-      ..color = Colors.orangeAccent.withOpacity(0.9)
-      ..strokeWidth = 1.5 * invScale
-      ..style = PaintingStyle.stroke;
-
-    // Dashed perimeter (reuse the dashed-line helper edge by edge).
-    final tl = box.topLeft;
-    final tr = box.topRight;
-    final br = box.bottomRight;
-    final bl = box.bottomLeft;
-    _drawDashedLine(canvas, tl, tr, boxPaint, invScale);
-    _drawDashedLine(canvas, tr, br, boxPaint, invScale);
-    _drawDashedLine(canvas, br, bl, boxPaint, invScale);
-    _drawDashedLine(canvas, bl, tl, boxPaint, invScale);
-
-    // Solid corner ticks -- short right-angle marks at each corner.
-    final tickPaint = Paint()
-      ..color = Colors.orangeAccent
-      ..strokeWidth = 2.0 * invScale
-      ..style = PaintingStyle.stroke;
-    final t = 8.0 * invScale; // tick arm length
-
-    // Top-left
-    canvas.drawLine(tl, tl + Offset(t, 0), tickPaint);
-    canvas.drawLine(tl, tl + Offset(0, t), tickPaint);
-    // Top-right
-    canvas.drawLine(tr, tr + Offset(-t, 0), tickPaint);
-    canvas.drawLine(tr, tr + Offset(0, t), tickPaint);
-    // Bottom-right
-    canvas.drawLine(br, br + Offset(-t, 0), tickPaint);
-    canvas.drawLine(br, br + Offset(0, -t), tickPaint);
-    // Bottom-left
-    canvas.drawLine(bl, bl + Offset(t, 0), tickPaint);
-    canvas.drawLine(bl, bl + Offset(0, -t), tickPaint);
-  }
-
-  // --- NEW: Draws the curve-aware preview of the fillet while F is held ---
-  void _drawFilletPreview(Canvas canvas, CompassXSpline spline, CompassSplineNode node, double cutDistance, double invScale) {
-    final fillet = spline.computeFillet(node, cutDistance);
-    if (fillet == null) return;
-
-    int index = spline.nodes.indexOf(node);
-    int prevIndex = (index - 1 + spline.nodes.length) % spline.nodes.length;
-    int nextIndex = (index + 1) % spline.nodes.length;
-
-    final pPrev = Offset(spline.nodes[prevIndex].point.x.value, spline.nodes[prevIndex].point.y.value);
-    final pCurr = Offset(node.point.x.value, node.point.y.value);
-    final pNext = Offset(spline.nodes[nextIndex].point.x.value, spline.nodes[nextIndex].point.y.value);
-
-    final previewPath = Path();
-    
-    // Draw from Prev to Cut1
-    previewPath.moveTo(pPrev.dx, pPrev.dy);
-    previewPath.cubicTo(
-      pPrev.dx + fillet.prevHandleOut.dx, pPrev.dy + fillet.prevHandleOut.dy,
-      fillet.cutPt1.dx + fillet.node1HandleIn.dx, fillet.cutPt1.dy + fillet.node1HandleIn.dy,
-      fillet.cutPt1.dx, fillet.cutPt1.dy,
-    );
-    
-    // Draw the Bridging Arc (Cut1 to Cut2)
-    previewPath.cubicTo(
-      fillet.cutPt1.dx + fillet.node1HandleOut.dx, fillet.cutPt1.dy + fillet.node1HandleOut.dy,
-      fillet.cutPt2.dx + fillet.node2HandleIn.dx, fillet.cutPt2.dy + fillet.node2HandleIn.dy,
-      fillet.cutPt2.dx, fillet.cutPt2.dy,
-    );
-    
-    // Draw from Cut2 to Next
-    previewPath.cubicTo(
-      fillet.cutPt2.dx + fillet.node2HandleOut.dx, fillet.cutPt2.dy + fillet.node2HandleOut.dy,
-      pNext.dx + fillet.nextHandleIn.dx, pNext.dy + fillet.nextHandleIn.dy,
-      pNext.dx, pNext.dy,
-    );
-
-    final linePaint = Paint()
-      ..color = Colors.greenAccent
-      ..strokeWidth = 3.0 * invScale
-      ..style = PaintingStyle.stroke;
-      
-    final scissorPaint = Paint()
-      ..color = Colors.redAccent.withOpacity(0.5)
-      ..strokeWidth = 2.0 * invScale
-      ..style = PaintingStyle.stroke;
-
-    // Draw the new curve. Because it perfectly overlays the existing curve, 
-    // it will vividly demonstrate how the fillet blends without jumping.
-    canvas.drawPath(previewPath, linePaint);
-    
-    // Draw scissor lines showing the part of the control polygon that will be deleted
-    _drawDashedLine(canvas, fillet.cutPt1, pCurr, scissorPaint, invScale);
-    _drawDashedLine(canvas, pCurr, fillet.cutPt2, scissorPaint, invScale);
-
-    // Draw preview nodes
-    final nodePaint = Paint()..color = Colors.greenAccent..style = PaintingStyle.fill;
-    canvas.drawCircle(fillet.cutPt1, 6.0 * invScale, nodePaint);
-    canvas.drawCircle(fillet.cutPt2, 6.0 * invScale, nodePaint);
-  }
-
-  void _drawBezierHandles(Canvas canvas, CompassXSpline spline, double invScale) {
-    final linePaint = Paint()
-      ..color = Colors.purpleAccent.withOpacity(0.6)
-      ..strokeWidth = 1.5 * invScale
-      ..style = PaintingStyle.stroke;
-
-    final dotPaint = Paint()
-      ..color = Colors.purpleAccent
-      ..style = PaintingStyle.fill;
-
-    final dotBorderPaint = Paint()
-      ..color = pointBorderColor
-      ..strokeWidth = 1.0 * invScale
-      ..style = PaintingStyle.stroke;
-
-    final activeFillPaint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.fill;
-
-    final activeBorderPaint = Paint()
-      ..color = Colors.purpleAccent
-      ..strokeWidth = 2.0 * invScale
-      ..style = PaintingStyle.stroke;
-
-    void drawDot(Offset dot, bool isActive) {
-      if (isActive) {
-        canvas.drawCircle(dot, 9.0 * invScale, activeFillPaint);
-        canvas.drawCircle(dot, 9.0 * invScale, activeBorderPaint);
-      } else {
-        canvas.drawCircle(dot, 7.0 * invScale, dotPaint);
-        canvas.drawCircle(dot, 7.0 * invScale, dotBorderPaint);
-      }
-    }
-
-    for (var node in spline.nodes) {
-      if (node.handleIn == null && node.handleOut == null) continue;
-
-      final anchor = Offset(node.point.x.value, node.point.y.value);
-      final t = node.tension.value;
-
-      if (node.handleOut != null) {
-        final dot = Offset(
-          anchor.dx + node.handleOut!.dx * t,
-          anchor.dy + node.handleOut!.dy * t,
-        );
-        canvas.drawLine(anchor, dot, linePaint);
-        drawDot(dot, node == activeHandleNode && activeHandleIsOut);
-      }
-
-      if (node.handleIn != null) {
-        final dot = Offset(
-          anchor.dx + node.handleIn!.dx * t,
-          anchor.dy + node.handleIn!.dy * t,
-        );
-        canvas.drawLine(anchor, dot, linePaint);
-        drawDot(dot, node == activeHandleNode && !activeHandleIsOut);
-      }
-    }
-  }
-
-  // Decides whether a point gets drawn as a grabbable scaffolding dot.
-  //
-  // Previously this returned true ONLY when the point was a *structural* member of
-  // a visible, unlocked shape (a line endpoint, circle center/radius, spiral
-  // center/start, or a spline node). That silently excluded constraint-attached
-  // points -- the ones created by "Add Point to Shape" on a line/circle/spiral,
-  // which ride the curve via a PointOnLine/Circle/Spiral constraint but are NOT
-  // stored in any shape's point list. They were invisible yet still hoverable
-  // (the controller's _isPointLocked treats a point belonging to no shape as
-  // unlocked), producing the "highlights on mouseover but never shows" bug.
-  //
-  // New rule, aligned with the hover predicate: a point is drawn when the user can
-  // meaningfully grab it --
-  //   * it's a structural vertex of a visible shape on a visible, unlocked layer, OR
-  //   * it isn't a structural member of ANY shape at all -- i.e. a constraint point
-  //     riding a curve, or a free orphan point.
-  // It is hidden only when every shape that structurally owns it lives on a hidden
-  // or locked layer. That last clause preserves the prior behavior of not spawning
-  // floating dots for geometry tucked under a hidden/locked layer (a point whose
-  // only home is a hidden layer stays hidden, rather than appearing shapeless).
   bool _isPointUnlocked(CompassPoint p) {
     bool usedInVisibleUnlocked = false;
     bool usedAnywhere = false;
@@ -816,28 +491,6 @@ class CompassRenderer extends CustomPainter {
     }
 
     return usedInVisibleUnlocked || !usedAnywhere;
-  }
-
-  void _drawDashedLine(Canvas canvas, Offset p1, Offset p2, Paint paint, double invScale) {
-    final double dashWidth = 6.0 * invScale;
-    final double dashSpace = 6.0 * invScale;
-    double distance = (p2 - p1).distance;
-    if (distance == 0) return; 
-
-    double dx = (p2.dx - p1.dx) / distance;
-    double dy = (p2.dy - p1.dy) / distance;
-    
-    double currentDistance = 0;
-    while (currentDistance < distance) {
-      double nextDistance = currentDistance + dashWidth;
-      if (nextDistance > distance) nextDistance = distance;
-      canvas.drawLine(
-        Offset(p1.dx + dx * currentDistance, p1.dy + dy * currentDistance),
-        Offset(p1.dx + dx * nextDistance, p1.dy + dy * nextDistance),
-        paint,
-      );
-      currentDistance += dashWidth + dashSpace;
-    }
   }
 
   @override
