@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import '../../engine.dart';
 import '../../models/geometry/spline.dart';
+import '../widgets/compass_color_picker.dart';
 
 class PropertiesPanel extends StatefulWidget {
   final CompassEngine engine;
@@ -29,6 +30,15 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
     _endTaperController.dispose();
     super.dispose();
   }
+
+  // A color counts as "custom" — and lights up the Custom chip — when it is a
+  // real color that is NOT transparent and NOT one of the presets. Preset colors
+  // are stored as the MaterialColor objects from swatchColors, so an exact
+  // identity match here works; a picked color is a plain Color and will never
+  // match a MaterialColor, which is exactly why a hand-picked value reads as
+  // custom even if its hex coincides with a preset's shade.
+  bool _isCustomColor(Color c) =>
+      c != Colors.transparent && !widget.swatchColors.contains(c);
 
   @override
   Widget build(BuildContext context) {
@@ -84,6 +94,13 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                       onTap: () => widget.engine.changeLayerColor(activeLayer, color),
                     );
                   }),
+                  _buildCustomSwatch(
+                    context: context,
+                    currentColor: activeLayer.color,
+                    isSelected: _isCustomColor(activeLayer.color),
+                    theme: theme,
+                    onPicked: (c) => widget.engine.changeLayerColor(activeLayer, c),
+                  ),
                 ],
               ),
               
@@ -115,6 +132,13 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                       onTap: () => widget.engine.changeLayerStrokeColor(activeLayer, color),
                     );
                   }),
+                  _buildCustomSwatch(
+                    context: context,
+                    currentColor: activeLayer.strokeColor,
+                    isSelected: _isCustomColor(activeLayer.strokeColor),
+                    theme: theme,
+                    onPicked: (c) => widget.engine.changeLayerStrokeColor(activeLayer, c),
+                  ),
                 ],
               ),
 
@@ -296,6 +320,66 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
         child: isNone 
           ? const Center(child: Icon(Icons.format_color_reset, size: 16, color: Colors.grey))
           : null,
+      ),
+    );
+  }
+
+  // The "Custom…" chip. It opens the pure-Dart HSV picker and applies whatever
+  // comes back via onPicked. When an off-palette color is active, the chip wears
+  // that exact color (so there's always a live swatch of what's selected, even
+  // for a value that isn't in the preset row) and takes the selected ring; the
+  // eyedropper icon flips black/white against the color's luminance so it stays
+  // legible. When no custom color is active it sits neutral with a primary-tinted
+  // icon, reading as an affordance to open the picker.
+  Widget _buildCustomSwatch({
+    required BuildContext context,
+    required Color currentColor,
+    required bool isSelected,
+    required ThemeData theme,
+    required void Function(Color) onPicked,
+  }) {
+    final Color bg = isSelected ? currentColor : theme.scaffoldBackgroundColor;
+    final Color iconColor = isSelected
+        ? (currentColor.computeLuminance() > 0.5 ? Colors.black87 : Colors.white)
+        : theme.colorScheme.primary;
+
+    return Tooltip(
+      message: 'Custom color…',
+      child: GestureDetector(
+        onTap: () async {
+          // A transparent ("None") starting point opens the picker at black
+          // rather than at a fully-transparent color, since the picker is
+          // opaque-only and "give this a color" wants a visible default.
+          final initial =
+              currentColor == Colors.transparent ? Colors.black : currentColor;
+          final picked =
+              await showCompassColorPicker(context, initialColor: initial);
+          // onPicked only touches the engine, never context, so it's safe across
+          // the await without a mounted guard.
+          if (picked != null) onPicked(picked);
+        },
+        child: Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            color: bg,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: isSelected ? theme.colorScheme.primary : theme.dividerColor,
+              width: isSelected ? 3 : 1,
+            ),
+            boxShadow: isSelected ? [
+              BoxShadow(
+                color: theme.colorScheme.primary.withOpacity(0.4),
+                blurRadius: 6,
+                spreadRadius: 1,
+              )
+            ] : null,
+          ),
+          child: Center(
+            child: Icon(Icons.colorize, size: 16, color: iconColor),
+          ),
+        ),
       ),
     );
   }
