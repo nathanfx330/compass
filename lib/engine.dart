@@ -1,3 +1,5 @@
+// lib/engine.dart
+
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -342,6 +344,26 @@ class CompassEngine extends ChangeNotifier {
     }
 
     if (removed) {
+      // Before the constraints are torn down, gather any rider points bound to
+      // this shape and fold them into the GC batch. A rider -- the free point
+      // created by "Add Point to Shape", governed by a PointOnLine/Circle/Spiral
+      // constraint -- lives as an attachment-CHILD of one of the host's structural
+      // points plus a constraint entry; it occupies no structural slot. So without
+      // this it (a) is never handed to checkAndGCPoint and lingers as a dead blue
+      // dot, and (b) when the host's OWN structural point is later GC-checked, the
+      // rider sitting in that point's attachedPoints reads as an "external
+      // dependency" and keeps the host point alive too -- so deleting a line left
+      // line.start AND the rider behind, no longer even re-projecting. Folding the
+      // rider into the batch both collects it for its own GC check and stops it
+      // from falsely pinning the host. Must run BEFORE the removeWhere below, while
+      // the constraints still exist to be read.
+      for (var c in constraints) {
+        if (_constraintHasShape(c, shape)) {
+          final rider = _constraintRider(c);
+          if (rider != null) shapePoints.add(rider);
+        }
+      }
+
       constraints.removeWhere((c) => _constraintHasShape(c, shape));
 
       final batch = shapePoints.toSet();
@@ -958,6 +980,9 @@ class CompassEngine extends ChangeNotifier {
     }
 
     points.remove(p);
+    for (var remainingPoint in points) {
+      remainingPoint.attachedPoints.remove(p);
+    }
     constraints.removeWhere((c) => _constraintHasPoint(c, p));
 
     saveSnapshot();
@@ -997,6 +1022,19 @@ class CompassEngine extends ChangeNotifier {
     if (c is PointOnCircleConstraint) return c.circle == shape;
     if (c is PointOnSpiralConstraint) return c.spiral == shape;
     return false;
+  }
+
+  // The free "rider" point a host-rider constraint binds onto its host shape --
+  // the point created via "Add Point to Shape". removeShape uses this to fold a
+  // deleted shape's riders into the GC batch so they die with the shape instead of
+  // lingering, and so they don't falsely keep the host's structural points alive.
+  // Returns null for constraint kinds with no such rider (there are none today,
+  // but this keeps the switch total if more constraints are added later).
+  CompassPoint? _constraintRider(CompassConstraint c) {
+    if (c is PointOnLineConstraint) return c.point;
+    if (c is PointOnCircleConstraint) return c.point;
+    if (c is PointOnSpiralConstraint) return c.point;
+    return null;
   }
 
   bool _constraintHasPoint(CompassConstraint c, CompassPoint p) {
