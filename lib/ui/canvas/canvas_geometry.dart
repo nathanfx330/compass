@@ -1,4 +1,4 @@
-// lib/ui/canvas/canvas_geometry.dart
+// /lib/ui/canvas/canvas_geometry.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -11,6 +11,7 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
+import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
 
 class CanvasGeometry {
   /// Extracts all structural points from a given shape.
@@ -20,6 +21,17 @@ class CanvasGeometry {
     if (shape is CompassSpiral) return [shape.center, shape.startPoint];
     if (shape is CompassRectangle) return [shape.p1, shape.p2];
     if (shape is CompassXSpline) {
+      final points = shape.nodes.map((n) => n.point).toList();
+      if (shape.anchorPoint != null) points.add(shape.anchorPoint!);
+      return points;
+    }
+    if (shape is CompassMesh) {
+      // Every grid node IS a structural point (dragging one distorts the mesh),
+      // plus the centroid anchor -- exactly parallel to the X-Spline case. This is
+      // what lets getRigidBody and the selection/rotation machinery pick a mesh up
+      // with no further special-casing: they all route through this list and the
+      // anchor->node attachment edges.
+      // UPGRADE: extract the point from the CompassSplineNode
       final points = shape.nodes.map((n) => n.point).toList();
       if (shape.anchorPoint != null) points.add(shape.anchorPoint!);
       return points;
@@ -38,6 +50,21 @@ class CanvasGeometry {
         for (var n in shape.nodes) {
           cx += n.point.x.value;
           cy += n.point.y.value;
+        }
+        return Offset(cx / shape.nodes.length, cy / shape.nodes.length);
+      }
+      return null;
+    } else if (shape is CompassMesh) {
+      // Anchor is the rotation pivot / rigid-body center, same as a spline. Fall
+      // back to the average node position if (defensively) there's no anchor.
+      if (shape.anchorPoint != null) {
+        return Offset(shape.anchorPoint!.x.value, shape.anchorPoint!.y.value);
+      }
+      if (shape.nodes.isNotEmpty) {
+        double cx = 0, cy = 0;
+        for (var n in shape.nodes) {
+          cx += n.point.x.value; // <--- UPGRADE: Call .point.x
+          cy += n.point.y.value; // <--- UPGRADE: Call .point.y
         }
         return Offset(cx / shape.nodes.length, cy / shape.nodes.length);
       }

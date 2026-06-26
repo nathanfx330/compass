@@ -10,7 +10,9 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/line.dart';
 import '../../models/geometry/spiral.dart';
+import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
 
+import '../widgets/compass_color_picker.dart'; // <--- NEW: node color picking
 import '../workspace/dialogs.dart';
 import 'canvas_controller.dart'; 
 
@@ -67,7 +69,13 @@ class CanvasContextMenus {
     if (clickedPoint != null) {
       CompassXSpline? parentSpline;
       CompassSplineNode? clickedNode;
-      
+
+      // Is the clicked point a node of a gradient mesh? Scanned in parallel with
+      // the spline scan below. A mesh node gets a "Set Node Color" action (the
+      // primary way to paint the gradient) but NONE of the spline-specific items
+      // (no close/bezier/fillet), since a mesh node has no handles or curvature.
+      CompassMesh? parentMesh;
+
       for (var layer in engine.layers) {
         if (layer.isLocked) continue; 
         for (var shape in layer.shapes) {
@@ -79,13 +87,24 @@ class CanvasContextMenus {
                 break;
               }
             }
+          } else if (shape is CompassMesh && shape.containsNode(clickedPoint)) {
+            parentMesh = shape;
           }
-          if (parentSpline != null) break;
+          if (parentSpline != null || parentMesh != null) break;
         }
-        if (parentSpline != null) break;
+        if (parentSpline != null || parentMesh != null) break;
       }
 
       final List<PopupMenuEntry<String>> pointMenuItems = [];
+
+      // --- Mesh node: color action first, then a divider. ---
+      if (parentMesh != null) {
+        pointMenuItems.add(const PopupMenuItem(
+          value: 'set_mesh_color',
+          child: Text('Set Node Color…'),
+        ));
+        pointMenuItems.add(const PopupMenuDivider());
+      }
 
       if (parentSpline != null) {
         pointMenuItems.add(PopupMenuItem(
@@ -136,7 +155,16 @@ class CanvasContextMenus {
         items: pointMenuItems,
       );
 
-      if (selectedAction == 'delete_point') {
+      if (selectedAction == 'set_mesh_color' && parentMesh != null) {
+        // Seed the picker with the node's current color; apply via the engine.
+        // The picker is opaque-only (the SVG exporter drops alpha), which is fine
+        // for mesh colors. onPicked only touches the engine, so it's await-safe.
+        final current = parentMesh.colorForPoint(clickedPoint) ?? Colors.grey;
+        final picked = await showCompassColorPicker(context, initialColor: current);
+        if (picked != null) {
+          engine.setMeshNodeColor(parentMesh, clickedPoint, picked);
+        }
+      } else if (selectedAction == 'delete_point') {
         engine.removePoint(clickedPoint);
         controller.removePointFromSelection(clickedPoint);
       } else if (selectedAction == 'reset_handles') {
@@ -174,7 +202,18 @@ class CanvasContextMenus {
           value: 'toggle_closed', 
           child: Text(clickedShape.isClosed ? 'Open Spline' : 'Close Spline (Connect Last to First)'),
         ));
-      } else if (clickedShape is CompassCircle || clickedShape is CompassRectangle) {
+      } else if (clickedShape is CompassRectangle) {
+        // A rectangle can become an editable spline OR a gradient mesh. Both are
+        // in-place conversions that preserve Z-order and boolean operation.
+        menuItems.insert(6, const PopupMenuItem(
+          value: 'convert_to_spline',
+          child: Text('Convert to X-Spline'),
+        ));
+        menuItems.insert(7, const PopupMenuItem(
+          value: 'convert_to_mesh',
+          child: Text('Convert to Gradient Mesh'),
+        ));
+      } else if (clickedShape is CompassCircle) {
         menuItems.insert(6, const PopupMenuItem(
           value: 'convert_to_spline',
           child: Text('Convert to X-Spline'),
@@ -201,6 +240,8 @@ class CanvasContextMenus {
           engine.convertCircleToSpline(clickedShape);
         } else if (selectedAction == 'convert_to_spline' && clickedShape is CompassRectangle) { 
           engine.convertRectangleToSpline(clickedShape);
+        } else if (selectedAction == 'convert_to_mesh' && clickedShape is CompassRectangle) {
+          engine.convertRectangleToMesh(clickedShape);
         } else if (selectedAction == 'add_point') {
           final newPoint = CompassPoint(x: logicalPosition.dx, y: logicalPosition.dy);
           engine.addPoint(newPoint);

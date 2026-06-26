@@ -1,4 +1,4 @@
-// lib/ui/canvas/canvas_gesture_handler.dart
+// /lib/ui/canvas/canvas_gesture_handler.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -15,6 +15,7 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
+import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
 
 import 'canvas_controller.dart';
 import 'canvas_geometry.dart';
@@ -150,13 +151,39 @@ class CanvasGestureHandler {
     controller.hoveredPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, controller.hitThreshold / controller.canvasScale);
 
     controller.updateAddVertexHover(logicalPosition);
+    controller.updateMeshSliceHover(logicalPosition); 
     
     if ((controller.isRPressed || controller.isShiftRPressed || controller.isCtrlRPressed) && controller.rotationPivotOffset == null && controller.hoveredPoint != null) {
       controller.setupRotationState(hierarchy: controller.isShiftRPressed, handlesOnly: controller.isCtrlRPressed);
     }
 
-    if (controller.isAPressed && controller.targetTensionNode == null && controller.hoveredPoint != null) {
-      controller.setupTensionState();
+    // --- UPGRADE: A KEY NOW TARGETS MESH NODES AS WELL ---
+    // Fixed: Only test for a new hover target if we are NOT currently dragging a node.
+    if (controller.isAPressed && controller.targetTensionNode == null && controller.hoveredPoint != null && controller.activeTensionNode == null) {
+      for (var layer in engine.layers) {
+        if (!layer.isVisible || layer.isLocked) continue; 
+        for (var shape in layer.shapes) {
+          if (!shape.isVisible) continue;
+          
+          if (shape is CompassXSpline) {
+            for (var node in shape.nodes) {
+              if (node.point == controller.hoveredPoint) {
+                controller.targetTensionNode = node;
+                controller.notifyListeners();
+                return;
+              }
+            }
+          } else if (shape is CompassMesh) {
+            for (var node in shape.nodes) {
+              if (node.point == controller.hoveredPoint) {
+                controller.targetTensionNode = node;
+                controller.notifyListeners();
+                return;
+              }
+            }
+          }
+        }
+      }
     }
     
     controller.notifyListeners();
@@ -166,6 +193,7 @@ class CanvasGestureHandler {
     controller.hoverPosition = null;
     controller.hoveredPoint = null;
     controller.clearAddVertexHover();
+    controller.clearMeshSliceHover(); 
     controller.notifyListeners();
   }
 
@@ -187,7 +215,6 @@ class CanvasGestureHandler {
     final localPosition = renderBox.globalToLocal(details.globalPosition);
     final logicalPosition = controller.getLogicalPosition(localPosition);
 
-    // --- Right-Click Width Constraint Hit Test ---
     final selForHandles = engine.selectedShape;
     if (controller.isWPressed && selForHandles is CompassXSpline && showScaffolding && showHandles) {
       final handleThreshold = 24.0 / controller.canvasScale;
@@ -254,6 +281,8 @@ class CanvasGestureHandler {
             if (distToCenter <= initialR * CompassSpiral.phi * 4) { clickedShape = shape; break; }
           } else if (shape is CompassRectangle) {
              if (shape.getPath().contains(logicalPosition)) { clickedShape = shape; break; }
+          } else if (shape is CompassMesh) {
+             if (shape.getPath().contains(logicalPosition)) { clickedShape = shape; break; }
           } else if (shape is CompassXSpline) {
              if (shape.getPath().contains(logicalPosition)) { clickedShape = shape; break; }
           }
@@ -284,6 +313,24 @@ class CanvasGestureHandler {
 
     final bool isShiftPressed = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftLeft) ||
         HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftRight);
+
+    if (controller.sliceMesh != null && controller.sliceGap >= 0) {
+      final mesh = controller.sliceMesh!;
+      if (controller.sliceIsRow) {
+        engine.insertMeshRow(mesh, controller.sliceGap, controller.sliceT);
+      } else {
+        engine.insertMeshColumn(mesh, controller.sliceGap, controller.sliceT);
+      }
+
+      if (controller.hoverPosition != null) {
+        controller.updateMeshSliceHover(controller.hoverPosition!);
+      } else {
+        controller.clearMeshSliceHover();
+      }
+
+      controller.notifyListeners();
+      return;
+    }
 
     if (controller.addVertexSpline != null && controller.addVertexSegmentIndex >= 0) {
       final spline = controller.addVertexSpline!;
@@ -333,6 +380,7 @@ class CanvasGestureHandler {
           for (var shape in layer.shapes.reversed) {
             if (!shape.isVisible) continue;
             if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; } 
+            else if (shape is CompassMesh && (shape.containsNode(hitPoint!) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
             else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) { ownerShape = shape; break; } 
             else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; } 
             else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) { ownerShape = shape; break; } 
@@ -366,6 +414,8 @@ class CanvasGestureHandler {
             final distToCenter = sqrt(pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2));
             if (distToCenter <= initialR * CompassSpiral.phi * 4) { hitShape = shape; break; }
           } else if (shape is CompassRectangle) { 
+             if (shape.getPath().contains(logicalPosition)) { hitShape = shape; break; }
+          } else if (shape is CompassMesh) {
              if (shape.getPath().contains(logicalPosition)) { hitShape = shape; break; }
           } else if (shape is CompassXSpline) {
              if (shape.getPath().contains(logicalPosition)) { hitShape = shape; break; }
@@ -624,6 +674,7 @@ class CanvasGestureHandler {
           for (var shape in layer.shapes.reversed) {
             if (!shape.isVisible) continue;
             if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; } 
+            else if (shape is CompassMesh && (shape.containsNode(hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
             else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) { ownerShape = shape; break; } 
             else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; } 
             else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) { ownerShape = shape; break; } 
@@ -661,6 +712,10 @@ class CanvasGestureHandler {
     controller.dragStartLogicalPosition = logicalPosition;
     controller.hoverPosition = logicalPosition; 
     controller.notifyListeners();
+
+    if (controller.isXPressed && controller.sliceMesh != null) {
+      return;
+    }
 
     if ((controller.isRPressed || controller.isShiftRPressed || controller.isCtrlRPressed) && controller.rotationPivotOffset != null) {
       controller.isRotating = true;
@@ -835,15 +890,28 @@ class CanvasGestureHandler {
       }
     }
 
-    if (selForHandles is CompassXSpline && showScaffolding) {
-       for (var node in selForHandles.nodes) {
-          final pt = Offset(node.point.x.value, node.point.y.value);
-          final handlePt = pt + const Offset(20, -30); 
-          final dist = (logicalPosition - handlePt).distance;
-          if (dist < (15.0 / controller.canvasScale)) {
-            controller.activeTensionNode = node;
-            return; 
-          }
+    // --- UPGRADE: A KEY TARGETS MESH NODES AS WELL ---
+    if (showScaffolding) {
+       if (selForHandles is CompassXSpline) {
+         for (var node in selForHandles.nodes) {
+            final pt = Offset(node.point.x.value, node.point.y.value);
+            final handlePt = pt + const Offset(20, -30); 
+            final dist = (logicalPosition - handlePt).distance;
+            if (dist < (15.0 / controller.canvasScale)) {
+              controller.activeTensionNode = node;
+              return; 
+            }
+         }
+       } else if (selForHandles is CompassMesh) {
+         for (var node in selForHandles.nodes) {
+            final pt = Offset(node.point.x.value, node.point.y.value);
+            final handlePt = pt + const Offset(20, -30); 
+            final dist = (logicalPosition - handlePt).distance;
+            if (dist < (15.0 / controller.canvasScale)) {
+              controller.activeTensionNode = node;
+              return; 
+            }
+         }
        }
     }
 

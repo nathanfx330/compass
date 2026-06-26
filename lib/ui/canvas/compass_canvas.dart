@@ -128,6 +128,13 @@ class _CompassCanvasState extends State<CompassCanvas> {
                         addVertexPreviewPos: _controller.addVertexPreviewPos,
                         addVertexSpline: _controller.addVertexSpline,
                         addVertexSegmentIndex: _controller.addVertexSegmentIndex,
+                        // --- NEW: X-key mesh slice preview. The controller resolves
+                        // these on hover (which mesh, row vs column, the two dashed-
+                        // line endpoints); the renderer draws the dotted guide from
+                        // them. Default null/false when no slice is staged. ---
+                        sliceIsRow: _controller.sliceIsRow,
+                        slicePreviewA: _controller.slicePreviewA,
+                        slicePreviewB: _controller.slicePreviewB,
                         tensionTargetPoint: _controller.targetTensionNode?.point, 
                         shapeStartPoint: _controller.shapeStartPoint, 
                         hoveredPoint: _controller.hoveredPoint,

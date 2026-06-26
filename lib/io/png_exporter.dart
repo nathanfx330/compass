@@ -11,7 +11,8 @@ import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/rectangle.dart';
-import '../models/geometry/spline.dart'; // <--- NEW: Needed to calculate area-stroke bounds
+import '../models/geometry/spline.dart'; // <--- Needed to calculate area-stroke bounds
+import '../models/geometry/mesh.dart';   // <--- NEW: gradient mesh bounds + draw
 
 /// Rasterizes the pure artwork (no scaffolding) to a PNG by re-rendering the
 /// model offscreen. Mirrors SVGExporter's philosophy: export the *design*, not
@@ -67,6 +68,17 @@ class PNGExporter {
             if (bounds.right > maxX) maxX = bounds.right;
             if (bounds.bottom > maxY) maxY = bounds.bottom;
           }
+        } else if (shape is CompassMesh) {
+          // A mesh is bounded by its nodes (all in engine.points, so already
+          // covered above) -- but its nodes can be dragged anywhere, and we want
+          // parity with how the renderer would show them, so widen explicitly to
+          // the mesh's own bounds. Cheap and keeps the frame correct even if the
+          // point loop above is ever changed.
+          final bounds = shape.getBounds();
+          if (bounds.left < minX) minX = bounds.left;
+          if (bounds.top < minY) minY = bounds.top;
+          if (bounds.right > maxX) maxX = bounds.right;
+          if (bounds.bottom > maxY) maxY = bounds.bottom;
         }
       }
     }
@@ -139,6 +151,29 @@ class PNGExporter {
           ..style = PaintingStyle.fill
           ..isAntiAlias = true;
         canvas.drawPath(strokeAreaPath, areaStrokePaint);
+      }
+
+      // 1d. Gradient Meshes -- mirrors the renderer's mesh pass exactly: each mesh
+      // paints its interpolated color field via drawVertices, clipped to its
+      // boolean-carved silhouette, after this layer's flat fills. save/restore
+      // scopes the clip so it can't leak onto the next mesh or layer. Same
+      // BlendMode.modulate + white paint as on-canvas, so the authored vertex
+      // colors render identically between screen and PNG.
+      for (var shape in layer.shapes) {
+        if (shape is! CompassMesh) continue;
+        if (!shape.isVisible) continue;
+        if (shape.rows < 2 || shape.cols < 2) continue;
+
+        final clip = layer.getLayerMeshClipPath(shape);
+        if (clip.computeMetrics().isEmpty) continue;
+
+        canvas.save();
+        canvas.clipPath(clip);
+        final meshPaint = Paint()
+          ..isAntiAlias = true
+          ..color = Colors.white;
+        canvas.drawVertices(shape.buildVertices(), BlendMode.modulate, meshPaint);
+        canvas.restore();
       }
 
       // getLayerPath() skips shapes with no fill area or operation == none, so

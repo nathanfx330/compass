@@ -1,4 +1,4 @@
-// ./lib/ui/canvas/canvas_hit_tester.dart
+// /lib/ui/canvas/canvas_hit_tester.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -11,6 +11,7 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
+import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
 
 class CanvasHitTester {
   /// Checks if a point is strictly locked (used exclusively by locked layers)
@@ -30,6 +31,7 @@ class CanvasHitTester {
         else if (shape is CompassSpiral && (shape.center == p || shape.startPoint == p)) hasPoint = true;
         else if (shape is CompassRectangle && (shape.p1 == p || shape.p2 == p)) hasPoint = true; 
         else if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == p) || shape.anchorPoint == p)) hasPoint = true;
+        else if (shape is CompassMesh && (shape.containsNode(p) || shape.anchorPoint == p)) hasPoint = true;
 
         if (hasPoint) {
           if (layer.isLocked) {
@@ -45,9 +47,12 @@ class CanvasHitTester {
     return usedInLocked && !usedInUnlocked;
   }
 
-  /// Finds the nearest unlocked point within a scaled hit threshold
+  /// Finds the nearest unlocked point within a scaled hit threshold.
+  /// Iterates from NEWEST to OLDEST, so that visual points (like mesh grid nodes)
+  /// take priority over structural points (like the centroid anchor) if they are 
+  /// occupying the exact same coordinate.
   static CompassPoint? hitTestPoint(CompassEngine engine, Offset logicalPosition, double threshold) {
-    for (var point in engine.points) {
+    for (var point in engine.points.reversed) {
       if (isPointLocked(engine, point)) continue; 
 
       final distance = sqrt(

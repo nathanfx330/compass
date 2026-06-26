@@ -1,4 +1,4 @@
-// lib/ui/canvas/canvas_controller.dart
+// /lib/ui/canvas/canvas_controller.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -10,6 +10,7 @@ import '../../engine.dart';
 import '../../models/geometry/point.dart';
 import '../../models/geometry/shape.dart';
 import '../../models/geometry/spline.dart';
+import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh slicing
 
 // --- Imports ---
 import 'canvas_geometry.dart';       
@@ -76,6 +77,21 @@ class CanvasController extends ChangeNotifier {
   int addVertexSegmentIndex = -1;
   Offset? addVertexPreviewPos;
 
+  // --- X-KEY MESH SLICE HOVER STATE ---
+  // Parallel to the Q-key add-vertex hover fields above. When X is held and the
+  // cursor is over a mesh, these describe the pending slice: which mesh, whether
+  // it's a row or column insert, the gap index to pass to the engine, the
+  // parametric position [0,1] WITHIN that gap (where the cursor is, so the cut
+  // lands under the mouse rather than at the band midpoint), and the two endpoints
+  // of the dotted preview line the renderer draws. All null/-1/0.5 when no valid
+  // slice is under the cursor.
+  CompassMesh? sliceMesh;
+  bool sliceIsRow = false; // true => horizontal cut (insert row); false => column
+  int sliceGap = -1;
+  double sliceT = 0.5; // parametric position of the cut within the band
+  Offset? slicePreviewA;
+  Offset? slicePreviewB;
+
   Offset panOffset = Offset.zero;
   double canvasScale = 1.0; 
   bool isPanningCanvas = false;
@@ -87,6 +103,7 @@ class CanvasController extends ChangeNotifier {
   bool isAPressed = false; 
   bool isFPressed = false; 
   bool isQPressed = false; 
+  bool isXPressed = false; // <--- NEW: mesh slice modifier
   bool is1Pressed = false; 
   bool is2Pressed = false; 
 
@@ -119,6 +136,7 @@ class CanvasController extends ChangeNotifier {
     activeSpline = null;
     pendingSelectPress = null;
     clearAddVertexHover();
+    clearMeshSliceHover();
     notifyListeners();
   }
 
@@ -279,6 +297,119 @@ class CanvasController extends ChangeNotifier {
     addVertexSpline = null;
     addVertexSegmentIndex = -1;
     addVertexPreviewPos = null;
+  }
+
+  // --- X-HOVER "SLICE MESH" HELPERS ---
+  void updateMeshSliceHover(Offset logical) {
+    if (currentTool != CompassTool.select || !isXPressed) {
+      clearMeshSliceHover();
+      return;
+    }
+
+    CompassMesh? target;
+    for (var layer in engine.layers.reversed) {
+      if (!layer.isVisible || layer.isLocked) continue;
+      for (var shape in layer.shapes.reversed) {
+        if (!shape.isVisible) continue;
+        if (shape is CompassMesh && shape.getPath().contains(logical)) {
+          target = shape;
+          break;
+        }
+      }
+      if (target != null) break;
+    }
+
+    if (target == null || target.rows < 2 || target.cols < 2) {
+      clearMeshSliceHover();
+      return;
+    }
+
+    final rowGap = target.rowGapAt(logical);
+    final colGap = target.colGapAt(logical);
+
+    double rowT = 0.5, colT = 0.5;
+    (Offset, Offset)? rowLine;
+    (Offset, Offset)? colLine;
+
+    double distToRowEdge = double.infinity;
+    double distToColEdge = double.infinity;
+
+    if (rowGap != -1) {
+      rowT = target.rowParamAt(rowGap, logical);
+      rowLine = target.rowSlicePreview(rowGap, rowT);
+      if (rowLine != null) {
+        final yTop = target.rowY(rowGap);
+        final yBot = target.rowY(rowGap + 1);
+        distToRowEdge = min((logical.dy - yTop).abs(), (logical.dy - yBot).abs());
+      }
+    }
+    
+    if (colGap != -1) {
+      colT = target.colParamAt(colGap, logical);
+      colLine = target.colSlicePreview(colGap, colT);
+      if (colLine != null) {
+        final xLeft = target.colX(colGap);
+        final xRight = target.colX(colGap + 1);
+        distToColEdge = min((logical.dx - xLeft).abs(), (logical.dx - xRight).abs());
+      }
+    }
+
+    if (rowLine == null && colLine == null) {
+      clearMeshSliceHover();
+      return;
+    }
+
+    bool chooseRow;
+
+    // Explicit Overrides using standard axis-lock keys (1 = Horizontal/Row, 2 = Vertical/Column)
+    if (is1Pressed && rowLine != null) {
+      chooseRow = true;
+    } else if (is2Pressed && colLine != null) {
+      chooseRow = false;
+    } else {
+      // Auto-heuristic: Distance to the bounding grid edges.
+      // If we are hovering closer to a vertical column line, we want to slice ACROSS it (Horizontal Row cut).
+      // If closer to a horizontal row line, we want to slice ACROSS it (Vertical Column cut).
+      
+      // Add hysteresis (stickiness) so it doesn't flicker when moving along the diagonal
+      double bias = 0.0;
+      if (sliceMesh == target && sliceGap != -1) {
+        bias = 10.0 / canvasScale; 
+      }
+
+      double effectiveColDist = distToColEdge - (sliceIsRow ? bias : 0);
+      double effectiveRowDist = distToRowEdge - (!sliceIsRow ? bias : 0);
+
+      chooseRow = effectiveColDist <= effectiveRowDist ? rowLine != null : colLine == null;
+      if (rowLine == null) chooseRow = false;
+      if (colLine == null) chooseRow = true;
+    }
+
+    sliceMesh = target;
+    if (chooseRow && rowLine != null) {
+      sliceIsRow = true;
+      sliceGap = rowGap;
+      sliceT = rowT;
+      slicePreviewA = rowLine.$1;
+      slicePreviewB = rowLine.$2;
+    } else if (colLine != null) {
+      sliceIsRow = false;
+      sliceGap = colGap;
+      sliceT = colT;
+      slicePreviewA = colLine.$1;
+      slicePreviewB = colLine.$2;
+    } else {
+      clearMeshSliceHover();
+    }
+  }
+
+  void clearMeshSliceHover() {
+    sliceMesh = null;
+    sliceIsRow = false;
+    sliceGap = -1;
+    sliceT = 0.5;
+    slicePreviewA = null;
+    slicePreviewB = null;
   }
 
   (CompassXSpline, int, Offset)? _findNearestSplineSegment(Offset logical) {

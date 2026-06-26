@@ -1,4 +1,4 @@
-// lib/io/project_serializer.dart
+// /lib/io/project_serializer.dart
 
 import 'dart:math';
 import 'dart:ui' as ui;
@@ -13,6 +13,7 @@ import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
 import '../models/geometry/rectangle.dart';
+import '../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
 import '../models/layer.dart';
 
 class ProjectSerializer {
@@ -32,6 +33,9 @@ class ProjectSerializer {
     // Point ids never contain commas (they already survive this CSV round-trip), so
     // a plain comma split is safe. attach() dedupes, so the handful of edges the
     // shape-loaders also rebuild (circle/spiral center -> satellite) stay idempotent.
+    //
+    // A mesh's anchor -> node edges ride this same channel, so the mesh loader does
+    // NOT re-attach: it rebuilds the grid model and trusts this replay for cohesion.
     for (var p in engine.points) {
       for (var child in p.attachedPoints) {
         buffer.writeln('ATTACH,${p.id},${child.id}');
@@ -54,6 +58,15 @@ class ProjectSerializer {
           buffer.writeln('SHAPE,SPIRAL,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.startPoint.id},${shape.isClockwise},${shape.revolutions}');
         } else if (shape is CompassRectangle) {
           buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}');
+        } else if (shape is CompassMesh) {
+          // --- UPGRADE: Mesh nodes now serialize their Tension values ---
+          // Format: `nodeId:colorValue:tension`. Safe because legacy files only had 2 parts,
+          // and we can parse defensively.
+          final nodesStr = List.generate(shape.nodes.length, (i) {
+            final node = shape.nodes[i];
+            return '${node.point.id}:${shape.colors[i].value}:${node.tension.value}';
+          }).join('|');
+          buffer.writeln('SHAPE,MESH,${layer.id},${shape.operation.name},${shape.isVisible},${shape.rows},${shape.cols},${shape.anchorPoint?.id ?? ""},$nodesStr');
         } else if (shape is CompassXSpline) {
           // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR:pinL:pinR
           // when the node carries explicit Bezier handles, variable width, or width pins. 
@@ -194,7 +207,8 @@ class ProjectSerializer {
           bool isVisible = true;
           int argOffset = 4;
 
-          if (shapeType == 'XSPLINE') {
+          if (shapeType == 'XSPLINE' || shapeType == 'MESH') {
+            // Both carry isVisible at parts[4], defining data from parts[5] on.
             if (parts.length >= 7) {
               isVisible = parts[4] == 'true';
               argOffset = 5;
@@ -274,6 +288,55 @@ class ProjectSerializer {
               }
                 
               layer.shapes.add(rect);
+            }
+          } else if (shapeType == 'MESH') {
+            final rows = int.tryParse(parts[argOffset]) ?? 0;
+            final cols = int.tryParse(parts[argOffset + 1]) ?? 0;
+
+            final anchorId = parts[argOffset + 2];
+            CompassPoint? anchorPt;
+            if (anchorId.isNotEmpty) anchorPt = pointMap[anchorId];
+
+            final nodesRawStr =
+                parts.length > argOffset + 3 ? parts[argOffset + 3] : '';
+
+            // --- UPGRADE: Expect CompassSplineNode and tension in serialization ---
+            final nodes = <CompassSplineNode>[];
+            final colors = <Color>[];
+            bool valid = rows >= 2 && cols >= 2;
+
+            if (valid) {
+              final nodesData = nodesRawStr.split('|');
+              for (var nd in nodesData) {
+                if (nd.isEmpty) continue;
+                final np = nd.split(':');
+                if (np.length >= 2) {
+                  final pt = pointMap[np[0]];
+                  final colorVal = int.tryParse(np[1]) ?? 0xFFCCCCCC;
+                  final tension = np.length >= 3 ? (double.tryParse(np[2]) ?? 1.0) : 1.0; // Fallback for old files
+                  
+                  if (pt != null) {
+                    final node = CompassSplineNode(point: pt, tension: tension);
+                    node.tension.addListener(onUpdate);
+                    
+                    nodes.add(node);
+                    colors.add(Color(colorVal));
+                  } else {
+                    valid = false;
+                  }
+                }
+              }
+            }
+
+            if (valid && nodes.length == rows * cols) {
+              final mesh = CompassMesh(
+                rows: rows,
+                cols: cols,
+                nodes: nodes,
+                colors: colors,
+                anchorPoint: anchorPt,
+              )..operation = op..isVisible = isVisible;
+              layer.shapes.add(mesh);
             }
           } else if (shapeType == 'XSPLINE') {
             final isClosed = parts[argOffset] == 'true';

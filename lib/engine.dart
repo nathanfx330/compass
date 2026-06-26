@@ -1,4 +1,4 @@
-// lib/engine.dart
+// /lib/engine.dart
 
 import 'dart:io';
 import 'dart:typed_data';
@@ -14,6 +14,7 @@ import 'models/geometry/circle.dart';
 import 'models/geometry/spiral.dart';
 import 'models/geometry/spline.dart';
 import 'models/geometry/rectangle.dart';
+import 'models/geometry/mesh.dart'; // <--- NEW: gradient mesh shape
 import 'models/layer.dart';
 import 'models/reference_layer.dart';
 
@@ -330,6 +331,12 @@ class CompassEngine extends ChangeNotifier {
     } else if (shape is CompassXSpline) {
       shapePoints = shape.nodes.map((n) => n.point).toList();
       if (shape.anchorPoint != null) shapePoints.add(shape.anchorPoint!);
+    } else if (shape is CompassMesh) {
+      // Every grid node plus the centroid anchor. They only attach among
+      // themselves (anchor -> each node), so the batch GC below collects the
+      // whole lattice with no external dependency holding any of it alive.
+      shapePoints = shape.nodes.map((n) => n.point).toList();
+      if (shape.anchorPoint != null) shapePoints.add(shape.anchorPoint!);
     }
 
     bool removed = false;
@@ -389,6 +396,7 @@ class CompassEngine extends ChangeNotifier {
         else if (s is CompassSpiral && (s.center == p || s.startPoint == p)) isUsed = true;
         else if (s is CompassRectangle && (s.p1 == p || s.p2 == p)) isUsed = true; 
         else if (s is CompassXSpline && (s.nodes.any((n) => n.point == p) || s.anchorPoint == p)) isUsed = true;
+        else if (s is CompassMesh && (s.containsNode(p) || s.anchorPoint == p)) isUsed = true;
         
         if (isUsed) break;
       }
@@ -438,8 +446,136 @@ class CompassEngine extends ChangeNotifier {
     ShapeConverter.convertRectangleToSpline(this, rect);
   }
 
+  void convertRectangleToMesh(CompassRectangle rect, {int rows = 3, int cols = 3}) {
+    ShapeConverter.convertRectangleToMesh(this, rect, rows: rows, cols: cols);
+  }
+
   void bakeLayer(CompassLayer layer) {
     ShapeConverter.bakeLayer(this, layer);
+  }
+
+  // ===========================================================================
+  // GRADIENT MESH ENGINE ACTIONS
+  // ===========================================================================
+
+  // Reassign one node's color. Routed through saveSnapshot/notify because a color
+  // edit is a discrete, undoable action (unlike a continuous node drag). No-ops if
+  // the point isn't actually one of this mesh's nodes.
+  void setMeshNodeColor(CompassMesh mesh, CompassPoint node, Color color) {
+    if (mesh.setColorForPoint(node, color)) {
+      saveSnapshot();
+      notifyListeners();
+    }
+  }
+
+  // Paint a whole selection of nodes at once (the multi-select path). Snapshots a
+  // single undo step for the batch rather than one per node. Points in [nodes]
+  // that don't belong to [mesh] are simply skipped.
+  void setMeshSelectedColors(CompassMesh mesh, Set<CompassPoint> nodes, Color color) {
+    bool changed = false;
+    for (var p in nodes) {
+      if (mesh.setColorForPoint(p, color)) changed = true;
+    }
+    if (changed) {
+      saveSnapshot();
+      notifyListeners();
+    }
+  }
+
+  // --- X-KEY SLICING: insert a full row or column into a gradient mesh ---------
+  //
+  // A slice subdivides the lattice by one row or column at a parametric position
+  // [t] within the hovered cell-band (0 = upper/left bounding gridline, 1 =
+  // lower/right, 0.5 = midpoint). The inserted nodes' positions and colors are
+  // interpolated from their neighbors at t -- pure subdivision, so the rendered
+  // gradient is unchanged, it just gains a line of editable handles exactly where
+  // the cursor was. Because CompassMesh's rows/cols are final, we cannot grow the
+  // mesh in place: we build a NEW mesh with the grown dimensions and swap it into
+  // the SAME layer slot, preserving Z-order, boolean operation, visibility, and
+  // the SAME anchor (so rigid-body cohesion and the rotation pivot are untouched).
+  // Existing node points are reused in their new grid slots; only the inserted
+  // line's points are minted, registered in engine.points, listener-wired, and
+  // attached to the anchor -- exactly the contract the rectangle->mesh converter
+  // follows, which is what lets the new nodes participate in selection/
+  // serialization/undo with no special casing.
+
+  void insertMeshRow(CompassMesh mesh, int gap, [double t = 0.5]) {
+    if (gap < 0 || gap > mesh.rows - 2) return;
+    _applyMeshSlice(mesh, mesh.insertRowData(gap, t));
+  }
+
+  void insertMeshColumn(CompassMesh mesh, int gap, [double t = 0.5]) {
+    if (gap < 0 || gap > mesh.cols - 2) return;
+    _applyMeshSlice(mesh, mesh.insertColumnData(gap, t));
+  }
+
+  // Shared back-end for both slice directions. Consumes the MeshSliceData layout
+  // (row-major, length newRows*newCols, each slot either a reused existing point
+  // or an instruction to mint a new one), produces the new node + color lists,
+  // and swaps a freshly built CompassMesh into the old one's layer position.
+  void _applyMeshSlice(CompassMesh mesh, MeshSliceData data) {
+    // Locate the mesh's layer + index so the replacement lands in the same slot.
+    CompassLayer? owningLayer;
+    int slotIndex = -1;
+    for (var layer in layers) {
+      final idx = layer.shapes.indexOf(mesh);
+      if (idx != -1) {
+        owningLayer = layer;
+        slotIndex = idx;
+        break;
+      }
+    }
+    if (owningLayer == null) return;
+
+    final anchor = mesh.anchorPoint;
+
+    // UPGRADE: List of CompassSplineNode instead of CompassPoint
+    final newNodes = List<CompassSplineNode>.filled(
+        data.rows * data.cols, mesh.nodes.first,
+        growable: false);
+    final newColors = List<Color>.filled(
+        data.rows * data.cols, const Color(0xFFCCCCCC),
+        growable: false);
+
+    for (int i = 0; i < data.rows * data.cols; i++) {
+      final existing = data.existing[i];
+      if (existing != null) {
+        // Reuse the original node in its new slot; carry its color across.
+        newNodes[i] = existing;
+        newColors[i] = data.reusedColors[i] ?? const Color(0xFFCCCCCC);
+      } else {
+        // Mint the inserted node: register its point, wire listeners, attach to anchor.
+        final pos = data.newPositions[i] ?? Offset.zero;
+        final np = CompassPoint(x: pos.dx, y: pos.dy);
+        points.add(np);
+        np.x.addListener(notifyListeners);
+        np.y.addListener(notifyListeners);
+        if (anchor != null) anchor.attach(np);
+
+        // UPGRADE: Wrap in a CompassSplineNode, inherit tension at 1.0
+        final splineNode = CompassSplineNode(point: np, tension: 1.0);
+        splineNode.tension.addListener(notifyListeners);
+
+        newNodes[i] = splineNode;
+        newColors[i] = data.newColors[i] ?? const Color(0xFFCCCCCC);
+      }
+    }
+
+    final newMesh = CompassMesh(
+      rows: data.rows,
+      cols: data.cols,
+      nodes: newNodes,
+      colors: newColors,
+      anchorPoint: anchor,
+      operation: mesh.operation,
+      isVisible: mesh.isVisible,
+    );
+
+    owningLayer.shapes[slotIndex] = newMesh;
+    if (_selectedShape == mesh) _selectedShape = newMesh;
+
+    saveSnapshot();
+    notifyListeners();
   }
   
   // ===========================================================================
@@ -944,6 +1080,24 @@ class CompassEngine extends ChangeNotifier {
   }
 
   void removePoint(CompassPoint p) {
+    // A mesh is a rigid rows x cols lattice: deleting any single node would leave
+    // a hole the bilinear grid can't represent. So deleting a mesh node deletes
+    // the WHOLE mesh, routed through removeShape -- which batch-GCs every node and
+    // the anchor together (the grid can be large; the spline-collapse path below
+    // only detaches, which would strand all the other nodes as dead points). We
+    // detect ownership before the generic removeWhere and delegate, then return:
+    // removeShape already snapshots, notifies, and clears selection. (If several
+    // nodes of the same mesh are deleted in one pass, the first call removes the
+    // mesh and GCs the rest, so later calls simply find nothing and no-op.)
+    for (var layer in layers) {
+      for (var s in layer.shapes) {
+        if (s is CompassMesh && (s.containsNode(p) || s.anchorPoint == p)) {
+          removeShape(s);
+          return;
+        }
+      }
+    }
+
     for (var layer in layers) {
       layer.shapes.removeWhere((shape) {
         if (shape is CompassLine) {

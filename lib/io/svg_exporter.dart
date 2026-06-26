@@ -1,4 +1,4 @@
-// lib/io/svg_exporter.dart
+// /lib/io/svg_exporter.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -10,10 +10,41 @@ import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
 import '../models/geometry/rectangle.dart';
+import '../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
 
 class SVGExporter {
   static String sanitizeId(String rawId) {
     return rawId.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '');
+  }
+
+  // Number of sub-cells per patch edge when faceting a mesh to flat polygons.
+  // Higher than the canvas/PNG drawVertices default (8): there, each sub-quad is
+  // Gouraud-interpolated, so 8 already looks smooth; HERE each sub-quad is a SINGLE
+  // FLAT color, so smoothness comes only from making the facets smaller. 16 keeps
+  // the file reasonable while reading as a smooth gradient at typical sizes.
+  static const int _meshSvgSubdivisions = 16;
+
+  // Flatten an arbitrary Path to an SVG path `d` string by walking its metrics.
+  // Used for a mesh's boolean-carve clipPath, where the carved silhouette is an
+  // opaque combined Path with no algebraic SVG form. 2.0-unit sampling matches the
+  // spiral exporter's stepping.
+  static String _pathToSvgData(Path path) {
+    final sb = StringBuffer();
+    for (final metric in path.computeMetrics()) {
+      bool first = true;
+      for (double d = 0.0; d < metric.length; d += 2.0) {
+        final pos = metric.getTangentForOffset(d)?.position;
+        if (pos == null) continue;
+        if (first) {
+          sb.write('M ${pos.dx} ${pos.dy} ');
+          first = false;
+        } else {
+          sb.write('L ${pos.dx} ${pos.dy} ');
+        }
+      }
+      if (!first) sb.write('Z ');
+    }
+    return sb.toString().trim();
   }
 
   static String toSVG(CompassEngine engine) {
@@ -62,6 +93,14 @@ class SVGExporter {
              if (bounds.right > maxX) maxX = bounds.right;
              if (bounds.bottom > maxY) maxY = bounds.bottom;
            }
+        } else if (shape is CompassMesh) {
+           // Bounded by its nodes (already in the point loop), but widen explicitly
+           // for parity with the PNG exporter and robustness if that loop changes.
+           final bounds = shape.getBounds();
+           if (bounds.left < minX) minX = bounds.left;
+           if (bounds.top < minY) minY = bounds.top;
+           if (bounds.right > maxX) maxX = bounds.right;
+           if (bounds.bottom > maxY) maxY = bounds.bottom;
         }
       }
     }
@@ -83,6 +122,11 @@ class SVGExporter {
       return '#${c.value.toRadixString(16).substring(2, 8).toUpperCase()}';
     }
 
+    // Opaque-hex (no 'none') for a specific vertex color, used by the mesh facets.
+    String toHexOpaque(Color c) {
+      return '#${c.value.toRadixString(16).substring(2, 8).toUpperCase()}';
+    }
+
     for (var layer in engine.layers) {
       if (!layer.isVisible) continue;
 
@@ -93,6 +137,12 @@ class SVGExporter {
 
       final addShapes = layer.shapes.where((s) => s.isVisible && s.operation == CompassBooleanOp.add).toList();
       final subShapes = layer.shapes.where((s) => s.isVisible && s.operation == CompassBooleanOp.subtract).toList();
+
+      // Meshes are `add`, but they are NOT flat-fill shapes -- they're faceted in
+      // their own pass below, so pull them out of the normal add-shapes loop (which
+      // would otherwise iterate them and emit nothing).
+      final meshShapes = addShapes.whereType<CompassMesh>().toList();
+      addShapes.removeWhere((s) => s is CompassMesh);
 
       buffer.writeln('  <!-- Layer: ${layer.name} -->');
       
@@ -161,6 +211,95 @@ class SVGExporter {
             buffer.writeln('    <path d="${shape.getSvgPathData()}" fill="${shape.isClosed ? fillHex : 'none'}" fill-rule="evenodd" stroke="$strokeHex" stroke-width="$sWidth" />');
           }
         }
+      }
+
+      // --- GRADIENT MESHES (faceted flat-polygon approximation) ---
+      // SVG has no usable Gouraud/bilinear mesh primitive (SVG 2 <mesh> exists on
+      // paper but effectively no renderer supports it), so each subdivided patch
+      // quad is emitted as a flat <polygon> filled with its bilinear-CENTER color
+      // (the average of its four corner colors). As subdivision rises the facets
+      // shrink and the result converges to the true gradient -- the same tradeoff
+      // the OBJ scanline mesh makes between fidelity and primitive count.
+      //
+      // The boolean carve is a per-mesh <clipPath> built from the SAME boolean
+      // stack the canvas uses (getLayerMeshClipPath), flattened to a polyline path.
+      // Each mesh's facets are wrapped in a <g clip-path="..."> so subtract/
+      // intersect shapes carve the SVG exactly as they carve on-canvas.
+      for (int mi = 0; mi < meshShapes.length; mi++) {
+        final mesh = meshShapes[mi];
+        if (mesh.rows < 2 || mesh.cols < 2) continue;
+
+        final clipPath = layer.getLayerMeshClipPath(mesh);
+        final clipData = _pathToSvgData(clipPath);
+        final clipId = 'meshclip_${cleanLayerId}_$mi';
+
+        if (clipData.isNotEmpty) {
+          buffer.writeln('    <defs>');
+          buffer.writeln('      <clipPath id="$clipId" clipPathUnits="userSpaceOnUse">');
+          buffer.writeln('        <path d="$clipData" fill-rule="evenodd" />');
+          buffer.writeln('      </clipPath>');
+          buffer.writeln('    </defs>');
+          buffer.writeln('    <g clip-path="url(#$clipId)">');
+        } else {
+          buffer.writeln('    <g>');
+        }
+
+        final int sub = _meshSvgSubdivisions;
+        Offset nodeOffset(int r, int c) {
+          // FIX: Access the point property from the CompassSplineNode
+          final p = mesh.nodes[r * mesh.cols + c].point;
+          return Offset(p.x.value, p.y.value);
+        }
+
+        for (int r = 0; r < mesh.rows - 1; r++) {
+          for (int c = 0; c < mesh.cols - 1; c++) {
+            final pTL = nodeOffset(r, c);
+            final pTR = nodeOffset(r, c + 1);
+            final pBL = nodeOffset(r + 1, c);
+            final pBR = nodeOffset(r + 1, c + 1);
+
+            final kTL = mesh.colorAt(r, c);
+            final kTR = mesh.colorAt(r, c + 1);
+            final kBL = mesh.colorAt(r + 1, c);
+            final kBR = mesh.colorAt(r + 1, c + 1);
+
+            for (int i = 0; i < sub; i++) {
+              final v0 = i / sub;
+              final v1 = (i + 1) / sub;
+              for (int j = 0; j < sub; j++) {
+                final u0 = j / sub;
+                final u1 = (j + 1) / sub;
+
+                // Four corners of this sub-quad in position space (bilinear).
+                Offset bp(double u, double v) {
+                  final top = Offset.lerp(pTL, pTR, u)!;
+                  final bot = Offset.lerp(pBL, pBR, u)!;
+                  return Offset.lerp(top, bot, v)!;
+                }
+
+                final a = bp(u0, v0);
+                final b = bp(u1, v0);
+                final cc = bp(u1, v1);
+                final d = bp(u0, v1);
+
+                // Flat fill = bilinear color at the sub-quad CENTER.
+                final uc = (u0 + u1) / 2;
+                final vc = (v0 + v1) / 2;
+                final topK = Color.lerp(kTL, kTR, uc)!;
+                final botK = Color.lerp(kBL, kBR, uc)!;
+                final cellColor = Color.lerp(topK, botK, vc)!;
+
+                final pts =
+                    '${a.dx},${a.dy} ${b.dx},${b.dy} ${cc.dx},${cc.dy} ${d.dx},${d.dy}';
+                // shape-rendering=crispEdges hides hairline seams between facets.
+                buffer.writeln(
+                    '      <polygon points="$pts" fill="${toHexOpaque(cellColor)}" stroke="none" shape-rendering="crispEdges" />');
+              }
+            }
+          }
+        }
+
+        buffer.writeln('    </g>');
       }
 
       buffer.writeln('  </g>');

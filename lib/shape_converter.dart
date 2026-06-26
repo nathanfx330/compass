@@ -1,4 +1,4 @@
-// lib/shape_converter.dart
+// /lib/shape_converter.dart
 
 import 'dart:math';
 import 'dart:ui';
@@ -9,6 +9,7 @@ import 'models/geometry/shape.dart';
 import 'models/geometry/circle.dart';
 import 'models/geometry/rectangle.dart';
 import 'models/geometry/spline.dart';
+import 'models/geometry/mesh.dart'; // <--- NEW: gradient mesh conversion target
 import 'models/layer.dart';
 import 'path_baker.dart';
 
@@ -148,6 +149,100 @@ class ShapeConverter {
     
     if (engine.selectedShape == rect) {
       engine.selectShape(spline);
+    }
+
+    engine.checkAndGCPoint(rect.p1);
+    engine.checkAndGCPoint(rect.p2);
+
+    engine.saveSnapshot();
+    engine.notifyListeners();
+  }
+
+  /// Converts a rectangle into a [rows] x [cols] GRADIENT MESH. Same entry shape
+  /// as convertRectangleToSpline -- in-place replacement preserving Z-order, a
+  /// fresh centroid anchor, all-new grid nodes attached to that anchor, and GC of
+  /// the rectangle's two defining corners afterward.
+  ///
+  /// UPGRADE: Instead of raw CompassPoints, it now generates CompassSplineNodes
+  /// with a default tension of 1.0, allowing them to be targeted by the A key.
+  static void convertRectangleToMesh(
+    CompassEngine engine,
+    CompassRectangle rect, {
+    int rows = 3,
+    int cols = 3,
+  }) {
+    CompassLayer? targetLayer;
+    int shapeIndex = -1;
+    for (var layer in engine.layers) {
+      shapeIndex = layer.shapes.indexOf(rect);
+      if (shapeIndex != -1) {
+        targetLayer = layer;
+        break;
+      }
+    }
+
+    if (targetLayer == null) return;
+
+    // A mesh needs at least one patch in each axis.
+    final int gridRows = rows < 2 ? 2 : rows;
+    final int gridCols = cols < 2 ? 2 : cols;
+
+    final left = min(rect.p1.x.value, rect.p2.x.value);
+    final right = max(rect.p1.x.value, rect.p2.x.value);
+    final top = min(rect.p1.y.value, rect.p2.y.value);
+    final bottom = max(rect.p1.y.value, rect.p2.y.value);
+
+    final cx = (left + right) / 2;
+    final cy = (top + bottom) / 2;
+    final anchor = CompassPoint(x: cx, y: cy);
+    engine.points.add(anchor);
+    anchor.x.addListener(engine.notifyListeners);
+    anchor.y.addListener(engine.notifyListeners);
+
+    // Inherit the layer's fill as the uniform seed; neutral grey if there is none
+    // (alpha 0 == transparent / "None"), so the mesh starts visible.
+    final Color seed =
+        targetLayer.color.alpha == 0 ? const Color(0xFFCCCCCC) : targetLayer.color;
+
+    final nodes = <CompassSplineNode>[];
+    final colors = <Color>[];
+
+    for (int r = 0; r < gridRows; r++) {
+      final fy = r / (gridRows - 1);
+      final py = top + (bottom - top) * fy;
+      for (int c = 0; c < gridCols; c++) {
+        final fx = c / (gridCols - 1);
+        final px = left + (right - left) * fx;
+
+        final p = CompassPoint(x: px, y: py);
+        engine.points.add(p);
+        p.x.addListener(engine.notifyListeners);
+        p.y.addListener(engine.notifyListeners);
+        anchor.attach(p);
+
+        // --- UPGRADE: Wrap in a CompassSplineNode for tension ---
+        final node = CompassSplineNode(point: p, tension: 1.0);
+        node.tension.addListener(engine.notifyListeners);
+
+        nodes.add(node);
+        colors.add(seed);
+      }
+    }
+
+    final mesh = CompassMesh(
+      rows: gridRows,
+      cols: gridCols,
+      nodes: nodes,
+      colors: colors,
+      anchorPoint: anchor,
+    )
+      ..operation = rect.operation
+      ..isVisible = rect.isVisible;
+
+    targetLayer.shapes[shapeIndex] = mesh;
+
+    if (engine.selectedShape == rect) {
+      engine.selectShape(mesh);
     }
 
     engine.checkAndGCPoint(rect.p1);

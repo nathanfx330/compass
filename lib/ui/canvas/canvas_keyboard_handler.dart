@@ -22,6 +22,7 @@ class CanvasKeyboardHandler {
     final isF = keys.contains(LogicalKeyboardKey.keyF); 
     final isQ = keys.contains(LogicalKeyboardKey.keyQ); 
     final isW = keys.contains(LogicalKeyboardKey.keyW); 
+    final isX = keys.contains(LogicalKeyboardKey.keyX); // <--- NEW: mesh slice modifier
 
     // Handle Ctrl/Cmd for the rotation mode
     final isCtrl = keys.contains(LogicalKeyboardKey.controlLeft) || keys.contains(LogicalKeyboardKey.controlRight);
@@ -66,6 +67,7 @@ class CanvasKeyboardHandler {
         controller.isFPressed != isF || 
         controller.isQPressed != isQ || 
         controller.isWPressed != isW ||
+        controller.isXPressed != isX ||
         controller.isZPressed != isPlainZ || 
         controller.isShiftZPressed != isShiftZ ||
         controller.is1Pressed != is1 || 
@@ -80,6 +82,7 @@ class CanvasKeyboardHandler {
       controller.isFPressed = isF; 
       controller.isQPressed = isQ; 
       controller.isWPressed = isW; 
+      controller.isXPressed = isX; 
       controller.isZPressed = isPlainZ; 
       controller.isShiftZPressed = isShiftZ;
       controller.is1Pressed = is1; 
@@ -110,6 +113,16 @@ class CanvasKeyboardHandler {
         controller.updateAddVertexHover(controller.hoverPosition!);
       } else {
         controller.clearAddVertexHover();
+      }
+
+      // X-key mesh slice hover: refresh on any modifier change so pressing X
+      // immediately shows the dotted preview at the current cursor, and releasing
+      // it clears the preview (updateMeshSliceHover internally bails+clears when X
+      // is no longer held).
+      if (controller.hoverPosition != null) {
+        controller.updateMeshSliceHover(controller.hoverPosition!);
+      } else {
+        controller.clearMeshSliceHover();
       }
       
       controller.notifyListeners();

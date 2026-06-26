@@ -1,4 +1,4 @@
-// lib/ui/canvas/compass_renderer.dart
+// /lib/ui/canvas/compass_renderer.dart
 
 import 'package:flutter/material.dart';
 
@@ -9,6 +9,7 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
+import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
 
 // Import CompassTool from the canvas controller
 import 'canvas_controller.dart';
@@ -36,6 +37,14 @@ class CompassRenderer extends CustomPainter {
   final Offset? addVertexPreviewPos;
   final CompassXSpline? addVertexSpline;
   final int addVertexSegmentIndex;
+
+  // --- X-KEY MESH SLICE PREVIEW ---
+  // When set, draw a dotted line between these two endpoints showing where an
+  // X-key slice will cut. sliceIsRow tints it (a horizontal row-insert vs a
+  // vertical column-insert) so the direction reads at a glance.
+  final bool sliceIsRow;
+  final Offset? slicePreviewA;
+  final Offset? slicePreviewB;
 
   final CompassPoint? tensionTargetPoint; 
   final CompassPoint? shapeStartPoint;
@@ -72,6 +81,9 @@ class CompassRenderer extends CustomPainter {
     this.addVertexPreviewPos,
     this.addVertexSpline,
     this.addVertexSegmentIndex = -1,
+    this.sliceIsRow = false,
+    this.slicePreviewA,
+    this.slicePreviewB,
     this.tensionTargetPoint, 
     this.shapeStartPoint,
     this.hoveredPoint,
@@ -145,6 +157,39 @@ class CompassRenderer extends CustomPainter {
             ..style = PaintingStyle.fill;
           canvas.drawPath(strokeAreaPath, areaStrokePaint);
         }
+
+        // 1d. Gradient Meshes (their own self-painted, boolean-clipped category).
+        // Each mesh paints its interpolated color field via drawVertices, clipped
+        // to its boolean-carved silhouette (getLayerMeshClipPath). Done per-mesh
+        // and AFTER the flat fills of this layer so a mesh sits above its layer's
+        // solid geometry, matching how the model excludes it from the flat union.
+        // The clip is save/restore-scoped so it never leaks onto the next mesh,
+        // the next layer, or the scaffolding pass.
+        for (var shape in layer.shapes) {
+          if (shape is! CompassMesh) continue;
+          if (!shape.isVisible) continue;
+          if (shape.rows < 2 || shape.cols < 2) continue;
+
+          final clip = layer.getLayerMeshClipPath(shape);
+          if (clip.computeMetrics().isEmpty) continue;
+
+          canvas.save();
+          canvas.clipPath(clip);
+          // Vertices already carry per-vertex colors. drawVertices with
+          // BlendMode.modulate combines the vertex colors with the paint color;
+          // white paint is the identity, so the authored vertex colors render
+          // exactly. A Paint is still required even though its color is the
+          // identity. AntiAlias smooths the patch triangles.
+          final meshPaint = Paint()
+            ..isAntiAlias = true
+            ..color = Colors.white;
+          canvas.drawVertices(
+            shape.buildVertices(),
+            BlendMode.modulate,
+            meshPaint,
+          );
+          canvas.restore();
+        }
       }
     }
 
@@ -187,6 +232,70 @@ class CompassRenderer extends CustomPainter {
             if (isSelected) {
                final scaffoldPaint = Paint()..color = Colors.blue.withOpacity(0.5)..strokeWidth = 1.5 * invScale..style = PaintingStyle.stroke;
                canvas.drawLine(Offset(shape.center.x.value, shape.center.y.value), Offset(shape.startPoint.x.value, shape.startPoint.y.value), scaffoldPaint);
+            }
+          } else if (shape is CompassMesh) {
+            // Mesh lattice: draw the grid lines (shape.paint draws only the
+            // lattice, never the gradient surface -- that's painted clipped above).
+            // A selected mesh gets the brighter wireframe + a centroid box and an
+            // anchor tether, exactly like the X-Spline treatment, since a mesh also
+            // carries an anchorPoint as its rigid-body / rotation pivot.
+            shape.paint(canvas, isSelected ? selectedWireframePaint : wireframePaint, showScaffolding: true, isSelected: isSelected);
+
+            if (isSelected) {
+              double cx = 0, cy = 0;
+              if (shape.anchorPoint != null) {
+                cx = shape.anchorPoint!.x.value;
+                cy = shape.anchorPoint!.y.value;
+              } else if (shape.nodes.isNotEmpty) {
+                for (var n in shape.nodes) {
+                  cx += n.point.x.value;
+                  cy += n.point.y.value;
+                }
+                cx /= shape.nodes.length;
+                cy /= shape.nodes.length;
+              }
+
+              final centerBoxPaint = Paint()
+                ..color = Colors.orangeAccent
+                ..strokeWidth = 2.0 * invScale
+                ..style = PaintingStyle.stroke;
+
+              canvas.drawRect(
+                Rect.fromCenter(center: Offset(cx, cy), width: 8.0 * invScale, height: 8.0 * invScale),
+                centerBoxPaint,
+              );
+
+              if (shape.anchorPoint != null && shape.nodes.isNotEmpty) {
+                final scaffoldPaint = Paint()..color = Colors.orangeAccent.withOpacity(0.3)..strokeWidth = 1.0 * invScale..style = PaintingStyle.stroke;
+                RendererHelpers.drawDashedLine(canvas, Offset(cx, cy), Offset(shape.nodes.first.point.x.value, shape.nodes.first.point.y.value), scaffoldPaint, invScale);
+              }
+
+              // --- UPGRADE: Draw Tension Handles for selected Mesh nodes ---
+              for (var node in shape.nodes) {
+                final pt = Offset(node.point.x.value, node.point.y.value);
+                
+                final handlePt = pt + const Offset(20, -30);
+                
+                final scaffoldLinePaint = Paint()
+                  ..color = Colors.blue.withOpacity(0.5)
+                  ..strokeWidth = 1.5 * invScale
+                  ..style = PaintingStyle.stroke;
+
+                final boxStrokePaint = Paint()
+                  ..color = Colors.blue
+                  ..strokeWidth = 1.5 * invScale
+                  ..style = PaintingStyle.stroke;
+
+                canvas.drawLine(pt, handlePt, scaffoldLinePaint);
+                
+                final handleRect = Rect.fromCenter(center: handlePt, width: 10 * invScale, height: 10 * invScale);
+                canvas.drawRect(handleRect, boxStrokePaint);
+                
+                final tensionFillPaint = Paint()
+                  ..color = Colors.blue.withOpacity(node.tension.value.clamp(0.0, 1.0))
+                  ..style = PaintingStyle.fill;
+                canvas.drawRect(handleRect, tensionFillPaint);
+              }
             }
           } else if (shape is CompassXSpline) {
              shape.paint(canvas, isSelected ? selectedWireframePaint : wireframePaint, showScaffolding: true, isSelected: isSelected);
@@ -265,6 +374,26 @@ class CompassRenderer extends CustomPainter {
       // --- MULTI-SELECTION BOUNDING BOX ---
       if (selectionBounds != null) {
         RendererHelpers.drawSelectionBounds(canvas, selectionBounds!, invScale); // <--- UPDATED
+      }
+
+      // --- X-KEY MESH SLICE PREVIEW (dotted imposed line) ---
+      // Drawn here, after the lattice and selection box, so it sits clearly on top
+      // of the mesh it will cut. A row insert (horizontal line) and a column insert
+      // (vertical line) get distinct tints so the cut direction is unambiguous.
+      if (slicePreviewA != null && slicePreviewB != null) {
+        final slicePaint = Paint()
+          ..color = sliceIsRow ? Colors.cyanAccent : Colors.pinkAccent
+          ..strokeWidth = 2.0 * invScale
+          ..style = PaintingStyle.stroke;
+        RendererHelpers.drawDashedLine(canvas, slicePreviewA!, slicePreviewB!, slicePaint, invScale);
+
+        // Small endpoint ticks so the line's extent is obvious even over a busy
+        // gradient.
+        final tickPaint = Paint()
+          ..color = sliceIsRow ? Colors.cyanAccent : Colors.pinkAccent
+          ..style = PaintingStyle.fill;
+        canvas.drawCircle(slicePreviewA!, 4.0 * invScale, tickPaint);
+        canvas.drawCircle(slicePreviewB!, 4.0 * invScale, tickPaint);
       }
 
       // --- EXPLICITLY SELECTED POINT(S) HIGHLIGHT ---
@@ -480,6 +609,7 @@ class CompassRenderer extends CustomPainter {
         else if (shape is CompassSpiral && (shape.center == p || shape.startPoint == p)) hasPoint = true;
         else if (shape is CompassRectangle && (shape.p1 == p || shape.p2 == p)) hasPoint = true;
         else if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == p) || shape.anchorPoint == p)) hasPoint = true;
+        else if (shape is CompassMesh && (shape.containsNode(p) || shape.anchorPoint == p)) hasPoint = true;
 
         if (hasPoint) {
           usedAnywhere = true;
