@@ -1,3 +1,6 @@
+```markdown
+// /README.md
+
 # Compass
 
 **A constraint-based, parametric graphic design tool built in Flutter.**
@@ -39,6 +42,7 @@ If you drag Point A, the line moves, and the circle moves. If you drag Point B, 
 Compass is rapidly evolving into a desktop-grade parametric engine. It currently supports:
 
 * **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines. Splines live in two mathematical modes: a *fluid* Catmull-Rom curve whose vertex tension you adjust with the `A` key via a global distance tether, or *explicit* Bézier—right-click any vertex to **Convert to Bézier** and freeze its current tangent into independently draggable in/out handles for exact, asymmetric control. Right-click again to **Reset Handles** and dissolve back into fluid curvature. Conversion is loss-free: the curve never jumps, it simply becomes editable.
+* **Coons Patch Gradient Meshes:** Convert any Rectangle into a live Gradient Mesh. Built on true **Bicubic Coons Patch** interpolation rather than flat planar math, you can use the `A` key to adjust node tension and seamlessly bow the internal gradient and outer boundary edges. Meshes are fully integrated into the Boolean Engine—drop a Subtract shape over a mesh to non-destructively punch a hole through the color field. Use the `X` key to mathematically slice new rows and columns directly into the grid without breaking structural integrity.
 * **Parametric Area Strokes & Width Constraints:** Hold `W` to sculpt variable-width ribbon strokes. Instead of manually smoothing hundreds of points, **Right-click a width handle** to drop a Constraint Flag (turning it orange). Drop two flags, and Compass dynamically calculates the parametric distance between them, fluidly interpolating the width of every node in-between. Dragging a pinned flag mathematically updates the entire tapered section in real-time. 
 * **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, `R` to rotate a shape locally, `Ctrl/Cmd+R` to explicitly rotate isolated Bézier handles, or `Shift+Drag` to translate complex shape groupings. Explicit Bézier handles rotate in perfect lockstep with their points, so a hand-tuned corner stays mathematically true through any rotation.
 * **Axis-Locked Editing:** Hold `1` or `2` while dragging a vertex to constrain its motion to a single axis—horizontal or vertical—anchored exactly to the point where the drag began, for pixel-true orthogonal moves without guesswork.
@@ -60,8 +64,8 @@ Compass is rapidly evolving into a desktop-grade parametric engine. It currently
 Compass heavily utilizes keyboard modifiers to keep the UI clean while providing complex mathematical transformations.
 
 **Mouse Controls:**
-* **Left Click:** Select shapes, drag points. Drag the purple in/out dots of a Bézier vertex to sculpt its curve handles directly.
-* **Right Click:** Context menu for Boolean operations, baking a layer into editable X-Splines, exporting to OBJ, converting geometry to splines, converting a vertex to or from Bézier handles, **toggling parametric width constraint flags**, and hiding scaffolding.
+* **Left Click:** Select shapes, drag points. Drag the purple in/out dots of a Bézier vertex to sculpt its curve handles directly. Right-click a Gradient Mesh node to change its color.
+* **Right Click:** Context menu for Boolean operations, baking a layer into editable X-Splines, exporting to OBJ, converting geometry to splines/meshes, converting a vertex to or from Bézier handles, **toggling parametric width constraint flags**, and hiding scaffolding.
 * **Middle Click & Drag:** Pan the infinite canvas.
 * **Scroll Wheel:** Zoom the infinite canvas.
 
@@ -70,12 +74,13 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 * **`R + Drag`**: Rotate a selected shape or point locally around its centroid.
 * **`Shift + R + Drag`**: Rotate an entire hierarchical rigid-body system around the targeted centroid.
 * **`Ctrl/Cmd + R + Drag`**: Rotate the explicit Bézier handles of a selected vertex (or group of vertices) around their local centroid without moving the underlying points. Automatically converts fluid Catmull-Rom nodes to explicit handles.
-* **`A + Drag`**: Target an X-Spline vertex and drag anywhere on the screen to fluidly adjust its Catmull-Rom curve tension.
+* **`A + Drag`**: Target an X-Spline or Gradient Mesh vertex and drag anywhere on the screen to fluidly adjust its structural tension.
 * **`W + Drag`**: Target an X-Spline vertex and drag to adjust its variable stroke width. Shift+Drag to symmetrically scale both sides. Right-click the width handle to drop an Orange Width Constraint flag for automatic parametric tapering.
 * **`F + Drag`**: With an X-Spline vertex selected, hold F and drag horizontally anywhere on the screen to dynamically apply a curve-aware fillet (corner rounding).
+* **`X + Hover / Click`**: Hover over a Gradient Mesh to preview a slice. Compass auto-detects horizontal or vertical cuts based on edge proximity. Click to commit the topological slice without altering the visual gradient.
 * **`Z + Drag`**: Select multiple nodes, hold Z, and drag to Laplacian smooth them. Hold `Shift+Z` to smooth variable widths.
-* **`1 + Drag`**: Constrain a point or vertex drag to the **horizontal** axis. The Y coordinate is frozen at the drag's origin, so the point can only travel left and right.
-* **`2 + Drag`**: Constrain a point or vertex drag to the **vertical** axis. The X coordinate is frozen at the drag's origin, so the point can only travel up and down.
+* **`1 + Drag`**: Constrain a point or vertex drag to the **horizontal** axis. When using the `X` mesh slice tool, hold `1` to explicitly force a Horizontal (Row) cut.
+* **`2 + Drag`**: Constrain a point or vertex drag to the **vertical** axis. When using the `X` mesh slice tool, hold `2` to explicitly force a Vertical (Column) cut.
 * **`Ctrl/Cmd + Z`**: Undo mathematical and geometric state changes.
 
 ---
@@ -111,3 +116,4 @@ Compass is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0
 This means you are free to use, study, share, and modify the software. However, if you modify the code and distribute it—or offer it as a service over a network (like a web app)—you **must** make your modified source code available to the public under the same AGPL-3.0 license. 
 
 For full terms, see the [LICENSE](LICENSE) file. Copyright (C) 2026 Nathaniel Westveer.
+```
