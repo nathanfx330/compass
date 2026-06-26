@@ -1,6 +1,3 @@
-```markdown
-// /README.md
-
 # Compass
 
 **A constraint-based, parametric graphic design tool built in Flutter.**
