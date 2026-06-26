@@ -10,6 +10,7 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/spline.dart';
+import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
 import '../workspace/dialogs.dart';
 
 class LayersPanel extends StatelessWidget {
@@ -34,6 +35,9 @@ class LayersPanel extends StatelessWidget {
     } else if (shape is CompassRectangle) {
       shapePts = [shape.p1, shape.p2];
     } else if (shape is CompassXSpline) {
+      shapePts.addAll(shape.nodes.map((n) => n.point));
+      if (shape.anchorPoint != null) shapePts.add(shape.anchorPoint!);
+    } else if (shape is CompassMesh) { // <--- UPGRADE: Mesh check
       shapePts.addAll(shape.nodes.map((n) => n.point));
       if (shape.anchorPoint != null) shapePts.add(shape.anchorPoint!);
     }
@@ -290,21 +294,25 @@ class LayersPanel extends StatelessWidget {
                           String shapeName = 'Unknown Shape';
                           IconData shapeIcon = Icons.shape_line;
 
-                          if (shape.runtimeType.toString() == 'CompassLine') {
+                          // UPGRADE: Bulletproof dynamic type checking using `is` keyword
+                          if (shape is CompassLine) {
                             shapeName = 'Line';
                             shapeIcon = Icons.show_chart;
-                          } else if (shape.runtimeType.toString() == 'CompassCircle') {
+                          } else if (shape is CompassCircle) {
                             shapeName = 'Circle';
                             shapeIcon = Icons.radio_button_unchecked;
-                          } else if (shape.runtimeType.toString() == 'CompassSpiral') {
+                          } else if (shape is CompassSpiral) {
                             shapeName = 'Spiral';
                             shapeIcon = Icons.cyclone;
-                          } else if (shape.runtimeType.toString() == 'CompassRectangle') { // <--- ADDED
+                          } else if (shape is CompassRectangle) { 
                             shapeName = 'Rectangle';
                             shapeIcon = Icons.crop_square;
-                          } else if (shape.runtimeType.toString() == 'CompassXSpline') {
+                          } else if (shape is CompassXSpline) {
                             shapeName = 'X-Spline';
                             shapeIcon = Icons.draw;
+                          } else if (shape is CompassMesh) { 
+                            shapeName = 'Gradient Mesh';
+                            shapeIcon = Icons.grid_on;
                           }
 
                           return Padding(

@@ -1,7 +1,7 @@
-// /lib/ui/panels/properties_panel.dart
 import 'package:flutter/material.dart';
 import '../../engine.dart';
 import '../../models/geometry/spline.dart';
+import '../../models/geometry/mesh.dart'; // <--- NEW: Import mesh model
 import '../widgets/compass_color_picker.dart';
 
 class PropertiesPanel extends StatefulWidget {
@@ -168,7 +168,7 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                 },
               ),
 
-              // --- NEW: AREA STROKE PROFILE SECTION ---
+              // --- AREA STROKE PROFILE SECTION ---
               if (selectedShape is CompassXSpline) ...[
                 const SizedBox(height: 24),
                 const Divider(),
@@ -280,6 +280,68 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                     },
                     child: const Text('Apply Taper'),
                   ),
+                ),
+                const SizedBox(height: 24),
+              ],
+
+              // --- NEW: GRADIENT MESH SWATCHES ---
+              if (selectedShape is CompassMesh) ...[
+                const SizedBox(height: 24),
+                const Divider(),
+                const SizedBox(height: 24),
+                
+                Text(
+                  'Mesh Swatches',
+                  style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Colors currently used in this mesh. Select node(s) on the canvas, then click a swatch to apply.',
+                  style: TextStyle(fontSize: 12, color: theme.textTheme.bodySmall?.color?.withOpacity(0.8)),
+                ),
+                const SizedBox(height: 16),
+                
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    ...selectedShape.colors.toSet().map((color) {
+                      return Tooltip(
+                        message: 'Apply to selected nodes',
+                        child: _buildColorSwatch(
+                          color: color, 
+                          isSelected: false, 
+                          theme: theme,
+                          onTap: () {
+                            if (widget.engine.selectedPoints.isEmpty) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Select at least one mesh node to apply a color.')),
+                              );
+                              return;
+                            }
+                            widget.engine.setMeshSelectedColors(selectedShape, widget.engine.selectedPoints, color);
+                          },
+                        ),
+                      );
+                    }),
+                    
+                    // Allows adding a completely new color directly to selected nodes
+                    _buildCustomSwatch(
+                      context: context,
+                      currentColor: Colors.transparent,
+                      isSelected: false,
+                      theme: theme,
+                      onPicked: (c) {
+                        if (widget.engine.selectedPoints.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Select at least one mesh node to apply a color.')),
+                          );
+                          return;
+                        }
+                        widget.engine.setMeshSelectedColors(selectedShape, widget.engine.selectedPoints, c);
+                      },
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 24),
               ],

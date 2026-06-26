@@ -1,5 +1,3 @@
-// /lib/ui/canvas/canvas_controller.dart
-
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; 
@@ -44,7 +42,12 @@ class CanvasController extends ChangeNotifier {
   Offset? hoverPosition;
   CompassPoint? hoveredPoint; 
   
-  Set<CompassPoint> selectedPoints = {}; 
+  // --- UPDATED: Route selection state directly to the engine so panels can see it ---
+  Set<CompassPoint> get selectedPoints => engine.selectedPoints;
+  set selectedPoints(Set<CompassPoint> value) { 
+    engine.selectedPoints = value; 
+  }
+  
   bool isDraggingSelectionBox = false;
   Offset? selectionBoxStart;
   Offset? selectionBoxCurrent;

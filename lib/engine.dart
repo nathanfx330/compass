@@ -61,6 +61,9 @@ class CompassEngine extends ChangeNotifier {
   // --- Toggle to show vertex indices (0, 1, 2...) on the canvas ---
   bool showNodeIndices = false;
 
+  // --- NEW: Global selection state so panels can interact with canvas selections ---
+  Set<CompassPoint> selectedPoints = {};
+
   CompassEngine() {
     addLayer('Layer 1');
     saveSnapshot(); 

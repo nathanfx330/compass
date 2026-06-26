@@ -1,5 +1,3 @@
-// ./lib/ui/canvas/compass_canvas.dart
-
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart'; 
@@ -13,16 +11,16 @@ class CompassCanvas extends StatefulWidget {
   final CompassEngine engine;
   final bool showScaffolding;
   final VoidCallback onToggleScaffolding;
-  final bool showHandles; // <--- NEW
-  final VoidCallback onToggleHandles; // <--- NEW
+  final bool showHandles; 
+  final VoidCallback onToggleHandles; 
 
   const CompassCanvas({
     super.key, 
     required this.engine,
     this.showScaffolding = true,
     required this.onToggleScaffolding,
-    required this.showHandles, // <--- NEW
-    required this.onToggleHandles, // <--- NEW
+    required this.showHandles, 
+    required this.onToggleHandles, 
   });
 
   @override
@@ -37,6 +35,16 @@ class _CompassCanvasState extends State<CompassCanvas> {
     super.initState();
     // Initialize our new dedicated gesture & math controller
     _controller = CanvasController(widget.engine);
+  }
+
+  @override
+  void didUpdateWidget(CompassCanvas oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Safely replace the controller if a "New Project" completely swapped the engine
+    if (widget.engine != oldWidget.engine) {
+      _controller.dispose();
+      _controller = CanvasController(widget.engine);
+    }
   }
 
   @override
@@ -84,18 +92,12 @@ class _CompassCanvasState extends State<CompassCanvas> {
                             : SystemMouseCursors.basic)),
                 child: GestureDetector(
                   onTapDown: (details) => _controller.onTapDown(details, context, widget.showScaffolding),
-                  // --- NEW: clean-click resolver for a 2+ selection. Fires only when
-                  // the press did NOT become a pan (the arena picked tap), so it's how
-                  // a click collapses/toggles the group while a drag moves it. ---
                   onTap: () => _controller.onTap(),
-                  // --- NEW: if the tap is aborted without becoming a pan, drop any
-                  // deferred press so it can't leak into the next gesture. ---
                   onTapCancel: () => _controller.onTapCancel(),
                   onSecondaryTapDown: (details) => _controller.onSecondaryTapDown(
                     details, context, widget.showScaffolding, widget.onToggleScaffolding,
-                    widget.showHandles, widget.onToggleHandles, // <--- NEW
+                    widget.showHandles, widget.onToggleHandles, 
                   ), 
-                  // <--- NEW: Passed showHandles down to pan functions so handles can be ignored if hidden
                   onPanStart: (details) => _controller.onPanStart(details, context, widget.showScaffolding, widget.showHandles),
                   onPanUpdate: (details) => _controller.onPanUpdate(details, context, widget.showScaffolding),
                   onPanEnd: _controller.onPanEnd,
@@ -112,26 +114,18 @@ class _CompassCanvasState extends State<CompassCanvas> {
                         rotationPivotOffset: _controller.rotationPivotOffset,     
                         isRPressed: _controller.isRPressed,           
                         isShiftRPressed: _controller.isShiftRPressed,
-                        isCtrlRPressed: _controller.isCtrlRPressed, // <--- ADDED CTRL+R STATE
+                        isCtrlRPressed: _controller.isCtrlRPressed, 
                         isAPressed: _controller.isAPressed, 
                         activeFilletNode: _controller.activeFilletNode,
                         activeFilletSpline: _controller.activeFilletSpline,
                         activeFilletRadius: _controller.activeFilletRadius,
                         isFPressed: _controller.isFPressed,
-                        // --- NEW: Width tool (W key) state, wired through so the
-                        // width diamonds actually draw. The controller has tracked
-                        // these all along; they simply were never passed in, so they
-                        // defaulted to false and the handles never rendered. ---
                         isWPressed: _controller.isWPressed,
                         activeWidthNode: _controller.activeWidthNode,
                         activeWidthIsLeft: _controller.activeWidthIsLeft,
                         addVertexPreviewPos: _controller.addVertexPreviewPos,
                         addVertexSpline: _controller.addVertexSpline,
                         addVertexSegmentIndex: _controller.addVertexSegmentIndex,
-                        // --- NEW: X-key mesh slice preview. The controller resolves
-                        // these on hover (which mesh, row vs column, the two dashed-
-                        // line endpoints); the renderer draws the dotted guide from
-                        // them. Default null/false when no slice is staged. ---
                         sliceIsRow: _controller.sliceIsRow,
                         slicePreviewA: _controller.slicePreviewA,
                         slicePreviewB: _controller.slicePreviewB,
@@ -141,16 +135,12 @@ class _CompassCanvasState extends State<CompassCanvas> {
                         hoverPosition: _controller.hoverPosition,
                         currentTool: _controller.currentTool,
                         showScaffolding: widget.showScaffolding,
-                        showHandles: widget.showHandles, // <--- NEW
+                        showHandles: widget.showHandles, 
                         panOffset: _controller.panOffset,
                         canvasScale: _controller.canvasScale,
                         pointBorderColor: theme.colorScheme.surface, 
                         activeHandleNode: _controller.activeHandleNode,
                         activeHandleIsOut: _controller.activeHandleIsOut,
-                        // --- NEW: bounding box of the active 2+ selection (logical
-                        // space, or null). The renderer draws the grabbable box from
-                        // this. Pairs with the selectionBounds param added to
-                        // CompassRenderer in the next file. ---
                         selectionBounds: _controller.selectionBounds,
                       ),
                     ),
@@ -185,13 +175,13 @@ class _CompassCanvasState extends State<CompassCanvas> {
                 onToolSelected: _controller.setTool,
                 isRPressed: _controller.isRPressed,
                 isShiftRPressed: _controller.isShiftRPressed,
-                isCtrlRPressed: _controller.isCtrlRPressed, // <--- ADDED CTRL+R STATE
+                isCtrlRPressed: _controller.isCtrlRPressed, 
                 isShiftPressed: _controller.isShiftPressed,
                 isAPressed: _controller.isAPressed, 
                 isFPressed: _controller.isFPressed,
                 isZPressed: _controller.isZPressed, 
-                isShiftZPressed: _controller.isShiftZPressed, // <--- NEW: Passed down to HUD
-                isWPressed: _controller.isWPressed, // <--- NEW: Passed down to HUD
+                isShiftZPressed: _controller.isShiftZPressed, 
+                isWPressed: _controller.isWPressed, 
                 is1Pressed: _controller.is1Pressed,
                 is2Pressed: _controller.is2Pressed,
                 addVertexActive: _controller.addVertexPreviewPos != null,
