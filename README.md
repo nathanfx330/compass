@@ -113,4 +113,3 @@ Compass is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0
 This means you are free to use, study, share, and modify the software. However, if you modify the code and distribute it—or offer it as a service over a network (like a web app)—you **must** make your modified source code available to the public under the same AGPL-3.0 license. 
 
 For full terms, see the [LICENSE](LICENSE) file. Copyright (C) 2026 Nathaniel Westveer.
-```
