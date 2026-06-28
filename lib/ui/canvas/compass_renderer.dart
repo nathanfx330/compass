@@ -350,6 +350,24 @@ class CompassRenderer extends CustomPainter {
                  RendererHelpers.drawDashedLine(canvas, Offset(cx, cy), Offset(shape.nodes.first.point.x.value, shape.nodes.first.point.y.value), scaffoldPaint, invScale); // <--- UPDATED
                }
 
+               // --- NEW: Draw Live Corner Constraint Circles ---
+               final cornerCirclePaint = Paint()
+                 ..color = Colors.lightBlueAccent.withOpacity(0.8)
+                 ..strokeWidth = 1.5 * invScale
+                 ..style = PaintingStyle.stroke;
+                 
+               for (var node in shape.nodes) {
+                 if (node.cornerRadius.value > 0.01) {
+                   final pt = Offset(node.point.x.value, node.point.y.value);
+                   // Draw the persistent constraint circle
+                   canvas.drawCircle(pt, node.cornerRadius.value, cornerCirclePaint);
+                   
+                   // Draw a tiny dot on the rim so the user knows they can drag it
+                   final rimDotPaint = Paint()..color = Colors.lightBlueAccent..style = PaintingStyle.fill;
+                   canvas.drawCircle(pt + Offset(node.cornerRadius.value, 0), 4.0 * invScale, rimDotPaint);
+                 }
+               }
+
                // --- DRAW VERTEX NUMBERS IF TOGGLED ---
                if (engine.showNodeIndices) {
                  for (int i = 0; i < shape.nodes.length; i++) {

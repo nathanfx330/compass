@@ -1,5 +1,4 @@
-// lib/models/geometry/spline.dart
-
+// /lib/models/geometry/spline.dart
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'point.dart';
@@ -36,9 +35,12 @@ class CompassSplineNode {
   final ValueNotifier<double> widthLeft;
   final ValueNotifier<double> widthRight;
 
-  // --- NEW: Width Constraint Flags ---
+  // Width Constraint Flags
   bool isLeftWidthPinned;
   bool isRightWidthPinned;
+
+  // Persistent Corner Radius (Live Pulley/Wrap Constraint)
+  final ValueNotifier<double> cornerRadius;
 
   CompassSplineNode({
     required this.point, 
@@ -49,9 +51,29 @@ class CompassSplineNode {
     double widthRight = 0.0,
     this.isLeftWidthPinned = false,
     this.isRightWidthPinned = false,
+    double cornerRadius = 0.0,
   }) : tension = ValueNotifier(tension),
        widthLeft = ValueNotifier(widthLeft),
-       widthRight = ValueNotifier(widthRight);
+       widthRight = ValueNotifier(widthRight),
+       cornerRadius = ValueNotifier(cornerRadius);
+}
+
+// Virtual nodes generated purely for rendering and path generation.
+// This allows us to draw fillets and pulleys non-destructively while preserving structural points.
+class ResolvedSplineNode {
+  final Offset point;
+  Offset hIn;
+  Offset hOut;
+  final double widthLeft;
+  final double widthRight;
+
+  ResolvedSplineNode({
+    required this.point,
+    required this.hIn,
+    required this.hOut,
+    required this.widthLeft,
+    required this.widthRight,
+  });
 }
 
 class CompassXSpline extends CompassShape {
@@ -70,11 +92,11 @@ class CompassXSpline extends CompassShape {
   // Returns true if any node has a width applied, triggering the area-stroke math
   bool get hasWidthProfile => nodes.any((n) => n.widthLeft.value > 0.01 || n.widthRight.value > 0.01);
 
+  // Note: This remains untouched for the destructive 'F' key tool.
   FilletData? computeFillet(CompassSplineNode node, double cutDistance) {
     int index = nodes.indexOf(node);
     if (index == -1) return null;
 
-    // Cannot fillet the extreme endpoints of an open spline
     if (!isClosed && (index == 0 || index == nodes.length - 1)) return null;
 
     int prevIndex = (index - 1 + nodes.length) % nodes.length;
@@ -96,7 +118,6 @@ class CompassXSpline extends CompassShape {
     final q1 = q0 + hOut_corner;
     final q2 = q3 + hIn_next;
 
-    // Estimate arc length with chord length for parameter calculation
     final d1 = (p3 - p0).distance;
     final d2 = (q3 - q0).distance;
 
@@ -107,11 +128,9 @@ class CompassXSpline extends CompassShape {
     if (d > maxD) d = maxD;
     if (d <= 0.1) return null; 
 
-    // Convert real cut-distance to approximate Bezier 't' parameter
     final t1 = 1.0 - (d / d1);
     final t2 = (d / d2);
 
-    // De Casteljau subdivision for Segment 1 (Prev -> Corner)
     final m0 = Offset.lerp(p0, p1, t1)!;
     final m1 = Offset.lerp(p1, p2, t1)!;
     final m2 = Offset.lerp(p2, p3, t1)!;
@@ -122,7 +141,6 @@ class CompassXSpline extends CompassShape {
     final newPrevHandleOut = m0 - p0;
     final node1HandleIn = r0 - cutPt1;
 
-    // De Casteljau subdivision for Segment 2 (Corner -> Next)
     final n0 = Offset.lerp(q0, q1, t2)!;
     final n1 = Offset.lerp(q1, q2, t2)!;
     final n2 = Offset.lerp(q2, q3, t2)!;
@@ -133,8 +151,6 @@ class CompassXSpline extends CompassShape {
     final node2HandleOut = s1 - cutPt2;
     final newNextHandleIn = n2 - q3;
 
-    // --- Bridging Arc Handles ---
-    // Extract the exact curve tangents pointing TOWARDS the corner to maintain G1 continuity
     Offset nDir1 = r1 - cutPt1;
     double len1 = nDir1.distance;
     if (len1 > 0) nDir1 /= len1; else nDir1 = Offset.zero;
@@ -149,7 +165,6 @@ class CompassXSpline extends CompassShape {
     Offset node1HandleOut = Offset.zero;
     Offset node2HandleIn = Offset.zero;
 
-    // Approximate a circular arc blend between the two cut points
     if (angle > 0.01 && angle < pi - 0.01) {
       double effectiveRadius = d / tan((pi - angle) / 2);
       double L = (4.0 / 3.0) * effectiveRadius * tan((pi - angle) / 4.0);
@@ -255,34 +270,129 @@ class CompassXSpline extends CompassShape {
     return controls;
   }
 
-  // --- Exposed to the renderer so we don't have to duplicate normal math ---
-  List<Offset> calculateNormals(List<(Offset, Offset)> controls) {
+  // --- UPDATED: Dynamic Pulley / String-Wrapping Evaluation ---
+  // Transforms constraint corners into pure, tangent-wrapping circular arcs.
+  List<ResolvedSplineNode> getResolvedNodes() {
+    final controls = getEvaluatedControls();
+    final n = nodes.length;
+    
+    final resolvedBase = List<ResolvedSplineNode>.generate(n, (i) => ResolvedSplineNode(
+      point: Offset(nodes[i].point.x.value, nodes[i].point.y.value),
+      hIn: controls[i].$2,
+      hOut: controls[i].$1,
+      widthLeft: nodes[i].widthLeft.value,
+      widthRight: nodes[i].widthRight.value,
+    ));
+
+    if (n < 2) return resolvedBase;
+    final result = <ResolvedSplineNode>[];
+
+    for(int i = 0; i < n; i++) {
+       final node = nodes[i];
+       final r = node.cornerRadius.value;
+       
+       if (r <= 0.01 || (!isClosed && (i == 0 || i == n - 1))) {
+          result.add(resolvedBase[i]);
+       } else {
+          int prevIdx = (i - 1 + n) % n;
+          int nextIdx = (i + 1) % n;
+          Offset pPrev = resolvedBase[prevIdx].point;
+          Offset pCurr = resolvedBase[i].point;
+          Offset pNext = resolvedBase[nextIdx].point;
+
+          Offset vA = pPrev - pCurr;
+          Offset vC = pNext - pCurr;
+          double dA = vA.distance;
+          double dC = vC.distance;
+
+          if (dA < 0.001 || dC < 0.001) {
+             result.add(resolvedBase[i]);
+             continue;
+          }
+
+          double R = r;
+          // Clamp R so the wrap doesn't extend past the adjacent control points
+          double maxR = min(dA, dC) * 0.99;
+          if (R > maxR) R = maxR;
+
+          // Angles of the incoming and outgoing segments
+          double thetaA = atan2(vA.dy, vA.dx);
+          double thetaC = atan2(vC.dy, vC.dx);
+
+          // The offset angle from the center line to the tangent point on the circle
+          double betaA = acos((R / dA).clamp(-1.0, 1.0));
+          double betaC = acos((R / dC).clamp(-1.0, 1.0));
+
+          // Cross product determines which way the string wraps around the peg
+          double Z = vA.dx * vC.dy - vA.dy * vC.dx;
+          double S = Z > 0 ? 1.0 : -1.0;
+
+          double phiA = thetaA - S * betaA;
+          double phiC = thetaC + S * betaC;
+
+          double delta = phiC - phiA;
+          if (S > 0) {
+            while (delta > 0) delta -= 2 * pi;
+          } else {
+            while (delta < 0) delta += 2 * pi;
+          }
+
+          // Subdivide the arc into <= 90 degree Bezier curves for mathematical perfection
+          int N = (delta.abs() / (pi / 2)).ceil();
+          if (N < 1) N = 1;
+          double step = delta / N;
+          double L = (4.0 / 3.0) * tan(step.abs() / 4.0) * R;
+
+          List<ResolvedSplineNode> arcNodes = [];
+          for (int k = 0; k <= N; k++) {
+            double angle = phiA + k * step;
+            Offset pt = pCurr + Offset(R * cos(angle), R * sin(angle));
+            
+            Offset tangentDir = Offset(-sin(angle), cos(angle)) * (step > 0 ? 1.0 : -1.0);
+            
+            Offset hIn = k == 0 ? Offset.zero : -tangentDir * L;
+            Offset hOut = k == N ? Offset.zero : tangentDir * L;
+
+            arcNodes.add(ResolvedSplineNode(
+              point: pt,
+              hIn: hIn,
+              hOut: hOut,
+              widthLeft: node.widthLeft.value,
+              widthRight: node.widthRight.value,
+            ));
+          }
+
+          // Force the approaching segments to be perfectly straight/taut strings 
+          // before they touch the circle tangent.
+          if (result.isNotEmpty) {
+             result.last.hOut = Offset.zero;
+          } else if (isClosed) {
+             resolvedBase[prevIdx].hOut = Offset.zero;
+          }
+
+          resolvedBase[nextIdx].hIn = Offset.zero;
+
+          result.addAll(arcNodes);
+       }
+    }
+
+    return result;
+  }
+
+  // Calculate normals using the dynamically resolved virtual nodes
+  List<Offset> calculateResolvedNormals(List<ResolvedSplineNode> resolved) {
     final normals = <Offset>[];
-    int n = nodes.length;
+    int n = resolved.length;
     for (int i = 0; i < n; i++) {
-      final pt = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
+      final pt = resolved[i].point;
       
-      Offset prevPt;
-      if (isClosed) {
-        prevPt = Offset(nodes[(i - 1 + n) % n].point.x.value, nodes[(i - 1 + n) % n].point.y.value);
-      } else {
-        prevPt = i > 0 ? Offset(nodes[i - 1].point.x.value, nodes[i - 1].point.y.value) : pt;
-      }
+      Offset prevPt = isClosed ? resolved[(i - 1 + n) % n].point : (i > 0 ? resolved[i - 1].point : pt);
+      Offset nextPt = isClosed ? resolved[(i + 1) % n].point : (i < n - 1 ? resolved[i + 1].point : pt);
 
-      Offset nextPt;
-      if (isClosed) {
-        nextPt = Offset(nodes[(i + 1) % n].point.x.value, nodes[(i + 1) % n].point.y.value);
-      } else {
-        nextPt = i < n - 1 ? Offset(nodes[i + 1].point.x.value, nodes[i + 1].point.y.value) : pt;
-      }
-
-      final hOut = controls[i].$1;
-      final hIn = controls[i].$2;
-
-      Offset vOut = hOut;
+      Offset vOut = resolved[i].hOut;
       if (vOut.distance < 0.001) vOut = nextPt - pt;
       
-      Offset vIn = Offset(-hIn.dx, -hIn.dy);
+      Offset vIn = Offset(-resolved[i].hIn.dx, -resolved[i].hIn.dy);
       if (vIn.distance < 0.001) vIn = pt - prevPt;
 
       if (!isClosed) {
@@ -310,26 +420,26 @@ class CompassXSpline extends CompassShape {
     return normals;
   }
 
-  // --- Extracts pure 1D center spine ---
+  // --- Extracts pure 1D center spine (using resolved nodes) ---
   Path getCenterPath() {
     final path = Path();
     if (nodes.isEmpty) return path;
 
-    final controls = getEvaluatedControls();
-    int n = nodes.length;
+    final resolvedNodes = getResolvedNodes();
+    int n = resolvedNodes.length;
     int loopCount = isClosed ? n : n - 1;
 
-    final startOffset = Offset(nodes[0].point.x.value, nodes[0].point.y.value);
+    final startOffset = resolvedNodes[0].point;
     path.moveTo(startOffset.dx, startOffset.dy);
 
     if (n == 1) return path;
 
     for (int i = 0; i < loopCount; i++) {
-      final pt0 = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
-      final pt1 = Offset(nodes[(i + 1) % n].point.x.value, nodes[(i + 1) % n].point.y.value);
+      final pt0 = resolvedNodes[i].point;
+      final pt1 = resolvedNodes[(i + 1) % n].point;
       
-      final hOut = controls[i].$1;
-      final hIn = controls[(i + 1) % n].$2;
+      final hOut = resolvedNodes[i].hOut;
+      final hIn = resolvedNodes[(i + 1) % n].hIn;
 
       final cp1 = pt0 + hOut;
       final cp2 = pt1 + hIn;
@@ -350,27 +460,27 @@ class CompassXSpline extends CompassShape {
     final path = Path();
     path.fillType = PathFillType.evenOdd;
     
-    final controls = getEvaluatedControls();
-    final normals = calculateNormals(controls);
-    int n = nodes.length;
+    final resolvedNodes = getResolvedNodes();
+    final normals = calculateResolvedNormals(resolvedNodes);
+    int n = resolvedNodes.length;
     int loopCount = isClosed ? n : n - 1;
 
     final leftPts = <Offset>[];
     final rightPts = <Offset>[];
 
     for (int i = 0; i < n; i++) {
-      final pt = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
+      final pt = resolvedNodes[i].point;
       final N = normals[i];
-      leftPts.add(pt + N * nodes[i].widthLeft.value);
-      rightPts.add(pt - N * nodes[i].widthRight.value);
+      leftPts.add(pt + N * resolvedNodes[i].widthLeft);
+      rightPts.add(pt - N * resolvedNodes[i].widthRight);
     }
 
     // Trace the Forward (Left) Boundary
     path.moveTo(leftPts[0].dx, leftPts[0].dy);
     for (int i = 0; i < loopCount; i++) {
       final nextIdx = (i + 1) % n;
-      final cp1 = leftPts[i] + controls[i].$1;
-      final cp2 = leftPts[nextIdx] + controls[nextIdx].$2;
+      final cp1 = leftPts[i] + resolvedNodes[i].hOut;
+      final cp2 = leftPts[nextIdx] + resolvedNodes[nextIdx].hIn;
       path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, leftPts[nextIdx].dx, leftPts[nextIdx].dy);
     }
 
@@ -382,8 +492,8 @@ class CompassXSpline extends CompassShape {
       for (int i = n; i > 0; i--) {
         final currIdx = i % n;
         final prevIdx = i - 1;
-        final cp1 = rightPts[currIdx] + controls[currIdx].$2;
-        final cp2 = rightPts[prevIdx] + controls[prevIdx].$1;
+        final cp1 = rightPts[currIdx] + resolvedNodes[currIdx].hIn;
+        final cp2 = rightPts[prevIdx] + resolvedNodes[prevIdx].hOut;
         path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, rightPts[prevIdx].dx, rightPts[prevIdx].dy);
       }
       path.close(); 
@@ -394,7 +504,7 @@ class CompassXSpline extends CompassShape {
         path.arcToPoint(
           rightPts[n - 1],
           radius: Radius.circular(endRadius),
-          clockwise: false, // <--- FIXED: Outward bulge in Flutter space
+          clockwise: false, // Outward bulge in Flutter space
         );
       } else {
         path.lineTo(rightPts[n - 1].dx, rightPts[n - 1].dy);
@@ -403,8 +513,8 @@ class CompassXSpline extends CompassShape {
       // Trace Backward (Right) Boundary
       for (int i = n - 1; i > 0; i--) {
         final prevIdx = i - 1;
-        final cp1 = rightPts[i] + controls[i].$2; 
-        final cp2 = rightPts[prevIdx] + controls[prevIdx].$1; 
+        final cp1 = rightPts[i] + resolvedNodes[i].hIn; 
+        final cp2 = rightPts[prevIdx] + resolvedNodes[prevIdx].hOut; 
         path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, rightPts[prevIdx].dx, rightPts[prevIdx].dy);
       }
       
@@ -414,7 +524,7 @@ class CompassXSpline extends CompassShape {
         path.arcToPoint(
           leftPts[0],
           radius: Radius.circular(startRadius),
-          clockwise: false, // <--- FIXED: Outward bulge in Flutter space
+          clockwise: false, 
         );
       } else {
         path.lineTo(leftPts[0].dx, leftPts[0].dy);
@@ -425,30 +535,24 @@ class CompassXSpline extends CompassShape {
     return path;
   }
 
-  // --- Centerline as an SVG path string (the 1D spine, ignoring any width
-  // profile) --- the string counterpart of getCenterPath(), exactly as
-  // getSvgPathData()'s non-width branch always emitted. Pulled out so the SVG
-  // exporter can draw a CLOSED width spline's inner fill from its centerline
-  // while getSvgPathData() still returns the ribbon outline for the same shape.
-  // For a non-width spline this IS the whole shape, so getSvgPathData() below
-  // simply forwards to it -- one home for the centerline math.
+  // --- Centerline as an SVG path string ---
   String getCenterSvgPathData() {
     if (nodes.isEmpty) return "";
     final buffer = StringBuffer();
-    final controls = getEvaluatedControls();
-    int n = nodes.length;
+    final resolvedNodes = getResolvedNodes();
+    int n = resolvedNodes.length;
     int loopCount = isClosed ? n : n - 1;
 
-    final start = Offset(nodes[0].point.x.value, nodes[0].point.y.value);
+    final start = resolvedNodes[0].point;
     buffer.write('M ${start.dx} ${start.dy} ');
 
-    if (nodes.length > 1) {
+    if (n > 1) {
       for (int i = 0; i < loopCount; i++) {
-        final pt0 = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
-        final pt1 = Offset(nodes[(i + 1) % n].point.x.value, nodes[(i + 1) % n].point.y.value);
+        final pt0 = resolvedNodes[i].point;
+        final pt1 = resolvedNodes[(i + 1) % n].point;
 
-        final cp1 = pt0 + controls[i].$1;
-        final cp2 = pt1 + controls[(i + 1) % n].$2;
+        final cp1 = pt0 + resolvedNodes[i].hOut;
+        final cp2 = pt1 + resolvedNodes[(i + 1) % n].hIn;
 
         buffer.write('C ${cp1.dx} ${cp1.dy}, ${cp2.dx} ${cp2.dy}, ${pt1.dx} ${pt1.dy} ');
       }
@@ -460,51 +564,49 @@ class CompassXSpline extends CompassShape {
   String getSvgPathData() {
     if (nodes.isEmpty) return "";
 
-    // No width profile -> the shape IS its centerline.
     if (!hasWidthProfile) {
       return getCenterSvgPathData();
     }
 
     final buffer = StringBuffer();
-    final controls = getEvaluatedControls();
-    int n = nodes.length;
+    final resolvedNodes = getResolvedNodes();
+    final normals = calculateResolvedNormals(resolvedNodes);
+    int n = resolvedNodes.length;
     int loopCount = isClosed ? n : n - 1;
 
-    // SVG Outline Export
-    final normals = calculateNormals(controls);
     final leftPts = <Offset>[];
     final rightPts = <Offset>[];
 
     for (int i = 0; i < n; i++) {
-      final pt = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
+      final pt = resolvedNodes[i].point;
       final N = normals[i];
-      leftPts.add(pt + N * nodes[i].widthLeft.value);
-      rightPts.add(pt - N * nodes[i].widthRight.value);
+      leftPts.add(pt + N * resolvedNodes[i].widthLeft);
+      rightPts.add(pt - N * resolvedNodes[i].widthRight);
     }
 
     // Left Boundary
     buffer.write('M ${leftPts[0].dx} ${leftPts[0].dy} ');
     for (int i = 0; i < loopCount; i++) {
       final nextIdx = (i + 1) % n;
-      final cp1 = leftPts[i] + controls[i].$1;
-      final cp2 = leftPts[nextIdx] + controls[nextIdx].$2;
+      final cp1 = leftPts[i] + resolvedNodes[i].hOut;
+      final cp2 = leftPts[nextIdx] + resolvedNodes[nextIdx].hIn;
       buffer.write('C ${cp1.dx} ${cp1.dy}, ${cp2.dx} ${cp2.dy}, ${leftPts[nextIdx].dx} ${leftPts[nextIdx].dy} ');
     }
 
     if (isClosed) {
       buffer.write('Z ');
-      // Trace Inner/Right Boundary BACKWARD so boolean union honors the hole
+      // Trace Inner/Right Boundary BACKWARD
       buffer.write('M ${rightPts[0].dx} ${rightPts[0].dy} ');
       for (int i = n; i > 0; i--) {
         final currIdx = i % n;
         final prevIdx = i - 1;
-        final cp1 = rightPts[currIdx] + controls[currIdx].$2;
-        final cp2 = rightPts[prevIdx] + controls[prevIdx].$1;
+        final cp1 = rightPts[currIdx] + resolvedNodes[currIdx].hIn;
+        final cp2 = rightPts[prevIdx] + resolvedNodes[prevIdx].hOut;
         buffer.write('C ${cp1.dx} ${cp1.dy}, ${cp2.dx} ${cp2.dy}, ${rightPts[prevIdx].dx} ${rightPts[prevIdx].dy} ');
       }
       buffer.write('Z');
     } else {
-      // Forward Semicircle Endcap (SVG 'A' command, counter-clockwise 0 0 0)
+      // Forward Semicircle Endcap 
       final endRadius = (leftPts[n - 1] - rightPts[n - 1]).distance / 2.0;
       if (endRadius > 0.001) {
         buffer.write('A $endRadius $endRadius 0 0 0 ${rightPts[n - 1].dx} ${rightPts[n - 1].dy} ');
@@ -514,12 +616,12 @@ class CompassXSpline extends CompassShape {
 
       for (int i = n - 1; i > 0; i--) {
         final prevIdx = i - 1;
-        final cp1 = rightPts[i] + controls[i].$2; 
-        final cp2 = rightPts[prevIdx] + controls[prevIdx].$1; 
+        final cp1 = rightPts[i] + resolvedNodes[i].hIn; 
+        final cp2 = rightPts[prevIdx] + resolvedNodes[prevIdx].hOut; 
         buffer.write('C ${cp1.dx} ${cp1.dy}, ${cp2.dx} ${cp2.dy}, ${rightPts[prevIdx].dx} ${rightPts[prevIdx].dy} ');
       }
 
-      // Start Semicircle Endcap (counter-clockwise 0 0 0)
+      // Start Semicircle Endcap 
       final startRadius = (rightPts[0] - leftPts[0]).distance / 2.0;
       if (startRadius > 0.001) {
         buffer.write('A $startRadius $startRadius 0 0 0 ${leftPts[0].dx} ${leftPts[0].dy} ');
@@ -534,8 +636,6 @@ class CompassXSpline extends CompassShape {
 
   @override
   void paint(Canvas canvas, Paint paint, {bool showScaffolding = false, bool isSelected = false}) {
-    // Note: If drawing wireframe/scaffolding, draw the true mathematical area so
-    // the user can see exactly what boolean geometry is being output.
     canvas.drawPath(getPath(), paint);
 
     if (showScaffolding && isSelected) {
@@ -552,7 +652,6 @@ class CompassXSpline extends CompassShape {
       for (var node in nodes) {
         final pt = Offset(node.point.x.value, node.point.y.value);
         
-        // Fixed length visual slider projecting up and right
         final handlePt = pt + const Offset(20, -30);
         
         canvas.drawLine(pt, handlePt, scaffoldLinePaint);

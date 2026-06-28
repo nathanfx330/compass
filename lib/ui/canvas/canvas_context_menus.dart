@@ -131,9 +131,14 @@ class CanvasContextMenus {
         }
 
         if (clickedNode != null) {
+          // --- NEW: Live Corner Radius Constraint ---
+          pointMenuItems.add(const PopupMenuItem(
+            value: 'toggle_corner_circle',
+            child: Text('Bind Corner to Circle (Live Rounding)'),
+          ));
           pointMenuItems.add(const PopupMenuItem(
             value: 'fillet_corner',
-            child: Text('Fillet Corner Dialog...'),
+            child: Text('Fillet Corner Dialog (Destructive)...'),
           ));
         }
         
@@ -177,6 +182,15 @@ class CanvasContextMenus {
         engine.resetPointHandles(clickedPoint);
       } else if (selectedAction == 'convert_to_bezier') {
         engine.convertPointToBezier(clickedPoint);
+      } else if (selectedAction == 'toggle_corner_circle' && clickedNode != null) {
+        // --- NEW: Toggle the persistent radius constraint ---
+        if (clickedNode.cornerRadius.value > 0.01) {
+           clickedNode.cornerRadius.value = 0.0; // Turn off
+        } else {
+           clickedNode.cornerRadius.value = 30.0 / controller.canvasScale; // Turn on with default size
+        }
+        engine.saveSnapshot();
+        engine.notifyListeners();
       } else if (selectedAction == 'fillet_corner' && parentSpline != null && clickedNode != null) {
         CompassDialogs.showFilletDialog(context, engine, parentSpline, clickedNode);
       } else if (selectedAction == 'toggle_closed' && parentSpline != null) {

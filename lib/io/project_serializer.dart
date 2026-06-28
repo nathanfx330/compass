@@ -164,20 +164,21 @@ class ProjectSerializer {
           }).join('|');
           buffer.writeln('SHAPE,MESH,${layer.id},${shape.operation.name},${shape.isVisible},${shape.rows},${shape.cols},${shape.anchorPoint?.id ?? ""},$nodesStr$strk');
         } else if (shape is CompassXSpline) {
-          // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR:pinL:pinR
-          // when the node carries explicit Bezier handles, variable width, or width pins. 
+          // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR:pinL:pinR:cornerRadius
+          // when the node carries explicit Bezier handles, variable width, width pins, or corner radius. 
           // "null" is used for handles that remain fluid, preserving Catmull-Rom math.
           final nodesStr = shape.nodes.map((n) {
             final hasHandles = n.handleIn != null || n.handleOut != null;
             final hasWidth = n.widthLeft.value > 0.001 || n.widthRight.value > 0.001;
             final hasPins = n.isLeftWidthPinned || n.isRightWidthPinned;
+            final hasCorner = n.cornerRadius.value > 0.01;
 
-            if (hasHandles || hasWidth || hasPins) {
+            if (hasHandles || hasWidth || hasPins || hasCorner) {
               final hIX = n.handleIn?.dx.toString() ?? 'null';
               final hIY = n.handleIn?.dy.toString() ?? 'null';
               final hOX = n.handleOut?.dx.toString() ?? 'null';
               final hOY = n.handleOut?.dy.toString() ?? 'null';
-              return '${n.point.id}:${n.tension.value}:$hIX:$hIY:$hOX:$hOY:${n.widthLeft.value}:${n.widthRight.value}:${n.isLeftWidthPinned}:${n.isRightWidthPinned}';
+              return '${n.point.id}:${n.tension.value}:$hIX:$hIY:$hOX:$hOY:${n.widthLeft.value}:${n.widthRight.value}:${n.isLeftWidthPinned}:${n.isRightWidthPinned}:${n.cornerRadius.value}';
             }
             return '${n.point.id}:${n.tension.value}';
           }).join('|');
@@ -489,6 +490,7 @@ class ProjectSerializer {
                   double wR = 0.0;
                   bool pinL = false;
                   bool pinR = false;
+                  double cR = 0.0; // <--- NEW: Corner Radius Default
                   
                   if (np.length == 4) { // Legacy symmetric fallback
                     final hx = double.tryParse(np[2]) ?? 0.0;
@@ -510,6 +512,9 @@ class ProjectSerializer {
                       pinL = np[8] == 'true';
                       pinR = np[9] == 'true';
                     }
+                    if (np.length >= 11) { // <--- NEW: Persistent Corner Radius
+                      cR = double.tryParse(np[10]) ?? 0.0;
+                    }
                   }
                   
                   final node = CompassSplineNode(
@@ -521,10 +526,13 @@ class ProjectSerializer {
                     widthRight: wR,
                     isLeftWidthPinned: pinL,
                     isRightWidthPinned: pinR,
+                    cornerRadius: cR, // <--- NEW
                   );
                   node.tension.addListener(onUpdate); 
                   node.widthLeft.addListener(onUpdate);
                   node.widthRight.addListener(onUpdate);
+                  node.cornerRadius.addListener(onUpdate); // <--- NEW
+                  
                   spline.addNode(node);
                 } else {
                   valid = false;

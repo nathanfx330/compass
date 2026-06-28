@@ -1,3 +1,5 @@
+// /lib/ui/canvas/canvas_controller.dart
+
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; 
@@ -81,13 +83,6 @@ class CanvasController extends ChangeNotifier {
   Offset? addVertexPreviewPos;
 
   // --- X-KEY MESH SLICE HOVER STATE ---
-  // Parallel to the Q-key add-vertex hover fields above. When X is held and the
-  // cursor is over a mesh, these describe the pending slice: which mesh, whether
-  // it's a row or column insert, the gap index to pass to the engine, the
-  // parametric position [0,1] WITHIN that gap (where the cursor is, so the cut
-  // lands under the mouse rather than at the band midpoint), and the two endpoints
-  // of the dotted preview line the renderer draws. All null/-1/0.5 when no valid
-  // slice is under the cursor.
   CompassMesh? sliceMesh;
   bool sliceIsRow = false; // true => horizontal cut (insert row); false => column
   int sliceGap = -1;
@@ -106,7 +101,7 @@ class CanvasController extends ChangeNotifier {
   bool isAPressed = false; 
   bool isFPressed = false; 
   bool isQPressed = false; 
-  bool isXPressed = false; // <--- NEW: mesh slice modifier
+  bool isXPressed = false; 
   bool is1Pressed = false; 
   bool is2Pressed = false; 
 
@@ -130,6 +125,9 @@ class CanvasController extends ChangeNotifier {
   Set<CompassPoint> transformingPoints = {}; 
   final List<CompassSplineNode> rotatingHandleNodes = [];
   final double hitThreshold = 20.0; 
+
+  // --- NEW: State for tracking the live Corner Radius constraint drag ---
+  CompassSplineNode? activeCornerCircleNode;
 
   // --- TOOL MANAGEMENT ---
   void setTool(CompassTool tool) {
@@ -364,17 +362,11 @@ class CanvasController extends ChangeNotifier {
 
     bool chooseRow;
 
-    // Explicit Overrides using standard axis-lock keys (1 = Horizontal/Row, 2 = Vertical/Column)
     if (is1Pressed && rowLine != null) {
       chooseRow = true;
     } else if (is2Pressed && colLine != null) {
       chooseRow = false;
     } else {
-      // Auto-heuristic: Distance to the bounding grid edges.
-      // If we are hovering closer to a vertical column line, we want to slice ACROSS it (Horizontal Row cut).
-      // If closer to a horizontal row line, we want to slice ACROSS it (Vertical Column cut).
-      
-      // Add hysteresis (stickiness) so it doesn't flicker when moving along the diagonal
       double bias = 0.0;
       if (sliceMesh == target && sliceGap != -1) {
         bias = 10.0 / canvasScale; 

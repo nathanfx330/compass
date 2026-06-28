@@ -773,6 +773,29 @@ class CanvasGestureHandler {
       return;
     }
 
+    final selForHandles = engine.selectedShape;
+
+    // --- NEW: Corner Circle Hit Testing ---
+    if (selForHandles is CompassXSpline && showScaffolding && 
+        !controller.isShiftPressed && !controller.isRPressed && !controller.isAPressed) {
+      
+      final handleThreshold = 15.0 / controller.canvasScale;
+      for (var node in selForHandles.nodes) {
+        if (node.cornerRadius.value > 0.01) {
+          final pt = Offset(node.point.x.value, node.point.y.value);
+          final distToCenter = (logicalPosition - pt).distance;
+          final distToRim = (distToCenter - node.cornerRadius.value).abs();
+          
+          // If the user grabs the rim of the constraint circle
+          if (distToRim < handleThreshold) {
+            controller.activeCornerCircleNode = node;
+            controller.notifyListeners();
+            return;
+          }
+        }
+      }
+    }
+
     if (controller.selectedPoints.length >= 2 &&
         !controller.isRPressed && !controller.isShiftRPressed && !controller.isCtrlRPressed && !controller.isAPressed && !controller.isFPressed && !controller.isWPressed && !controller.isZPressed && !controller.isShiftZPressed) {
       final hp = CanvasHitTester.hitTestPoint(engine, logicalPosition, controller.hitThreshold / controller.canvasScale);
@@ -836,8 +859,6 @@ class CanvasGestureHandler {
       }
     }
 
-    final selForHandles = engine.selectedShape;
-    
     // --- Width Handle Hit Testing (W Key) ---
     if (selForHandles is CompassXSpline && showScaffolding && showHandles && controller.isWPressed) {
       final handleThreshold = 24.0 / controller.canvasScale;
@@ -972,6 +993,19 @@ class CanvasGestureHandler {
 
     final dx = logicalPosition.dx - controller.lastPanPosition!.dx;
     final dy = logicalPosition.dy - controller.lastPanPosition!.dy;
+
+    // --- NEW: Scale Corner Circle ---
+    if (controller.activeCornerCircleNode != null) {
+      final node = controller.activeCornerCircleNode!;
+      final pt = Offset(node.point.x.value, node.point.y.value);
+      
+      // The radius is strictly the distance from the point to the mouse
+      final newRadius = (logicalPosition - pt).distance;
+      node.cornerRadius.value = max(1.0, newRadius); // Prevent it from going to exactly 0 while dragging
+      
+      controller.lastPanPosition = logicalPosition;
+      return;
+    }
 
     if (controller.isRotating && controller.rotationPivotOffset != null) {
       final pivot = controller.rotationPivotOffset!;
@@ -1149,6 +1183,10 @@ class CanvasGestureHandler {
       controller.isStrictPanningSelection = false;
       for (var p in controller.transformingPoints) p.isBeingDragged = false;
       engine.finalizePointDrag();
+    } else if (controller.activeCornerCircleNode != null) {
+      controller.activeCornerCircleNode = null;
+      engine.finalizePointDrag(); 
+      controller.notifyListeners();
     } else if (controller.isWidthSmoothing) {
       controller.isWidthSmoothing = false;
       controller.smoothOrigWidths.clear();
@@ -1213,6 +1251,7 @@ class CanvasGestureHandler {
       controller.isPanningSelectedPoints = false;
       for (var p in controller.transformingPoints) p.isBeingDragged = false;
     }
+    controller.activeCornerCircleNode = null;
     controller.activeHandleNode = null;
     controller.activeWidthNode = null; 
     controller.isUnifiedWidthPull = false;
