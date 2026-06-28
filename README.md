@@ -6,23 +6,33 @@
 
 ### The Manifesto
 
-Modern graphic design software is built on math. Every Bézier handle, every alignment guide, every pathfinder operation is a real mathematical idea handed to you as a tool. But that's all it is—a collection of tools, not a system. Each one toolifies its own slice of the math and knows nothing of the rest. There is no shared foundation beneath them, no unifying vision, so the structure you build with one tool dissolves the moment you reach for the next. The math is there; it was simply never made to cohere.
+Modern graphic design software is built on mathematics. Every Bézier handle, every alignment guide, and every pathfinder operation is a genuine mathematical idea exposed as a tool. But that is all it is: a collection of isolated tools, each representing its own fragment of the underlying math. There is no shared foundation or unifying model, so the structure you build with one tool dissolves the moment you reach for the next. The mathematics is there. It was simply never designed to cohere.
 
-This shows up everywhere, but most clearly in **Direct Manipulation**—the cursor and the brush. It isn't unique to Illustrator; it is the mindset of almost all digital software, built around a mouse interacting through a cursor or Bézier handles. And direct manipulation is genuinely the right tool for detail work: at some point a specific vertex has to sit in a specific place, and nothing beats reaching out and moving it. Compass does plenty of this too—you drag points, you sculpt handles, you pull widths. The cursor is not the enemy.
+This becomes most apparent in **direct manipulation**, the cursor and the brush. It is not unique to Illustrator. It is the dominant paradigm behind almost every modern graphics application. Direct manipulation is genuinely the right tool for fine detail. Eventually, a specific vertex has to sit in a specific place, and nothing is more intuitive than simply reaching out and moving it.
 
-The failure is that direct manipulation is the *only* altitude these tools give you. It is the correct primitive at the leaf—the single point, the single handle—but the wrong organizing principle for the whole system. We build interfaces that are superb at micro-changes to tiny fragments of a project, much like editing a document character by character, yet they offer no scaffolding to move from the abstract to the specific. Orchestrating a large, structural move means tediously selecting and dragging many things by hand. Compass was built to add the missing altitude: high-level, hierarchical transformations that cascade all the way down to the specific vertex edits direct manipulation already does well.
+The problem is not direct manipulation itself. The problem is that it is the *only* altitude these tools offer.
 
-High-level design is not about *drawing*; it is about establishing **rules, systems, constraints, and relationships**.
+It is the correct primitive at the leaf level. It excels at moving an individual point or adjusting a single Bézier handle, but it is the wrong organizing principle for an entire design. We have built software that excels at microscopic edits to isolated pieces of geometry, much like editing a novel one character at a time, yet offers almost no way to express the larger structure those details belong to. Making a sweeping structural change often means tediously selecting and dragging dozens of unrelated objects by hand.
 
-Consider the Apple logo. It is famously speculated to be constructed using the Golden Ratio and intersecting circles. If you try to recreate this in traditional vector software, you have to manually overlap circles and use a "Shape Builder" to cut out the final shape. **The moment you do that, the circles are destroyed** for the new unified shape. If you realize one curve needs to be 5% wider, you have to start over. The structural relationship was lost the moment you clicked "merge." This is not a cursor problem—it is a problem of the tool having nowhere to *store* the relationship.
+Compass was built to introduce the missing altitude. It adds high-level, hierarchical transformations that naturally cascade down into the precise vertex edits that direct manipulation already does well.
 
-Traditional graphic design tools use "Smart Guides." But Smart Guides are *transient*. They help you place something once, but they hold no meaningful relational rules. You can't establish any lasting relative relationships with the rest of your splines.
+High-level design is not about *drawing*. It is about defining **rules, systems, constraints, and relationships**.
 
-**Compass** is built on a different philosophy: design is built upon rules, and the tool should respect that with a **Persistent Mathematical Truth.**
+Consider the Apple logo. It is famously believed to have been constructed from intersecting circles and Golden Ratio proportions. Recreating that construction in a traditional vector editor means overlapping circles and using a Shape Builder or Pathfinder operation to cut out the final silhouette. The moment you click **Merge**, those circles cease to exist. If you later decide one curve should be five percent wider, there is nothing left to modify. You either rebuild the construction from scratch or manually reshape the finished path. The geometry survives, but the reasoning behind it does not.
 
-In Compass, you don't merely draw lines and circles—you establish the relationships between them. You state rules: *"Draw Point A. Draw Point B. Make a line between them. Now draw a circle anchored to Point A, and force its radius to always equal the exact distance to Point B."*
+This is not a cursor problem. It is a storage problem. Traditional vector software has nowhere to preserve the relationships that produced the design.
 
-If you drag Point A, the line moves, and the circle moves. If you drag Point B, the line stretches, and the circle scales perfectly. You are not pushing dead pixels; you are rigging a 2D system—and when you do reach in to move a single point by hand, that direct edit is just the lowest altitude of the same system, not a separate mode that throws your rules away.
+The same limitation appears in Smart Guides. They help you position objects once, then disappear. They never become part of the document itself. The alignment exists only during the edit, never as a persistent relationship the software can continue enforcing.
+
+**Compass** is built on a different philosophy. Design is fundamentally relational, and the software should preserve those relationships as **Persistent Mathematical Truth**.
+
+In Compass, you do not merely draw lines and circles. You define how they relate to one another.
+
+*"Create Point A. Create Point B. Draw a line between them. Now create a circle centered on Point A whose radius always equals the distance between A and B."*
+
+Drag Point A and the entire construction moves together. Drag Point B and the line stretches while the circle scales perfectly to maintain its constraint. Nothing needs to be rebuilt because nothing was ever destroyed.
+
+You are not pushing dead pixels around a canvas. You are constructing a living mathematical system. When you eventually reach in to move a single point by hand, that direct edit is simply the lowest altitude of the same system. It is not a separate mode that discards the relationships you have already established.
 
 ---
 
