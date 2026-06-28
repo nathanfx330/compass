@@ -5,23 +5,24 @@
 ---
 
 ### The Manifesto
-Modern graphic design software is broken. 
 
-When you use Illustrator or any of its inspirations, the software treats you like a painter holding a digital brush. The paradigm is **Direct Manipulation**. But it isn't just Illustrator—it is the mindset of almost all digital software. We build human interfaces around a mouse, interacting through a cursor or Bézier handles. This is great for detail work, but we fail to provide the scaffolding to move from the abstract to the specific. 
+Modern graphic design software is built on math. Every Bézier handle, every alignment guide, every pathfinder operation is a real mathematical idea handed to you as a tool. But that's all it is—a collection of tools, not a system. Each one toolifies its own slice of the math and knows nothing of the rest. There is no shared foundation beneath them, no unifying vision, so the structure you build with one tool dissolves the moment you reach for the next. The math is there; it was simply never made to cohere.
 
-The cursor represents the specific: making micro-changes to tiny fragments of a project, much like editing a word document character by character. Traditional software makes it incredibly difficult to orchestrate large, structural moves without tedious, manual UI selections. Compass was built to reverse this: abstracting from high-level hierarchical transformations all the way down to specific vertex edits.
+This shows up everywhere, but most clearly in **Direct Manipulation**—the cursor and the brush. It isn't unique to Illustrator; it is the mindset of almost all digital software, built around a mouse interacting through a cursor or Bézier handles. And direct manipulation is genuinely the right tool for detail work: at some point a specific vertex has to sit in a specific place, and nothing beats reaching out and moving it. Compass does plenty of this too—you drag points, you sculpt handles, you pull widths. The cursor is not the enemy.
 
-High-level design is not about *drawing*; it is about establishing **rules, systems, constraints, and relationships**. 
+The failure is that direct manipulation is the *only* altitude these tools give you. It is the correct primitive at the leaf—the single point, the single handle—but the wrong organizing principle for the whole system. We build interfaces that are superb at micro-changes to tiny fragments of a project, much like editing a document character by character, yet they offer no scaffolding to move from the abstract to the specific. Orchestrating a large, structural move means tediously selecting and dragging many things by hand. Compass was built to add the missing altitude: high-level, hierarchical transformations that cascade all the way down to the specific vertex edits direct manipulation already does well.
 
-Consider the Apple logo. It is famously speculated to be constructed using the Golden Ratio and intersecting circles. If you try to recreate this in traditional vector software, you have to manually overlap circles and use a "Shape Builder" to cut out the final shape. **The moment you do that, the circles are destroyed** for the new unified shape. If you realize one curve needs to be 5% wider, you have to start over. The structural relationship was lost the moment you clicked "merge." 
+High-level design is not about *drawing*; it is about establishing **rules, systems, constraints, and relationships**.
 
-Traditional graphic design tools use "Smart Guides." But Smart Guides are *transient*. They help you place something once, but they are absent of meaningful relational rules. You can't establish any meaningful relative relationships with the rest of your splines.
+Consider the Apple logo. It is famously speculated to be constructed using the Golden Ratio and intersecting circles. If you try to recreate this in traditional vector software, you have to manually overlap circles and use a "Shape Builder" to cut out the final shape. **The moment you do that, the circles are destroyed** for the new unified shape. If you realize one curve needs to be 5% wider, you have to start over. The structural relationship was lost the moment you clicked "merge." This is not a cursor problem—it is a problem of the tool having nowhere to *store* the relationship.
 
-**Compass** is built on a different philosophy: Design is built upon rules, and Compass should respect that with a **Persistent Mathematical Truth.**
+Traditional graphic design tools use "Smart Guides." But Smart Guides are *transient*. They help you place something once, but they hold no meaningful relational rules. You can't establish any lasting relative relationships with the rest of your splines.
 
-In Compass, you do not draw lines or circles. You establish relationships. You state rules: *"Draw Point A. Draw Point B. Make a line between them. Now draw a circle anchored to Point A, and force its radius to always equal the exact distance to Point B."*
+**Compass** is built on a different philosophy: design is built upon rules, and the tool should respect that with a **Persistent Mathematical Truth.**
 
-If you drag Point A, the line moves, and the circle moves. If you drag Point B, the line stretches, and the circle scales perfectly. You are not pushing dead pixels; you are rigging a 2D system. 
+In Compass, you don't merely draw lines and circles—you establish the relationships between them. You state rules: *"Draw Point A. Draw Point B. Make a line between them. Now draw a circle anchored to Point A, and force its radius to always equal the exact distance to Point B."*
+
+If you drag Point A, the line moves, and the circle moves. If you drag Point B, the line stretches, and the circle scales perfectly. You are not pushing dead pixels; you are rigging a 2D system—and when you do reach in to move a single point by hand, that direct edit is just the lowest altitude of the same system, not a separate mode that throws your rules away.
 
 ---
 
@@ -39,6 +40,7 @@ If you drag Point A, the line moves, and the circle moves. If you drag Point B, 
 Compass is rapidly evolving into a desktop-grade parametric engine. It currently supports:
 
 * **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines. Splines live in two mathematical modes: a *fluid* Catmull-Rom curve whose vertex tension you adjust with the `A` key via a global distance tether, or *explicit* Bézier—right-click any vertex to **Convert to Bézier** and freeze its current tangent into independently draggable in/out handles for exact, asymmetric control. Right-click again to **Reset Handles** and dissolve back into fluid curvature. Conversion is loss-free: the curve never jumps, it simply becomes editable.
+* **Live Corner Pulleys:** Bind a spline vertex to a *persistent* corner constraint rather than cutting it. Right-click a vertex to bind it to a **round pulley**—a rope that wraps the corner in a smooth arc, leaving and rejoining the edges tangentially—or a **miter pulley**, the same outward wrap brought to a single sharp point. A pulley is live: drag its rim on the canvas to resize it, or remove it to restore the plain corner, and it survives save/load, undo, and rotation. This is the constraint-engine counterpart to the destructive `F`-key fillet: where a fillet bakes a rounded corner into new, fixed points, a pulley is a rule the vertex carries—the underlying point never moves, so the relationship is never lost.
 * **Coons Patch Gradient Meshes:** Convert any Rectangle into a live Gradient Mesh. Built on true **Bicubic Coons Patch** interpolation rather than flat planar math, you can use the `A` key to adjust node tension and seamlessly bow the internal gradient and outer boundary edges. Meshes are fully integrated into the Boolean Engine—drop a Subtract shape over a mesh to non-destructively punch a hole through the color field. Use the `X` key to mathematically slice new rows and columns directly into the grid without breaking structural integrity. Select nodes and use the Custom Color Picker to paint the mesh.
 * **Parametric Area Strokes & Width Constraints:** Hold `W` to sculpt variable-width ribbon strokes. Instead of manually smoothing hundreds of points, **Right-click a width handle** to drop a Constraint Flag (turning it orange). Drop two flags, and Compass dynamically calculates the parametric distance between them, fluidly interpolating the width of every node in-between. Dragging a pinned flag mathematically updates the entire tapered section in real-time. 
 * **Interactive Drag-and-Drop Hierarchy:** Fully reorderable Z-layers and shapes. Drag a layer to change global Z-order, drag a shape within a layer to dynamically change its Boolean evaluation order, or seamlessly drag a shape across layers to migrate it. **Lock layers** to freeze underlying scaffolding and safely work on top of complex construction geometry.
@@ -63,7 +65,8 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 
 **Mouse Controls:**
 * **Left Click:** Select shapes, drag points. Drag the purple in/out dots of a Bézier vertex to sculpt its curve handles directly.
-* **Right Click:** Context menu for Boolean operations, baking a layer into editable X-Splines, exporting to OBJ, converting geometry to splines/meshes, converting a vertex to or from Bézier handles, **toggling parametric width constraint flags**, and hiding scaffolding.
+* **Right Click:** Context menu for Boolean operations, baking a layer into editable X-Splines, exporting to OBJ, converting geometry to splines/meshes, converting a vertex to or from Bézier handles, **binding a corner to a round or miter pulley**, toggling parametric width constraint flags, and hiding scaffolding.
+* **Drag a Pulley Rim:** With a spline selected, drag the colored rim handle of a bound corner pulley to resize it live—light blue for a round pulley, orange for a miter. The underlying point never moves; only the constraint's size changes.
 * **Middle Click & Drag:** Pan the infinite canvas.
 * **Scroll Wheel:** Zoom the infinite canvas.
 * **Drag in Hierarchy Panel:** Grab the indicator dot next to a layer or shape to dynamically reorder Z-index, restack boolean logic, or move geometry between layers.
@@ -75,7 +78,7 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 * **`Ctrl/Cmd + R + Drag`**: Rotate the explicit Bézier handles of a selected vertex (or group of vertices) around their local centroid without moving the underlying points. Automatically converts fluid Catmull-Rom nodes to explicit handles.
 * **`A + Drag`**: Target an X-Spline or Gradient Mesh vertex and drag anywhere on the screen to fluidly adjust its structural tension.
 * **`W + Drag`**: Target an X-Spline vertex and drag to adjust its variable stroke width. Shift+Drag to symmetrically scale both sides. Right-click the width handle to drop an Orange Width Constraint flag for automatic parametric tapering.
-* **`F + Drag`**: With an X-Spline vertex selected, hold F and drag horizontally anywhere on the screen to dynamically apply a curve-aware fillet (corner rounding).
+* **`F + Drag`**: With an X-Spline vertex selected, hold F and drag horizontally anywhere on the screen to dynamically apply a curve-aware fillet (corner rounding). Unlike a corner pulley, a fillet is destructive—it bakes the rounded corner into fixed points.
 * **`X + Hover / Click`**: Hover over a Gradient Mesh to preview a slice. Compass auto-detects horizontal or vertical cuts based on edge proximity. Click to commit the topological slice without altering the visual gradient.
 * **`Z + Drag`**: Select multiple nodes, hold Z, and drag to Laplacian smooth them. Hold `Shift+Z` to smooth variable widths.
 * **`1 + Drag`**: Constrain a point or vertex drag to the **horizontal** axis. When using the `X` mesh slice tool, hold `1` to explicitly force a Horizontal (Row) cut.
