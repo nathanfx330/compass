@@ -361,7 +361,6 @@ class PointOnSpiralConstraint extends CompassConstraint {
   }
 }
 
-// --- NEW: Rectangle Square Constraint ---
 /// A rule that forces the diagonal of a rectangle to always be a perfect 45 degrees,
 /// maintaining a 1:1 aspect ratio (a square) no matter which point is dragged.
 class SquareConstraint extends CompassConstraint {
@@ -436,5 +435,104 @@ class SquareConstraint extends CompassConstraint {
     rect.p1.y.addListener(listener);
     rect.p2.x.addListener(listener);
     rect.p2.y.addListener(listener);
+  }
+}
+
+// --- NEW: Parallelogram Constraint ---
+/// A rule that forces four points to always form a parallelogram/skewed square.
+/// If you drag one corner to skew the shape, the corresponding points
+/// move automatically to keep opposite sides perfectly parallel.
+class ParallelogramConstraint extends CompassConstraint {
+  final CompassPoint p1; // Bottom-Left
+  final CompassPoint p2; // Bottom-Right
+  final CompassPoint p3; // Top-Right
+  final CompassPoint p4; // Top-Left
+  bool _isEnforcing = false;
+
+  ParallelogramConstraint({
+    required this.p1,
+    required this.p2,
+    required this.p3,
+    required this.p4,
+  }) {
+    bind();
+    enforce();
+  }
+
+  @override
+  void enforce() {
+    if (_isEnforcing) return;
+    _isEnforcing = true;
+
+    // RIGID-BODY GUARD: If multiple points are moving together (e.g., panning 
+    // the whole shape), skip enforcement so they don't fight the translation.
+    int dragCount = (p1.isBeingDragged ? 1 : 0) + 
+                    (p2.isBeingDragged ? 1 : 0) + 
+                    (p3.isBeingDragged ? 1 : 0) + 
+                    (p4.isBeingDragged ? 1 : 0);
+    
+    if (dragCount > 1) {
+      _isEnforcing = false;
+      return;
+    }
+
+    // A parallelogram mathematically requires: Vector(p1 -> p2) == Vector(p4 -> p3)
+    // Therefore: p3 - p4 = p2 - p1
+
+    if (p4.isBeingDragged) {
+      // Dragging Top-Left (p4) skews the top edge. Move Top-Right (p3) to match.
+      // p3 = p4 + (p2 - p1)
+      final targetX = p4.x.value + (p2.x.value - p1.x.value);
+      final targetY = p4.y.value + (p2.y.value - p1.y.value);
+      _moveTo(p3, targetX, targetY);
+    } 
+    else if (p3.isBeingDragged) {
+      // Dragging Top-Right (p3) skews the top edge. Move Top-Left (p4) to match.
+      // p4 = p3 - (p2 - p1)
+      final targetX = p3.x.value - (p2.x.value - p1.x.value);
+      final targetY = p3.y.value - (p2.y.value - p1.y.value);
+      _moveTo(p4, targetX, targetY);
+    } 
+    else if (p2.isBeingDragged) {
+      // Dragging Bottom-Right (p2) changes the base. Move Top-Right (p3) to match.
+      final targetX = p4.x.value + (p2.x.value - p1.x.value);
+      final targetY = p4.y.value + (p2.y.value - p1.y.value);
+      _moveTo(p3, targetX, targetY);
+    } 
+    else if (p1.isBeingDragged) {
+      // Dragging Bottom-Left (p1) changes the base. Move Top-Left (p4) to match.
+      final targetX = p3.x.value + (p1.x.value - p2.x.value);
+      final targetY = p3.y.value + (p1.y.value - p2.y.value);
+      _moveTo(p4, targetX, targetY);
+    } 
+    else {
+      // Initialization / Default: Force p4 to snap into the correct position
+      final targetX = p1.x.value + (p3.x.value - p2.x.value);
+      final targetY = p1.y.value + (p3.y.value - p2.y.value);
+      _moveTo(p4, targetX, targetY);
+    }
+
+    _isEnforcing = false;
+  }
+
+  void _moveTo(CompassPoint p, double targetX, double targetY) {
+    final dx = targetX - p.x.value;
+    final dy = targetY - p.y.value;
+    if (dx.abs() > 0.0001 || dy.abs() > 0.0001) {
+      p.moveBy(dx, dy);
+    }
+  }
+
+  @override
+  void bind() {
+    void listener() => enforce();
+    p1.x.addListener(listener);
+    p1.y.addListener(listener);
+    p2.x.addListener(listener);
+    p2.y.addListener(listener);
+    p3.x.addListener(listener);
+    p3.y.addListener(listener);
+    p4.x.addListener(listener);
+    p4.y.addListener(listener);
   }
 }

@@ -15,7 +15,7 @@ class CanvasHUD extends StatelessWidget {
   
   final bool isRPressed;
   final bool isShiftRPressed;
-  final bool isCtrlRPressed; // <--- NEW
+  final bool isCtrlRPressed; 
   final bool isShiftPressed;
   final bool isAPressed;
   final bool isFPressed;
@@ -37,7 +37,7 @@ class CanvasHUD extends StatelessWidget {
     required this.onToolSelected,
     required this.isRPressed,
     required this.isShiftRPressed,
-    required this.isCtrlRPressed, // <--- NEW
+    required this.isCtrlRPressed, 
     required this.isShiftPressed,
     required this.isAPressed,
     required this.isFPressed,
@@ -62,7 +62,7 @@ class CanvasHUD extends StatelessWidget {
     if (isShiftRPressed) {
       overlayText = 'SHIFT+R : ROTATE HIERARCHY';
       overlayColor = Colors.deepOrangeAccent;
-    } else if (isCtrlRPressed) { // <--- NEW
+    } else if (isCtrlRPressed) { 
       overlayText = 'CTRL+R : ROTATE HANDLES';
       overlayColor = Colors.purpleAccent;
     } else if (isRPressed) {
@@ -351,6 +351,14 @@ class CanvasHUD extends StatelessWidget {
                     icon: Icons.crop_square,
                     tooltip: 'Draw Rectangle',
                     tool: CompassTool.addRect,
+                    theme: theme,
+                  ),
+                  const SizedBox(width: 8),
+                  // <--- NEW: Rhombus Button added here --->
+                  _buildToolButton(
+                    icon: Icons.polyline,
+                    tooltip: 'Draw Rhombus',
+                    tool: CompassTool.addRhombus,
                     theme: theme,
                   ),
                   const SizedBox(width: 8),

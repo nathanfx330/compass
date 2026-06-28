@@ -12,8 +12,9 @@ import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/rectangle.dart';
-import '../models/geometry/spline.dart'; // <--- Needed to calculate area-stroke bounds
-import '../models/geometry/mesh.dart';   // <--- NEW: gradient mesh bounds + draw
+import '../models/geometry/rhombus.dart'; // <--- NEW: rhombus
+import '../models/geometry/spline.dart';
+import '../models/geometry/mesh.dart';
 
 /// Rasterizes the pure artwork (no scaffolding) to a PNG by re-rendering the
 /// model offscreen. Mirrors SVGExporter's philosophy: export the *design*, not
@@ -84,6 +85,17 @@ class PNGExporter {
           if (minYP < minY) minY = minYP;
           if (maxXP > maxX) maxX = maxXP;
           if (maxYP > maxY) maxY = maxYP;
+        } else if (shape is CompassRhombus) {
+          // <--- NEW: Rhombus bounds math
+          final px1 = shape.p1.x.value; final py1 = shape.p1.y.value;
+          final px2 = shape.p2.x.value; final py2 = shape.p2.y.value;
+          final px3 = shape.p3.x.value; final py3 = shape.p3.y.value;
+          final px4 = shape.p4.x.value; final py4 = shape.p4.y.value;
+          
+          if (min(min(px1, px2), min(px3, px4)) < minX) minX = min(min(px1, px2), min(px3, px4));
+          if (min(min(py1, py2), min(py3, py4)) < minY) minY = min(min(py1, py2), min(py3, py4));
+          if (max(max(px1, px2), max(px3, px4)) > maxX) maxX = max(max(px1, px2), max(px3, px4));
+          if (max(max(py1, py2), max(py3, py4)) > maxY) maxY = max(max(py1, py2), max(py3, py4));
         } else if (shape is CompassXSpline) {
           if (shape.hasWidthProfile) {
             final bounds = shape.getPath().getBounds();

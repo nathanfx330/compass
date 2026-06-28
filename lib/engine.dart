@@ -14,7 +14,8 @@ import 'models/geometry/circle.dart';
 import 'models/geometry/spiral.dart';
 import 'models/geometry/spline.dart';
 import 'models/geometry/rectangle.dart';
-import 'models/geometry/mesh.dart'; // <--- NEW: gradient mesh shape
+import 'models/geometry/rhombus.dart'; // <--- NEW: rhombus shape
+import 'models/geometry/mesh.dart';
 import 'models/layer.dart';
 import 'models/reference_layer.dart';
 
@@ -29,10 +30,10 @@ import 'io/obj_exporter.dart';
 
 // --- GEOMETRY HELPERS ---
 import 'path_baker.dart';
-import 'shape_converter.dart'; // <--- NEW: Extracted Shape Converter
+import 'shape_converter.dart';
 
 // --- HIERARCHY OPS ---
-import 'hierarchy_ops.dart'; // <--- NEW: Extracted Z-order / containment mutations
+import 'hierarchy_ops.dart';
 
 /// The state holder and brain of the application.
 class CompassEngine extends ChangeNotifier {
@@ -334,13 +335,13 @@ class CompassEngine extends ChangeNotifier {
       shapePoints = [shape.center, shape.startPoint];
     } else if (shape is CompassRectangle) { 
       shapePoints = [shape.p1, shape.p2];
+    } else if (shape is CompassRhombus) {
+      // <--- NEW: Rhombus GC Points
+      shapePoints = [shape.p1, shape.p2, shape.p3, shape.p4];
     } else if (shape is CompassXSpline) {
       shapePoints = shape.nodes.map((n) => n.point).toList();
       if (shape.anchorPoint != null) shapePoints.add(shape.anchorPoint!);
     } else if (shape is CompassMesh) {
-      // Every grid node plus the centroid anchor. They only attach among
-      // themselves (anchor -> each node), so the batch GC below collects the
-      // whole lattice with no external dependency holding any of it alive.
       shapePoints = shape.nodes.map((n) => n.point).toList();
       if (shape.anchorPoint != null) shapePoints.add(shape.anchorPoint!);
     }
@@ -357,19 +358,6 @@ class CompassEngine extends ChangeNotifier {
     }
 
     if (removed) {
-      // Before the constraints are torn down, gather any rider points bound to
-      // this shape and fold them into the GC batch. A rider -- the free point
-      // created by "Add Point to Shape", governed by a PointOnLine/Circle/Spiral
-      // constraint -- lives as an attachment-CHILD of one of the host's structural
-      // points plus a constraint entry; it occupies no structural slot. So without
-      // this it (a) is never handed to checkAndGCPoint and lingers as a dead blue
-      // dot, and (b) when the host's OWN structural point is later GC-checked, the
-      // rider sitting in that point's attachedPoints reads as an "external
-      // dependency" and keeps the host point alive too -- so deleting a line left
-      // line.start AND the rider behind, no longer even re-projecting. Folding the
-      // rider into the batch both collects it for its own GC check and stops it
-      // from falsely pinning the host. Must run BEFORE the removeWhere below, while
-      // the constraints still exist to be read.
       for (var c in constraints) {
         if (_constraintHasShape(c, shape)) {
           final rider = _constraintRider(c);
@@ -401,6 +389,7 @@ class CompassEngine extends ChangeNotifier {
         else if (s is CompassCircle && (s.center == p || s.radiusPoint == p)) isUsed = true;
         else if (s is CompassSpiral && (s.center == p || s.startPoint == p)) isUsed = true;
         else if (s is CompassRectangle && (s.p1 == p || s.p2 == p)) isUsed = true; 
+        else if (s is CompassRhombus && (s.p1 == p || s.p2 == p || s.p3 == p || s.p4 == p)) isUsed = true; // <--- NEW
         else if (s is CompassXSpline && (s.nodes.any((n) => n.point == p) || s.anchorPoint == p)) isUsed = true;
         else if (s is CompassMesh && (s.containsNode(p) || s.anchorPoint == p)) isUsed = true;
         
@@ -463,12 +452,6 @@ class CompassEngine extends ChangeNotifier {
   // ===========================================================================
   // HIERARCHY Z-ORDER ACTIONS (Delegated to hierarchy_ops.dart)
   // ===========================================================================
-  // Thin pass-throughs to HierarchyOps, parallel to the ShapeConverter block
-  // above. Each indexed argument is a MODEL index (into engine.layers /
-  // layer.shapes) and means the FINAL index the moved item should occupy -- the
-  // panel converts its reversed visual indices to model indices before calling.
-  // See hierarchy_ops.dart for the full index contract and the panel conversion
-  // recipe. HierarchyOps owns the snapshot + notify, so these add nothing.
 
   void reorderLayer(int from, int to) {
     HierarchyOps.reorderLayer(this, from, to);
@@ -491,9 +474,6 @@ class CompassEngine extends ChangeNotifier {
   // GRADIENT MESH ENGINE ACTIONS
   // ===========================================================================
 
-  // Reassign one node's color. Routed through saveSnapshot/notify because a color
-  // edit is a discrete, undoable action (unlike a continuous node drag). No-ops if
-  // the point isn't actually one of this mesh's nodes.
   void setMeshNodeColor(CompassMesh mesh, CompassPoint node, Color color) {
     if (mesh.setColorForPoint(node, color)) {
       saveSnapshot();
@@ -501,9 +481,6 @@ class CompassEngine extends ChangeNotifier {
     }
   }
 
-  // Paint a whole selection of nodes at once (the multi-select path). Snapshots a
-  // single undo step for the batch rather than one per node. Points in [nodes]
-  // that don't belong to [mesh] are simply skipped.
   void setMeshSelectedColors(CompassMesh mesh, Set<CompassPoint> nodes, Color color) {
     bool changed = false;
     for (var p in nodes) {
@@ -515,23 +492,6 @@ class CompassEngine extends ChangeNotifier {
     }
   }
 
-  // --- X-KEY SLICING: insert a full row or column into a gradient mesh ---------
-  //
-  // A slice subdivides the lattice by one row or column at a parametric position
-  // [t] within the hovered cell-band (0 = upper/left bounding gridline, 1 =
-  // lower/right, 0.5 = midpoint). The inserted nodes' positions and colors are
-  // interpolated from their neighbors at t -- pure subdivision, so the rendered
-  // gradient is unchanged, it just gains a line of editable handles exactly where
-  // the cursor was. Because CompassMesh's rows/cols are final, we cannot grow the
-  // mesh in place: we build a NEW mesh with the grown dimensions and swap it into
-  // the SAME layer slot, preserving Z-order, boolean operation, visibility, and
-  // the SAME anchor (so rigid-body cohesion and the rotation pivot are untouched).
-  // Existing node points are reused in their new grid slots; only the inserted
-  // line's points are minted, registered in engine.points, listener-wired, and
-  // attached to the anchor -- exactly the contract the rectangle->mesh converter
-  // follows, which is what lets the new nodes participate in selection/
-  // serialization/undo with no special casing.
-
   void insertMeshRow(CompassMesh mesh, int gap, [double t = 0.5]) {
     if (gap < 0 || gap > mesh.rows - 2) return;
     _applyMeshSlice(mesh, mesh.insertRowData(gap, t));
@@ -542,12 +502,7 @@ class CompassEngine extends ChangeNotifier {
     _applyMeshSlice(mesh, mesh.insertColumnData(gap, t));
   }
 
-  // Shared back-end for both slice directions. Consumes the MeshSliceData layout
-  // (row-major, length newRows*newCols, each slot either a reused existing point
-  // or an instruction to mint a new one), produces the new node + color lists,
-  // and swaps a freshly built CompassMesh into the old one's layer position.
   void _applyMeshSlice(CompassMesh mesh, MeshSliceData data) {
-    // Locate the mesh's layer + index so the replacement lands in the same slot.
     CompassLayer? owningLayer;
     int slotIndex = -1;
     for (var layer in layers) {
@@ -562,7 +517,6 @@ class CompassEngine extends ChangeNotifier {
 
     final anchor = mesh.anchorPoint;
 
-    // UPGRADE: List of CompassSplineNode instead of CompassPoint
     final newNodes = List<CompassSplineNode>.filled(
         data.rows * data.cols, mesh.nodes.first,
         growable: false);
@@ -573,11 +527,9 @@ class CompassEngine extends ChangeNotifier {
     for (int i = 0; i < data.rows * data.cols; i++) {
       final existing = data.existing[i];
       if (existing != null) {
-        // Reuse the original node in its new slot; carry its color across.
         newNodes[i] = existing;
         newColors[i] = data.reusedColors[i] ?? const Color(0xFFCCCCCC);
       } else {
-        // Mint the inserted node: register its point, wire listeners, attach to anchor.
         final pos = data.newPositions[i] ?? Offset.zero;
         final np = CompassPoint(x: pos.dx, y: pos.dy);
         points.add(np);
@@ -585,7 +537,6 @@ class CompassEngine extends ChangeNotifier {
         np.y.addListener(notifyListeners);
         if (anchor != null) anchor.attach(np);
 
-        // UPGRADE: Wrap in a CompassSplineNode, inherit tension at 1.0
         final splineNode = CompassSplineNode(point: np, tension: 1.0);
         splineNode.tension.addListener(notifyListeners);
 
@@ -653,17 +604,7 @@ class CompassEngine extends ChangeNotifier {
   // ===========================================================================
   // STROKE-REGION STACK ACTIONS
   // ===========================================================================
-  // A shape owns an ordered list of outward-stacked stroke regions. Region 0 is the
-  // INNERMOST ring (straddling the shape outline); each later region rides OUTWARD
-  // on the previous one's outer edge, and if an inner ring widens the outer ones
-  // ride along. A stroke is binary: it either FILLS (add -- paints a ring, may have
-  // its own color) or CUTS (subtract -- carves the geometry beneath, paints
-  // nothing). These mutators are the only way the UI edits the list; each snapshots
-  // (undoable) and notifies (live reflow).
 
-  // Append a new region as the new OUTERMOST ring. Defaults to a FILL (add) of width
-  // 8 -- a painted ring that shows its color chip immediately. Flip it to a cut in
-  // the row toggle to carve instead. Called by the layers-panel "+ Add Stroke".
   void addStrokeRegion(CompassShape shape,
       {CompassBooleanOp op = CompassBooleanOp.add, double width = 8.0}) {
     shape.strokeRegions.add(StrokeRegion(op: op, width: width));
@@ -671,8 +612,6 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Remove the region at [index] from the stack. Removing the last region returns
-  // the shape to no-stroke. Out-of-range indices no-op.
   void removeStrokeRegion(CompassShape shape, int index) {
     if (index < 0 || index >= shape.strokeRegions.length) return;
     shape.strokeRegions.removeAt(index);
@@ -680,9 +619,6 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Set the op of the region at [index]. For a stroke this is binary in the UI --
-  // add (FILL) or subtract (CUT). `none`/`intersect` are not offered for strokes but
-  // are tolerated as harmless if ever passed. Out-of-range indices no-op.
   void setStrokeRegionOp(CompassShape shape, int index, CompassBooleanOp op) {
     if (index < 0 || index >= shape.strokeRegions.length) return;
     shape.strokeRegions[index].op = op;
@@ -690,12 +626,6 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Move the region at [index] by [delta] positions in the stack (delta -1 = one
-  // step INWARD toward index 0, +1 = one step OUTWARD). This is how a cut ring is
-  // restacked to sit on top of (outside) the fill rings, or fills are reordered.
-  // Because the bands stack outward by list order, reordering changes each ring's
-  // radius and where a cut bites. No-ops if either the source or target index is
-  // out of range (so the ends clamp naturally).
   void moveStrokeRegion(CompassShape shape, int index, int delta) {
     final list = shape.strokeRegions;
     final target = index + delta;
@@ -707,12 +637,6 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Set the width of the region at [index]. This is what the Properties-panel
-  // per-stroke sliders drive: dragging one reflows that band (and every band
-  // stacked outside it, since the outward cursor depends on each width) live via
-  // notifyListeners. Snapshots so the change round-trips through undo. Non-positive
-  // widths are clamped to a tiny epsilon so a band never inverts. Out-of-range
-  // indices no-op.
   void setStrokeRegionWidth(CompassShape shape, int index, double width) {
     if (index < 0 || index >= shape.strokeRegions.length) return;
     shape.strokeRegions[index].width = width <= 0 ? 0.01 : width;
@@ -720,11 +644,6 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Set the fill color of the region at [index]. Only a FILL (add) ring paints, so
-  // this is meaningful only for fill rings -- but the value is stored regardless, so
-  // flipping a cut ring back to fill restores its color with no re-pick. Passing
-  // [color] = null reverts the ring to inheriting the owning layer's fill color.
-  // Discrete and undoable, so it snapshots. Out-of-range indices no-op.
   void setStrokeRegionColor(CompassShape shape, int index, Color? color) {
     if (index < 0 || index >= shape.strokeRegions.length) return;
     shape.strokeRegions[index].color = color;
@@ -791,12 +710,10 @@ class CompassEngine extends ChangeNotifier {
   void _spliceNodeIntoSpline(CompassXSpline spline, CompassPoint p, int index, double t) {
     final node = CompassSplineNode(point: p);
     
-    // Ensure all properties trigger a canvas repaint when modified
     node.tension.addListener(notifyListeners);
     node.widthLeft.addListener(notifyListeners);
     node.widthRight.addListener(notifyListeners);
 
-    // De Casteljau exact subdivision for Bezier curves
     if ((index > 0 && index < spline.nodes.length) || (spline.isClosed && index == spline.nodes.length)) {
       final prevIdx = index - 1;
       final nextIdx = index == spline.nodes.length ? 0 : index;
@@ -804,7 +721,6 @@ class CompassEngine extends ChangeNotifier {
       final prevNode = spline.nodes[prevIdx];
       final nextNode = spline.nodes[nextIdx];
 
-      // Interpolate the variable width using parameter `t` to prevent the stroke from pinching to 0
       node.widthLeft.value = prevNode.widthLeft.value * (1.0 - t) + nextNode.widthLeft.value * t;
       node.widthRight.value = prevNode.widthRight.value * (1.0 - t) + nextNode.widthRight.value * t;
 
@@ -818,17 +734,13 @@ class CompassEngine extends ChangeNotifier {
       final p1 = p0 + hOut;
       final p2 = p3 + hIn;
 
-      // 1st order
       final m0 = Offset.lerp(p0, p1, t)!;
       final m1 = Offset.lerp(p1, p2, t)!;
       final m2 = Offset.lerp(p2, p3, t)!;
-      // 2nd order
       final r0 = Offset.lerp(m0, m1, t)!;
       final r1 = Offset.lerp(m1, m2, t)!;
-      // 3rd order (Point on curve)
       final bPt = Offset.lerp(r0, r1, t)!;
 
-      // Force the new point to snap exactly to the mathematical split
       p.x.value = bPt.dx;
       p.y.value = bPt.dy;
 
@@ -1195,15 +1107,6 @@ class CompassEngine extends ChangeNotifier {
   }
 
   void removePoint(CompassPoint p) {
-    // A mesh is a rigid rows x cols lattice: deleting any single node would leave
-    // a hole the bilinear grid can't represent. So deleting a mesh node deletes
-    // the WHOLE mesh, routed through removeShape -- which batch-GCs every node and
-    // the anchor together (the grid can be large; the spline-collapse path below
-    // only detaches, which would strand all the other nodes as dead points). We
-    // detect ownership before the generic removeWhere and delegate, then return:
-    // removeShape already snapshots, notifies, and clears selection. (If several
-    // nodes of the same mesh are deleted in one pass, the first call removes the
-    // mesh and GCs the rest, so later calls simply find nothing and no-op.)
     for (var layer in layers) {
       for (var s in layer.shapes) {
         if (s is CompassMesh && (s.containsNode(p) || s.anchorPoint == p)) {
@@ -1223,6 +1126,9 @@ class CompassEngine extends ChangeNotifier {
           return shape.center == p || shape.startPoint == p;
         } else if (shape is CompassRectangle) {
           return shape.p1 == p || shape.p2 == p;
+        } else if (shape is CompassRhombus) {
+          // <--- NEW: Rhombus GC
+          return shape.p1 == p || shape.p2 == p || shape.p3 == p || shape.p4 == p;
         } else if (shape is CompassXSpline) {
           shape.nodes.removeWhere((n) => n.point == p);
           if (shape.nodes.length < 2) {
@@ -1293,12 +1199,6 @@ class CompassEngine extends ChangeNotifier {
     return false;
   }
 
-  // The free "rider" point a host-rider constraint binds onto its host shape --
-  // the point created via "Add Point to Shape". removeShape uses this to fold a
-  // deleted shape's riders into the GC batch so they die with the shape instead of
-  // lingering, and so they don't falsely keep the host's structural points alive.
-  // Returns null for constraint kinds with no such rider (there are none today,
-  // but this keeps the switch total if more constraints are added later).
   CompassPoint? _constraintRider(CompassConstraint c) {
     if (c is PointOnLineConstraint) return c.point;
     if (c is PointOnCircleConstraint) return c.point;

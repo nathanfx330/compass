@@ -1,9 +1,11 @@
+// lib/ui/panels/properties_panel.dart
+
 import 'package:flutter/material.dart';
 import '../../engine.dart';
-import '../../models/geometry/shape.dart';  // <--- StrokeRegion + CompassBooleanOp
-import '../../models/geometry/circle.dart'; // <--- stroke-region capable shape
+import '../../models/geometry/shape.dart';  
+import '../../models/geometry/circle.dart'; 
 import '../../models/geometry/spline.dart';
-import '../../models/geometry/mesh.dart'; // <--- NEW: Import mesh model
+import '../../models/geometry/mesh.dart'; 
 import '../widgets/compass_color_picker.dart';
 
 class PropertiesPanel extends StatefulWidget {
@@ -185,17 +187,6 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
               ),
 
               // --- STROKE REGIONS SECTION (outward-stacked per-shape stroke stack) ---
-              // Appears when a stroke-capable shape (circle today) is selected AND it
-              // has at least one stroke region. One slider per region, innermost
-              // first, each driving that region's width live. The list is rebuilt
-              // every frame inside the ListenableBuilder, so adding/removing a stroke
-              // in the layers panel makes a slider appear/disappear here on the next
-              // notify -- the dynamic accumulation. Each region's op shows as a small
-              // colored label so it's clear which band a slider controls. Region 0
-              // straddles the outline; each later band stacks outward, so dragging an
-              // inner slider also shifts every band outside it (the layer's outward
-              // cursor depends on each width). Widths are NOT capped to the layer
-              // stroke slider -- a stroke region carries its own independent width.
               if (selectedShape is CompassCircle &&
                   selectedShape.strokeRegions.isNotEmpty) ...[
                 const SizedBox(height: 24),
@@ -222,9 +213,6 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
 
                 ...List.generate(selectedShape.strokeRegions.length, (i) {
                   final region = selectedShape.strokeRegions[i];
-                  // Clamp the displayed slider value into the slider's range so a
-                  // width set larger than the max (e.g. via a future text entry)
-                  // can't throw; the model keeps the true value.
                   final double sliderVal = region.width.clamp(0.0, 100.0);
                   return Padding(
                     padding: const EdgeInsets.only(top: 8.0),
@@ -241,7 +229,6 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            // Op label, colored, so a slider is tied to its band's role.
                             Text(
                               region.op.name.toUpperCase(),
                               style: TextStyle(
@@ -279,14 +266,88 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                 const SizedBox(height: 24),
                 const Divider(),
                 const SizedBox(height: 24),
-                
+
+                // --- Corner Pulley properties (round + miter) ---
+                if (widget.engine.selectedPoints.isNotEmpty) ...[
+                  Builder(
+                    builder: (context) {
+                      // Look for any active constraints on the currently selected nodes
+                      CompassSplineNode? activeCircleConstraint;
+                      CompassSplineNode? activeMiterConstraint;
+                      
+                      for (var node in selectedShape.nodes) {
+                        if (widget.engine.selectedPoints.contains(node.point)) {
+                          if (node.cornerRadius.value > 0.01) {
+                            activeCircleConstraint = node;
+                          } else if (node.miterSize.value > 0.01) {
+                            activeMiterConstraint = node;
+                          }
+                        }
+                      }
+                      
+                      if (activeCircleConstraint == null && activeMiterConstraint == null) {
+                        return const SizedBox.shrink();
+                      }
+
+                      final bool isCircle = activeCircleConstraint != null;
+                      final node = isCircle ? activeCircleConstraint! : activeMiterConstraint!;
+                      final double val = isCircle ? node.cornerRadius.value : node.miterSize.value;
+
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isCircle ? 'Circular Pulley Size' : 'Miter Pulley Size',
+                            style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Icon(
+                                isCircle ? Icons.radio_button_unchecked : Icons.square_foot, 
+                                size: 16, 
+                                color: isCircle ? Colors.lightBlueAccent : Colors.deepOrangeAccent
+                              ),
+                              const SizedBox(width: 8),
+                              Text(val.toStringAsFixed(1), style: const TextStyle(fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                          Slider(
+                            value: val.clamp(0.0, 500.0),
+                            min: 0.0,
+                            max: 500.0,
+                            activeColor: isCircle ? Colors.lightBlueAccent : Colors.deepOrangeAccent,
+                            onChanged: (newValue) {
+                              if (isCircle) {
+                                for (var n in selectedShape.nodes) {
+                                  if (widget.engine.selectedPoints.contains(n.point) && n.cornerRadius.value > 0) {
+                                    n.cornerRadius.value = newValue;
+                                  }
+                                }
+                              } else {
+                                for (var n in selectedShape.nodes) {
+                                  if (widget.engine.selectedPoints.contains(n.point) && n.miterSize.value > 0) {
+                                    n.miterSize.value = newValue;
+                                  }
+                                }
+                              }
+                            },
+                          ),
+                          const SizedBox(height: 24),
+                          const Divider(),
+                          const SizedBox(height: 24),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+
                 Text(
                   'Area Stroke Profile',
                   style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 16),
 
-                // Vertex Numbering Toggle
                 Container(
                   decoration: BoxDecoration(
                     color: theme.colorScheme.primary.withOpacity(0.1),
@@ -306,7 +367,6 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                 ),
                 const SizedBox(height: 16),
 
-                // Uniform Width
                 Text(
                   'Uniform Width',
                   style: theme.textTheme.titleSmall?.copyWith(color: theme.textTheme.bodySmall?.color),
@@ -338,7 +398,6 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
 
                 const SizedBox(height: 20),
 
-                // Taper Width
                 Text(
                   'Taper Width',
                   style: theme.textTheme.titleSmall?.copyWith(color: theme.textTheme.bodySmall?.color),
@@ -390,7 +449,7 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                 const SizedBox(height: 24),
               ],
 
-              // --- NEW: GRADIENT MESH SWATCHES ---
+              // --- GRADIENT MESH SWATCHES ---
               if (selectedShape is CompassMesh) ...[
                 const SizedBox(height: 24),
                 const Divider(),
@@ -431,7 +490,6 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                       );
                     }),
                     
-                    // Allows adding a completely new color directly to selected nodes
                     _buildCustomSwatch(
                       context: context,
                       currentColor: Colors.transparent,
@@ -492,13 +550,6 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
     );
   }
 
-  // The "Custom…" chip. It opens the pure-Dart HSV picker and applies whatever
-  // comes back via onPicked. When an off-palette color is active, the chip wears
-  // that exact color (so there's always a live swatch of what's selected, even
-  // for a value that isn't in the preset row) and takes the selected ring; the
-  // eyedropper icon flips black/white against the color's luminance so it stays
-  // legible. When no custom color is active it sits neutral with a primary-tinted
-  // icon, reading as an affordance to open the picker.
   Widget _buildCustomSwatch({
     required BuildContext context,
     required Color currentColor,
@@ -515,15 +566,10 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
       message: 'Custom color…',
       child: GestureDetector(
         onTap: () async {
-          // A transparent ("None") starting point opens the picker at black
-          // rather than at a fully-transparent color, since the picker is
-          // opaque-only and "give this a color" wants a visible default.
           final initial =
               currentColor == Colors.transparent ? Colors.black : currentColor;
           final picked =
               await showCompassColorPicker(context, initialColor: initial);
-          // onPicked only touches the engine, never context, so it's safe across
-          // the await without a mounted guard.
           if (picked != null) onPicked(picked);
         },
         child: Container(

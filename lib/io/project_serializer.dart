@@ -13,7 +13,7 @@ import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
 import '../models/geometry/rectangle.dart';
-import '../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
+import '../models/geometry/mesh.dart';
 import '../models/layer.dart';
 
 class ProjectSerializer {
@@ -164,21 +164,23 @@ class ProjectSerializer {
           }).join('|');
           buffer.writeln('SHAPE,MESH,${layer.id},${shape.operation.name},${shape.isVisible},${shape.rows},${shape.cols},${shape.anchorPoint?.id ?? ""},$nodesStr$strk');
         } else if (shape is CompassXSpline) {
-          // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR:pinL:pinR:cornerRadius
-          // when the node carries explicit Bezier handles, variable width, width pins, or corner radius. 
-          // "null" is used for handles that remain fluid, preserving Catmull-Rom math.
+          // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR:pinL:pinR:cornerRadius:miterSize
+          // when the node carries explicit Bezier handles, variable width, width pins, corner radius, or miter pulley. 
+          // "null" is used for handles that remain fluid, preserving Catmull-Rom math. The 12th slot (formerly the
+          // "rhombus" size) is now the miter-pulley size; the on-disk position is unchanged, so old files still load.
           final nodesStr = shape.nodes.map((n) {
             final hasHandles = n.handleIn != null || n.handleOut != null;
             final hasWidth = n.widthLeft.value > 0.001 || n.widthRight.value > 0.001;
             final hasPins = n.isLeftWidthPinned || n.isRightWidthPinned;
             final hasCorner = n.cornerRadius.value > 0.01;
+            final hasMiter = n.miterSize.value > 0.01;
 
-            if (hasHandles || hasWidth || hasPins || hasCorner) {
+            if (hasHandles || hasWidth || hasPins || hasCorner || hasMiter) {
               final hIX = n.handleIn?.dx.toString() ?? 'null';
               final hIY = n.handleIn?.dy.toString() ?? 'null';
               final hOX = n.handleOut?.dx.toString() ?? 'null';
               final hOY = n.handleOut?.dy.toString() ?? 'null';
-              return '${n.point.id}:${n.tension.value}:$hIX:$hIY:$hOX:$hOY:${n.widthLeft.value}:${n.widthRight.value}:${n.isLeftWidthPinned}:${n.isRightWidthPinned}:${n.cornerRadius.value}';
+              return '${n.point.id}:${n.tension.value}:$hIX:$hIY:$hOX:$hOY:${n.widthLeft.value}:${n.widthRight.value}:${n.isLeftWidthPinned}:${n.isRightWidthPinned}:${n.cornerRadius.value}:${n.miterSize.value}';
             }
             return '${n.point.id}:${n.tension.value}';
           }).join('|');
@@ -490,7 +492,8 @@ class ProjectSerializer {
                   double wR = 0.0;
                   bool pinL = false;
                   bool pinR = false;
-                  double cR = 0.0; // <--- NEW: Corner Radius Default
+                  double cR = 0.0; 
+                  double mS = 0.0; // Miter pulley size (slot 11; was "rhombus size")
                   
                   if (np.length == 4) { // Legacy symmetric fallback
                     final hx = double.tryParse(np[2]) ?? 0.0;
@@ -512,8 +515,11 @@ class ProjectSerializer {
                       pinL = np[8] == 'true';
                       pinR = np[9] == 'true';
                     }
-                    if (np.length >= 11) { // <--- NEW: Persistent Corner Radius
+                    if (np.length >= 11) { // Persistent Corner Radius
                       cR = double.tryParse(np[10]) ?? 0.0;
+                    }
+                    if (np.length >= 12) { // Miter pulley size (old files: rhombus size)
+                      mS = double.tryParse(np[11]) ?? 0.0;
                     }
                   }
                   
@@ -526,12 +532,14 @@ class ProjectSerializer {
                     widthRight: wR,
                     isLeftWidthPinned: pinL,
                     isRightWidthPinned: pinR,
-                    cornerRadius: cR, // <--- NEW
+                    cornerRadius: cR, 
+                    miterSize: mS,
                   );
                   node.tension.addListener(onUpdate); 
                   node.widthLeft.addListener(onUpdate);
                   node.widthRight.addListener(onUpdate);
-                  node.cornerRadius.addListener(onUpdate); // <--- NEW
+                  node.cornerRadius.addListener(onUpdate); 
+                  node.miterSize.addListener(onUpdate);
                   
                   spline.addNode(node);
                 } else {

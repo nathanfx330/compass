@@ -18,7 +18,8 @@ import 'canvas_keyboard_handler.dart';
 import 'canvas_gesture_handler.dart'; // <--- NEW: Extracted Gestures
 
 // Defines the current interaction mode for the canvas
-enum CompassTool { select, addPoint, addLine, addCircle, addSpiral, addPen, addRect } 
+// <--- NEW: Added addRhombus --->
+enum CompassTool { select, addPoint, addLine, addCircle, addSpiral, addPen, addRect, addRhombus } 
 
 class CanvasController extends ChangeNotifier {
   final CompassEngine engine;

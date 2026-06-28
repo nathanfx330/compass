@@ -1,4 +1,5 @@
-// /lib/models/geometry/spline.dart
+// lib/models/geometry/spline.dart
+
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'point.dart';
@@ -17,30 +18,19 @@ typedef FilletData = ({
 
 class CompassSplineNode {
   final CompassPoint point;
-  // 0.0 means a perfectly sharp linear corner. 1.0 means a fully smooth Catmull-Rom curve.
-  // NOTE: tension acts as a master multiplier for ALL handles (Catmull-Rom AND Explicit).
   final ValueNotifier<double> tension;
 
-  // Dual independent handles. 
-  // handleIn is the offset FROM the point TO the incoming control point.
-  // handleOut is the offset FROM the point TO the outgoing control point.
-  //
-  // Explicit handles OVERRIDE the neighbor-derived Catmull-Rom tangent, letting us 
-  // express mathematically exact geometry (e.g. true circular-arc subdivisions).
   Offset? handleIn;
   Offset? handleOut;
 
-  // Variable width properties for calligraphy / first-class area strokes.
-  // Represents the physical distance pushed out along the normal vector.
   final ValueNotifier<double> widthLeft;
   final ValueNotifier<double> widthRight;
 
-  // Width Constraint Flags
   bool isLeftWidthPinned;
   bool isRightWidthPinned;
 
-  // Persistent Corner Radius (Live Pulley/Wrap Constraint)
   final ValueNotifier<double> cornerRadius;
+  final ValueNotifier<double> miterSize;
 
   CompassSplineNode({
     required this.point, 
@@ -52,14 +42,14 @@ class CompassSplineNode {
     this.isLeftWidthPinned = false,
     this.isRightWidthPinned = false,
     double cornerRadius = 0.0,
+    double miterSize = 0.0,
   }) : tension = ValueNotifier(tension),
        widthLeft = ValueNotifier(widthLeft),
        widthRight = ValueNotifier(widthRight),
-       cornerRadius = ValueNotifier(cornerRadius);
+       cornerRadius = ValueNotifier(cornerRadius),
+       miterSize = ValueNotifier(miterSize);
 }
 
-// Virtual nodes generated purely for rendering and path generation.
-// This allows us to draw fillets and pulleys non-destructively while preserving structural points.
 class ResolvedSplineNode {
   final Offset point;
   Offset hIn;
@@ -79,8 +69,6 @@ class ResolvedSplineNode {
 class CompassXSpline extends CompassShape {
   final List<CompassSplineNode> nodes = [];
   bool isClosed;
-  
-  // Optional anchor point to represent the mathematical center for rigid body constraints
   CompassPoint? anchorPoint;
 
   CompassXSpline({this.isClosed = false, this.anchorPoint, super.operation, super.isVisible});
@@ -89,10 +77,8 @@ class CompassXSpline extends CompassShape {
     nodes.add(node);
   }
 
-  // Returns true if any node has a width applied, triggering the area-stroke math
   bool get hasWidthProfile => nodes.any((n) => n.widthLeft.value > 0.01 || n.widthRight.value > 0.01);
 
-  // Note: This remains untouched for the destructive 'F' key tool.
   FilletData? computeFillet(CompassSplineNode node, double cutDistance) {
     int index = nodes.indexOf(node);
     if (index == -1) return null;
@@ -270,8 +256,7 @@ class CompassXSpline extends CompassShape {
     return controls;
   }
 
-  // --- UPDATED: Dynamic Pulley / String-Wrapping Evaluation ---
-  // Transforms constraint corners into pure, tangent-wrapping circular arcs.
+  // --- Dynamic Pulley Constraints: round (cornerRadius) and sharp/miter (miterSize) ---
   List<ResolvedSplineNode> getResolvedNodes() {
     final controls = getEvaluatedControls();
     final n = nodes.length;
@@ -289,11 +274,11 @@ class CompassXSpline extends CompassShape {
 
     for(int i = 0; i < n; i++) {
        final node = nodes[i];
-       final r = node.cornerRadius.value;
        
-       if (r <= 0.01 || (!isClosed && (i == 0 || i == n - 1))) {
-          result.add(resolvedBase[i]);
-       } else {
+       if (node.cornerRadius.value > 0.01 && (isClosed || (i > 0 && i < n - 1))) {
+          // ==============================
+          // CIRCULAR PULLEY (Round Wrap)
+          // ==============================
           int prevIdx = (i - 1 + n) % n;
           int nextIdx = (i + 1) % n;
           Offset pPrev = resolvedBase[prevIdx].point;
@@ -310,20 +295,16 @@ class CompassXSpline extends CompassShape {
              continue;
           }
 
-          double R = r;
-          // Clamp R so the wrap doesn't extend past the adjacent control points
+          double R = node.cornerRadius.value;
           double maxR = min(dA, dC) * 0.99;
           if (R > maxR) R = maxR;
 
-          // Angles of the incoming and outgoing segments
           double thetaA = atan2(vA.dy, vA.dx);
           double thetaC = atan2(vC.dy, vC.dx);
 
-          // The offset angle from the center line to the tangent point on the circle
           double betaA = acos((R / dA).clamp(-1.0, 1.0));
           double betaC = acos((R / dC).clamp(-1.0, 1.0));
 
-          // Cross product determines which way the string wraps around the peg
           double Z = vA.dx * vC.dy - vA.dy * vC.dx;
           double S = Z > 0 ? 1.0 : -1.0;
 
@@ -337,42 +318,141 @@ class CompassXSpline extends CompassShape {
             while (delta < 0) delta += 2 * pi;
           }
 
-          // Subdivide the arc into <= 90 degree Bezier curves for mathematical perfection
-          int N = (delta.abs() / (pi / 2)).ceil();
-          if (N < 1) N = 1;
-          double step = delta / N;
+          int N_arcs = (delta.abs() / (pi / 2)).ceil();
+          if (N_arcs < 1) N_arcs = 1;
+          double step = delta / N_arcs;
           double L = (4.0 / 3.0) * tan(step.abs() / 4.0) * R;
 
           List<ResolvedSplineNode> arcNodes = [];
-          for (int k = 0; k <= N; k++) {
+          for (int k = 0; k <= N_arcs; k++) {
             double angle = phiA + k * step;
             Offset pt = pCurr + Offset(R * cos(angle), R * sin(angle));
-            
             Offset tangentDir = Offset(-sin(angle), cos(angle)) * (step > 0 ? 1.0 : -1.0);
             
             Offset hIn = k == 0 ? Offset.zero : -tangentDir * L;
-            Offset hOut = k == N ? Offset.zero : tangentDir * L;
+            Offset hOut = k == N_arcs ? Offset.zero : tangentDir * L;
 
             arcNodes.add(ResolvedSplineNode(
-              point: pt,
-              hIn: hIn,
-              hOut: hOut,
-              widthLeft: node.widthLeft.value,
-              widthRight: node.widthRight.value,
+              point: pt, hIn: hIn, hOut: hOut,
+              widthLeft: node.widthLeft.value, widthRight: node.widthRight.value,
             ));
           }
 
-          // Force the approaching segments to be perfectly straight/taut strings 
-          // before they touch the circle tangent.
           if (result.isNotEmpty) {
              result.last.hOut = Offset.zero;
           } else if (isClosed) {
              resolvedBase[prevIdx].hOut = Offset.zero;
           }
-
           resolvedBase[nextIdx].hIn = Offset.zero;
 
           result.addAll(arcNodes);
+          
+       } else if (node.miterSize.value > 0.01 && (isClosed || (i > 0 && i < n - 1))) {
+          // ============================================================
+          // MITER PULLEY  (Sharp Wrap)
+          // ============================================================
+          // This is the circular pulley above with the round arc replaced
+          // by a single SHARP apex. The rope still WRAPS around the OUTSIDE
+          // of the corner -- it is not a cut into the shape -- it just comes
+          // to a point instead of a curve.
+          //
+          // The tangent construction is byte-for-byte the circular pulley's
+          // (thetaA/thetaC, betaA/betaC, Z/S, phiA/phiC). That is deliberate:
+          // because the round pulley already wraps on the correct (outer)
+          // side, reusing its exact angle math guarantees the sharp version
+          // wraps on the SAME side -- no winding-sign guesswork.
+          //
+          // Geometry: picture a peg of radius R centered on the vertex. The
+          // rope runs tangent to the peg, and the two tangent lines (one from
+          // the incoming edge, one from the outgoing edge) meet at a single
+          // sharp APEX out past the vertex, along the angular bisector of the
+          // two tangent radii, at distance R / cos(halfWrap) -- the standard
+          // miter point of two lines tangent to a circle. Because the apex
+          // lies on BOTH tangent lines and pPrev lies on the first one, the
+          // segment pPrev -> apex IS that tangent line; likewise apex -> pNext.
+          // So a single relocated sharp corner carries the whole wrap -- no
+          // separate tangent-point nodes are needed, and the rope leaves /
+          // rejoins the edges exactly as the round pulley's rope does, pointed.
+          //
+          // As R grows the apex pushes outward and the approach lines deflect,
+          // mirroring the round pulley's behavior.
+          //
+          // NOT YET (next pass, each needs a new node field):
+          //   * SKEW -- lean the apex off the bisector to aim the tip and steer
+          //     the in/out lines.
+          //   * BALLPOINT -- round ONLY the apex (a small arc tangent to the two
+          //     rope segments) so the tip is a rounded nub like a pen body,
+          //     while the sides stay straight.
+          int prevIdx = (i - 1 + n) % n;
+          int nextIdx = (i + 1) % n;
+          Offset pPrev = resolvedBase[prevIdx].point;
+          Offset pCurr = resolvedBase[i].point;
+          Offset pNext = resolvedBase[nextIdx].point;
+
+          Offset vA = pPrev - pCurr;
+          Offset vC = pNext - pCurr;
+          double dA = vA.distance;
+          double dC = vC.distance;
+
+          if (dA < 0.001 || dC < 0.001) {
+             result.add(resolvedBase[i]);
+             continue;
+          }
+
+          double R = node.miterSize.value;
+          double maxR = min(dA, dC) * 0.99;
+          if (R > maxR) R = maxR;
+
+          // --- Tangent construction: IDENTICAL to the circular pulley. ---
+          double thetaA = atan2(vA.dy, vA.dx);
+          double thetaC = atan2(vC.dy, vC.dx);
+
+          double betaA = acos((R / dA).clamp(-1.0, 1.0));
+          double betaC = acos((R / dC).clamp(-1.0, 1.0));
+
+          double Z = vA.dx * vC.dy - vA.dy * vC.dx;
+          double S = Z > 0 ? 1.0 : -1.0;
+
+          double phiA = thetaA - S * betaA;
+          double phiC = thetaC + S * betaC;
+
+          double delta = phiC - phiA;
+          if (S > 0) {
+            while (delta > 0) delta -= 2 * pi;
+          } else {
+            while (delta < 0) delta += 2 * pi;
+          }
+
+          // Bisector of the two tangent radii + miter distance R / cos(halfWrap)
+          // = the sharp apex. Guard the cosine so a near-hairpin corner (wrap
+          // approaching 180 degrees) can't shoot the apex to infinity -- cap the
+          // miter length instead of dividing by ~0.
+          double phiMid = phiA + delta / 2.0;
+          double halfWrap = delta.abs() / 2.0;
+          double cosHalf = cos(halfWrap);
+          double mitreLen = cosHalf < 0.05 ? R * 20.0 : R / cosHalf;
+
+          final Offset apex =
+              pCurr + Offset(cos(phiMid), sin(phiMid)) * mitreLen;
+
+          // Straight rope into and out of the sharp apex (mirrors the circular
+          // pulley's handle zeroing): kill the previous node's hOut, the next
+          // base node's hIn, and give the apex no handles so the tip is sharp.
+          if (result.isNotEmpty) {
+             result.last.hOut = Offset.zero;
+          } else if (isClosed) {
+             resolvedBase[prevIdx].hOut = Offset.zero;
+          }
+          resolvedBase[nextIdx].hIn = Offset.zero;
+
+          result.add(ResolvedSplineNode(
+            point: apex, hIn: Offset.zero, hOut: Offset.zero,
+            widthLeft: node.widthLeft.value, widthRight: node.widthRight.value,
+          ));
+          
+       } else {
+          // Standard fluid vertex
+          result.add(resolvedBase[i]);
        }
     }
 

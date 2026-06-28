@@ -15,7 +15,7 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
-import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
+import '../../models/geometry/mesh.dart';
 
 import 'canvas_controller.dart';
 import 'canvas_geometry.dart';
@@ -157,8 +157,6 @@ class CanvasGestureHandler {
       controller.setupRotationState(hierarchy: controller.isShiftRPressed, handlesOnly: controller.isCtrlRPressed);
     }
 
-    // --- UPGRADE: A KEY NOW TARGETS MESH NODES AS WELL ---
-    // Fixed: Only test for a new hover target if we are NOT currently dragging a node.
     if (controller.isAPressed && controller.targetTensionNode == null && controller.hoveredPoint != null && controller.activeTensionNode == null) {
       for (var layer in engine.layers) {
         if (!layer.isVisible || layer.isLocked) continue; 
@@ -387,7 +385,7 @@ class CanvasGestureHandler {
           for (var shape in layer.shapes.reversed) {
             if (!shape.isVisible) continue;
             if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; } 
-            else if (shape is CompassMesh && (shape.containsNode(hitPoint!) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
+            else if (shape is CompassMesh && (shape.containsNode(hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
             else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) { ownerShape = shape; break; } 
             else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; } 
             else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) { ownerShape = shape; break; } 
@@ -775,7 +773,6 @@ class CanvasGestureHandler {
 
     final selForHandles = engine.selectedShape;
 
-    // --- NEW: Corner Circle Hit Testing ---
     if (selForHandles is CompassXSpline && showScaffolding && 
         !controller.isShiftPressed && !controller.isRPressed && !controller.isAPressed) {
       
@@ -786,7 +783,18 @@ class CanvasGestureHandler {
           final distToCenter = (logicalPosition - pt).distance;
           final distToRim = (distToCenter - node.cornerRadius.value).abs();
           
-          // If the user grabs the rim of the constraint circle
+          if (distToRim < handleThreshold) {
+            // Both pulley constraints reuse this exact same controller slot to drag their scale
+            controller.activeCornerCircleNode = node;
+            controller.notifyListeners();
+            return;
+          }
+        } else if (node.miterSize.value > 0.01) {
+          // Miter pulley rim hit-test (same drag slot as the round pulley)
+          final pt = Offset(node.point.x.value, node.point.y.value);
+          final distToCenter = (logicalPosition - pt).distance;
+          final distToRim = (distToCenter - node.miterSize.value).abs();
+          
           if (distToRim < handleThreshold) {
             controller.activeCornerCircleNode = node;
             controller.notifyListeners();
@@ -859,7 +867,6 @@ class CanvasGestureHandler {
       }
     }
 
-    // --- Width Handle Hit Testing (W Key) ---
     if (selForHandles is CompassXSpline && showScaffolding && showHandles && controller.isWPressed) {
       final handleThreshold = 24.0 / controller.canvasScale;
       for (var node in selForHandles.nodes) {
@@ -898,7 +905,6 @@ class CanvasGestureHandler {
       }
     }
 
-    // Explicit Bezier Handles hit test
     if (selForHandles is CompassXSpline && showScaffolding && showHandles && 
         !controller.isShiftPressed && !controller.isRPressed && !controller.isShiftRPressed && !controller.isCtrlRPressed && !controller.isAPressed && !controller.isFPressed && !controller.isWPressed && !controller.isZPressed && !controller.isShiftZPressed) {
       final handleThreshold = 24.0 / controller.canvasScale;
@@ -925,7 +931,6 @@ class CanvasGestureHandler {
       }
     }
 
-    // --- UPGRADE: A KEY TARGETS MESH NODES AS WELL ---
     if (showScaffolding) {
        if (selForHandles is CompassXSpline) {
          for (var node in selForHandles.nodes) {
@@ -994,14 +999,17 @@ class CanvasGestureHandler {
     final dx = logicalPosition.dx - controller.lastPanPosition!.dx;
     final dy = logicalPosition.dy - controller.lastPanPosition!.dy;
 
-    // --- NEW: Scale Corner Circle ---
     if (controller.activeCornerCircleNode != null) {
       final node = controller.activeCornerCircleNode!;
       final pt = Offset(node.point.x.value, node.point.y.value);
       
-      // The radius is strictly the distance from the point to the mouse
       final newRadius = (logicalPosition - pt).distance;
-      node.cornerRadius.value = max(1.0, newRadius); // Prevent it from going to exactly 0 while dragging
+      if (node.cornerRadius.value > 0.01) {
+        node.cornerRadius.value = max(1.0, newRadius); 
+      } else if (node.miterSize.value > 0.01) {
+        // Miter pulley rim drag
+        node.miterSize.value = max(1.0, newRadius); 
+      }
       
       controller.lastPanPosition = logicalPosition;
       return;

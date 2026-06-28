@@ -1,5 +1,6 @@
 // /lib/ui/canvas/compass_renderer.dart
 
+import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../../engine.dart';
@@ -9,11 +10,11 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
-import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
+import '../../models/geometry/mesh.dart'; 
 
 // Import CompassTool from the canvas controller
 import 'canvas_controller.dart';
-import 'renderer_helpers.dart'; // <--- NEW
+import 'renderer_helpers.dart'; 
 
 class CompassRenderer extends CustomPainter {
   final CompassEngine engine;
@@ -241,7 +242,7 @@ class CompassRenderer extends CustomPainter {
             canvas.drawCircle(Offset(shape.center.x.value, shape.center.y.value), shape.radius.value, isSelected ? selectedWireframePaint : wireframePaint);
             if (isSelected && shape.radiusPoint != null) {
               final scaffoldPaint = Paint()..color = Colors.blue.withOpacity(0.5)..strokeWidth = 1.5 * invScale..style = PaintingStyle.stroke;
-              RendererHelpers.drawDashedLine(canvas, Offset(shape.center.x.value, shape.center.y.value), Offset(shape.radiusPoint!.x.value, shape.radiusPoint!.y.value), scaffoldPaint, invScale); // <--- UPDATED
+              RendererHelpers.drawDashedLine(canvas, Offset(shape.center.x.value, shape.center.y.value), Offset(shape.radiusPoint!.x.value, shape.radiusPoint!.y.value), scaffoldPaint, invScale); 
             }
           } else if (shape is CompassRectangle) {
             shape.paint(canvas, isSelected ? selectedWireframePaint : wireframePaint, showScaffolding: true, isSelected: isSelected);
@@ -347,24 +348,110 @@ class CompassRenderer extends CustomPainter {
                
                if (shape.anchorPoint != null && shape.nodes.isNotEmpty) {
                  final scaffoldPaint = Paint()..color = Colors.orangeAccent.withOpacity(0.3)..strokeWidth = 1.0 * invScale..style = PaintingStyle.stroke;
-                 RendererHelpers.drawDashedLine(canvas, Offset(cx, cy), Offset(shape.nodes.first.point.x.value, shape.nodes.first.point.y.value), scaffoldPaint, invScale); // <--- UPDATED
+                 RendererHelpers.drawDashedLine(canvas, Offset(cx, cy), Offset(shape.nodes.first.point.x.value, shape.nodes.first.point.y.value), scaffoldPaint, invScale); 
                }
 
-               // --- NEW: Draw Live Corner Constraint Circles ---
+               // --- Live Corner Pulley Wireframes (round + miter) ---
                final cornerCirclePaint = Paint()
                  ..color = Colors.lightBlueAccent.withOpacity(0.8)
                  ..strokeWidth = 1.5 * invScale
                  ..style = PaintingStyle.stroke;
                  
-               for (var node in shape.nodes) {
+               final cornerMiterPaint = Paint()
+                 ..color = Colors.deepOrangeAccent.withOpacity(0.8)
+                 ..strokeWidth = 1.5 * invScale
+                 ..style = PaintingStyle.stroke;
+
+               // Faint guide for the peg the rope wraps, shared by both pulleys.
+               final pegGuidePaint = Paint()
+                 ..color = Colors.deepOrangeAccent.withOpacity(0.25)
+                 ..strokeWidth = 1.0 * invScale
+                 ..style = PaintingStyle.stroke;
+                 
+               final n = shape.nodes.length;
+               for (int i = 0; i < n; i++) {
+                 final node = shape.nodes[i];
+                 final pt = Offset(node.point.x.value, node.point.y.value);
+                 
                  if (node.cornerRadius.value > 0.01) {
-                   final pt = Offset(node.point.x.value, node.point.y.value);
                    // Draw the persistent constraint circle
                    canvas.drawCircle(pt, node.cornerRadius.value, cornerCirclePaint);
                    
                    // Draw a tiny dot on the rim so the user knows they can drag it
                    final rimDotPaint = Paint()..color = Colors.lightBlueAccent..style = PaintingStyle.fill;
                    canvas.drawCircle(pt + Offset(node.cornerRadius.value, 0), 4.0 * invScale, rimDotPaint);
+                 } 
+                 // --- Miter pulley wireframe: trace the REAL sharp-wrap outline ---
+                 // This mirrors the exact tangent construction in
+                 // CompassXSpline.getResolvedNodes (thetaA/thetaC, betaA/betaC,
+                 // Z/S, phiA/phiC, phiMid, mitreLen) so the wireframe equals the
+                 // rendered tip. We draw the faint peg circle the rope wraps, then
+                 // the two tangent rope segments meeting at the sharp apex, and we
+                 // park the draggable rim dot on the apex itself (the thing being
+                 // sized). The construction needs both neighbors, so an open
+                 // spline's endpoints (which can't carry a pulley anyway) fall back
+                 // to just the peg circle.
+                 else if (node.miterSize.value > 0.01) {
+                   final r = node.miterSize.value;
+
+                   // Faint peg circle (what the rope wraps).
+                   canvas.drawCircle(pt, r, pegGuidePaint);
+
+                   final bool hasNeighbors = shape.isClosed || (i > 0 && i < n - 1);
+                   if (hasNeighbors) {
+                     final prevIdx = (i - 1 + n) % n;
+                     final nextIdx = (i + 1) % n;
+                     final pPrev = Offset(shape.nodes[prevIdx].point.x.value, shape.nodes[prevIdx].point.y.value);
+                     final pNext = Offset(shape.nodes[nextIdx].point.x.value, shape.nodes[nextIdx].point.y.value);
+
+                     final vA = pPrev - pt;
+                     final vC = pNext - pt;
+                     final dA = vA.distance;
+                     final dC = vC.distance;
+
+                     if (dA > 0.001 && dC > 0.001) {
+                       double rr = r;
+                       final maxR = min(dA, dC) * 0.99;
+                       if (rr > maxR) rr = maxR;
+
+                       final thetaA = atan2(vA.dy, vA.dx);
+                       final thetaC = atan2(vC.dy, vC.dx);
+                       final betaA = acos((rr / dA).clamp(-1.0, 1.0));
+                       final betaC = acos((rr / dC).clamp(-1.0, 1.0));
+
+                       final Z = vA.dx * vC.dy - vA.dy * vC.dx;
+                       final S = Z > 0 ? 1.0 : -1.0;
+
+                       final phiA = thetaA - S * betaA;
+                       final phiC = thetaC + S * betaC;
+
+                       double delta = phiC - phiA;
+                       if (S > 0) {
+                         while (delta > 0) delta -= 2 * pi;
+                       } else {
+                         while (delta < 0) delta += 2 * pi;
+                       }
+
+                       final phiMid = phiA + delta / 2.0;
+                       final halfWrap = delta.abs() / 2.0;
+                       final cosHalf = cos(halfWrap);
+                       final mitreLen = cosHalf < 0.05 ? rr * 20.0 : rr / cosHalf;
+
+                       final tangentA = pt + Offset(cos(phiA), sin(phiA)) * rr;
+                       final tangentC = pt + Offset(cos(phiC), sin(phiC)) * rr;
+                       final apex = pt + Offset(cos(phiMid), sin(phiMid)) * mitreLen;
+
+                       final outline = Path()
+                         ..moveTo(tangentA.dx, tangentA.dy)
+                         ..lineTo(apex.dx, apex.dy)
+                         ..lineTo(tangentC.dx, tangentC.dy);
+                       canvas.drawPath(outline, cornerMiterPaint);
+
+                       // Draggable rim dot sits on the apex (the sized point).
+                       final rimDotPaint = Paint()..color = Colors.deepOrangeAccent..style = PaintingStyle.fill;
+                       canvas.drawCircle(apex, 4.0 * invScale, rimDotPaint);
+                     }
+                   }
                  }
                }
 
@@ -401,17 +488,17 @@ class CompassRenderer extends CustomPainter {
 
       // --- WIDTH HANDLES for the selected X-Spline (W KEY) ---
       if (selForHandles is CompassXSpline && showHandles && isWPressed) {
-        RendererHelpers.drawWidthHandles(canvas, selForHandles, invScale, pointBorderColor, activeWidthNode, activeWidthIsLeft); // <--- UPDATED
+        RendererHelpers.drawWidthHandles(canvas, selForHandles, invScale, pointBorderColor, activeWidthNode, activeWidthIsLeft); 
       }
 
       // --- BEZIER HANDLES for the selected X-Spline ---
       if (selForHandles is CompassXSpline && showHandles && !isWPressed) { 
-        RendererHelpers.drawBezierHandles(canvas, selForHandles, invScale, pointBorderColor, activeHandleNode, activeHandleIsOut); // <--- UPDATED
+        RendererHelpers.drawBezierHandles(canvas, selForHandles, invScale, pointBorderColor, activeHandleNode, activeHandleIsOut); 
       }
 
       // --- MULTI-SELECTION BOUNDING BOX ---
       if (selectionBounds != null) {
-        RendererHelpers.drawSelectionBounds(canvas, selectionBounds!, invScale); // <--- UPDATED
+        RendererHelpers.drawSelectionBounds(canvas, selectionBounds!, invScale); 
       }
 
       // --- X-KEY MESH SLICE PREVIEW (dotted imposed line) ---
@@ -455,7 +542,7 @@ class CompassRenderer extends CustomPainter {
 
       // --- F KEY LIVE FILLET PREVIEW ---
       if (isFPressed && activeFilletNode != null && activeFilletSpline != null && activeFilletRadius > 0) {
-        RendererHelpers.drawFilletPreview(canvas, activeFilletSpline!, activeFilletNode!, activeFilletRadius, invScale); // <--- UPDATED
+        RendererHelpers.drawFilletPreview(canvas, activeFilletSpline!, activeFilletNode!, activeFilletRadius, invScale); 
       }
       
       // --- TENSION GUIDE LINE (A KEY) ---
@@ -467,7 +554,7 @@ class CompassRenderer extends CustomPainter {
           ..strokeWidth = 2.0 * invScale
           ..style = PaintingStyle.stroke;
           
-        RendererHelpers.drawDashedLine(canvas, targetOffset, hoverPosition!, tensionPaint, invScale); // <--- UPDATED
+        RendererHelpers.drawDashedLine(canvas, targetOffset, hoverPosition!, tensionPaint, invScale); 
         canvas.drawCircle(targetOffset, 10.0 * invScale, tensionPaint);
       }
       
@@ -481,7 +568,7 @@ class CompassRenderer extends CustomPainter {
             ..strokeWidth = 2.0 * invScale
             ..style = PaintingStyle.stroke;
             
-          RendererHelpers.drawDashedLine(canvas, rotationPivotOffset!, hoverPosition!, rotPaint, invScale); // <--- UPDATED
+          RendererHelpers.drawDashedLine(canvas, rotationPivotOffset!, hoverPosition!, rotPaint, invScale); 
           canvas.drawCircle(rotationPivotOffset!, 8.0 * invScale, rotPaint..style = PaintingStyle.fill);
         }
       }
@@ -500,7 +587,7 @@ class CompassRenderer extends CustomPainter {
         } else if (currentTool == CompassTool.addCircle) {
           final radius = (hoverPosition! - startOffset).distance;
           canvas.drawCircle(startOffset, radius, previewPaint);
-          RendererHelpers.drawDashedLine(canvas, startOffset, hoverPosition!, previewPaint, invScale); // <--- UPDATED
+          RendererHelpers.drawDashedLine(canvas, startOffset, hoverPosition!, previewPaint, invScale); 
         } else if (currentTool == CompassTool.addSpiral) {
           final dummyPoint = CompassPoint(x: hoverPosition!.dx, y: hoverPosition!.dy);
           final dummySpiral = CompassSpiral(center: shapeStartPoint!, startPoint: dummyPoint);

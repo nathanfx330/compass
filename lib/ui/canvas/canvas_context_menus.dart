@@ -10,18 +10,13 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/line.dart';
 import '../../models/geometry/spiral.dart';
-import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
+import '../../models/geometry/mesh.dart'; 
 
-import '../widgets/compass_color_picker.dart'; // <--- NEW: node color picking
+import '../widgets/compass_color_picker.dart'; 
 import '../workspace/dialogs.dart';
 import 'canvas_controller.dart'; 
 
 class CanvasContextMenus {
-  // NOTE: stroke-region authoring lives in the layers panel ("+ Add Stroke" plus
-  // per-region op rows) and the Properties panel (per-stroke width sliders), since
-  // a shape now owns an ordered STACK of stroke regions rather than a single op.
-  // The right-click menu deliberately carries no stroke controls -- a flat single-op
-  // picker here couldn't express the stack and would duplicate the panel UI.
 
   /// Shows the width constraint toggle menu when right-clicking a width handle (W key)
   static Future<void> showWidthConstraintMenu(
@@ -76,10 +71,6 @@ class CanvasContextMenus {
       CompassXSpline? parentSpline;
       CompassSplineNode? clickedNode;
 
-      // Is the clicked point a node of a gradient mesh? Scanned in parallel with
-      // the spline scan below. A mesh node gets a "Set Node Color" action (the
-      // primary way to paint the gradient) but NONE of the spline-specific items
-      // (no close/bezier/fillet), since a mesh node has no handles or curvature.
       CompassMesh? parentMesh;
 
       for (var layer in engine.layers) {
@@ -131,10 +122,15 @@ class CanvasContextMenus {
         }
 
         if (clickedNode != null) {
-          // --- NEW: Live Corner Radius Constraint ---
+          // --- Live Corner Pulley Constraints ---
           pointMenuItems.add(const PopupMenuItem(
             value: 'toggle_corner_circle',
-            child: Text('Bind Corner to Circle (Live Rounding)'),
+            child: Text('Bind Corner to Circle (Round Pulley)'),
+          ));
+          // Miter pulley: same outward wrap, sharp tip instead of round.
+          pointMenuItems.add(const PopupMenuItem(
+            value: 'toggle_corner_miter',
+            child: Text('Bind Corner to Miter (Sharp Pulley)'),
           ));
           pointMenuItems.add(const PopupMenuItem(
             value: 'fillet_corner',
@@ -167,9 +163,6 @@ class CanvasContextMenus {
       );
 
       if (selectedAction == 'set_mesh_color' && parentMesh != null) {
-        // Seed the picker with the node's current color; apply via the engine.
-        // The picker is opaque-only (the SVG exporter drops alpha), which is fine
-        // for mesh colors. onPicked only touches the engine, so it's await-safe.
         final current = parentMesh.colorForPoint(clickedPoint) ?? Colors.grey;
         final picked = await showCompassColorPicker(context, initialColor: current);
         if (picked != null) {
@@ -183,11 +176,24 @@ class CanvasContextMenus {
       } else if (selectedAction == 'convert_to_bezier') {
         engine.convertPointToBezier(clickedPoint);
       } else if (selectedAction == 'toggle_corner_circle' && clickedNode != null) {
-        // --- NEW: Toggle the persistent radius constraint ---
+        // --- Toggle the persistent round-pulley (circular) constraint ---
         if (clickedNode.cornerRadius.value > 0.01) {
            clickedNode.cornerRadius.value = 0.0; // Turn off
         } else {
+           // Turn off the miter pulley if we are turning on the round one
+           clickedNode.miterSize.value = 0.0;
            clickedNode.cornerRadius.value = 30.0 / controller.canvasScale; // Turn on with default size
+        }
+        engine.saveSnapshot();
+        engine.notifyListeners();
+      } else if (selectedAction == 'toggle_corner_miter' && clickedNode != null) {
+        // --- Toggle the persistent miter-pulley (sharp) constraint ---
+        if (clickedNode.miterSize.value > 0.01) {
+           clickedNode.miterSize.value = 0.0; // Turn off
+        } else {
+           // Turn off the round pulley if we are turning on the miter one
+           clickedNode.cornerRadius.value = 0.0;
+           clickedNode.miterSize.value = 30.0 / controller.canvasScale; // Turn on with default size
         }
         engine.saveSnapshot();
         engine.notifyListeners();
@@ -223,8 +229,6 @@ class CanvasContextMenus {
           child: Text(clickedShape.isClosed ? 'Open Spline' : 'Close Spline (Connect Last to First)'),
         ));
       } else if (clickedShape is CompassRectangle) {
-        // A rectangle can become an editable spline OR a gradient mesh. Both are
-        // in-place conversions that preserve Z-order and boolean operation.
         menuItems.insert(6, const PopupMenuItem(
           value: 'convert_to_spline',
           child: Text('Convert to X-Spline'),

@@ -11,7 +11,8 @@ import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
 import '../models/geometry/rectangle.dart';
-import '../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
+import '../models/geometry/rhombus.dart'; // <--- NEW: rhombus
+import '../models/geometry/mesh.dart'; 
 
 class SVGExporter {
   static String sanitizeId(String rawId) {
@@ -148,6 +149,17 @@ class SVGExporter {
            if (minYP < minY) minY = minYP;
            if (maxXP > maxX) maxX = maxXP;
            if (maxYP > maxY) maxY = maxYP;
+        } else if (shape is CompassRhombus) {
+           // <--- NEW: Rhombus Bounds
+           final px1 = shape.p1.x.value; final py1 = shape.p1.y.value;
+           final px2 = shape.p2.x.value; final py2 = shape.p2.y.value;
+           final px3 = shape.p3.x.value; final py3 = shape.p3.y.value;
+           final px4 = shape.p4.x.value; final py4 = shape.p4.y.value;
+           
+           if (min(min(px1, px2), min(px3, px4)) < minX) minX = min(min(px1, px2), min(px3, px4));
+           if (min(min(py1, py2), min(py3, py4)) < minY) minY = min(min(py1, py2), min(py3, py4));
+           if (max(max(px1, px2), max(px3, px4)) > maxX) maxX = max(max(px1, px2), max(px3, px4));
+           if (max(max(py1, py2), max(py3, py4)) > maxY) maxY = max(max(py1, py2), max(py3, py4));
         } else if (shape is CompassXSpline) {
            // A variable-width ribbon bulges past its node points; include its full
            // visual extent so the viewBox can't clip it. Mirrors the PNG exporter.
@@ -253,6 +265,10 @@ class SVGExporter {
           } else if (shape is CompassRectangle) { 
             final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
             buffer.writeln('      <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="black" />');
+          } else if (shape is CompassRhombus) {
+            // <--- NEW: Rhombus Mask logic
+            final pts = '${shape.p1.x.value},${shape.p1.y.value} ${shape.p2.x.value},${shape.p2.y.value} ${shape.p3.x.value},${shape.p3.y.value} ${shape.p4.x.value},${shape.p4.y.value}';
+            buffer.writeln('      <polygon points="$pts" fill="black" />');
           } else if (shape is CompassXSpline) {
             buffer.writeln('      <path d="${shape.getSvgPathData()}" fill="black" fill-rule="evenodd" />');
           }
@@ -304,6 +320,10 @@ class SVGExporter {
         } else if (shape is CompassRectangle) { 
           final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
           buffer.writeln('    <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="$fillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
+        } else if (shape is CompassRhombus) {
+          // <--- NEW: Rhombus normal SVG draw
+          final pts = '${shape.p1.x.value},${shape.p1.y.value} ${shape.p2.x.value},${shape.p2.y.value} ${shape.p3.x.value},${shape.p3.y.value} ${shape.p4.x.value},${shape.p4.y.value}';
+          buffer.writeln('    <polygon points="$pts" fill="$fillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
         } else if (shape is CompassXSpline) {
           // NEW: Distinguish between standard strokes/fills and variable-width Area Strokes
           if (shape.hasWidthProfile) {
