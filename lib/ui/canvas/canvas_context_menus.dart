@@ -17,6 +17,12 @@ import '../workspace/dialogs.dart';
 import 'canvas_controller.dart'; 
 
 class CanvasContextMenus {
+  // NOTE: stroke-region authoring lives in the layers panel ("+ Add Stroke" plus
+  // per-region op rows) and the Properties panel (per-stroke width sliders), since
+  // a shape now owns an ordered STACK of stroke regions rather than a single op.
+  // The right-click menu deliberately carries no stroke controls -- a flat single-op
+  // picker here couldn't express the stack and would duplicate the panel UI.
+
   /// Shows the width constraint toggle menu when right-clicking a width handle (W key)
   static Future<void> showWidthConstraintMenu(
     BuildContext context, 

@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import '../engine.dart';
+import '../models/layer.dart';    
 import '../models/geometry/shape.dart';
 import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
@@ -20,6 +21,20 @@ import '../models/geometry/mesh.dart';   // <--- NEW: gradient mesh bounds + dra
 /// are kept deliberately parallel to SVGExporter and CompassRenderer so the
 /// three outputs stay visually consistent.
 class PNGExporter {
+  /// The outermost radius reached by a circle's OUTWARD-STACKED stroke stack.
+  /// Walks the same cursor the layer's boolean walk uses: region 0 starts exactly
+  /// at the shape's boundary (0.0), and each later band butts outward, adding its 
+  /// full width. Returns the bare radius when the stack is empty. Shared by the 
+  /// bbox math so the frame includes a fat stack of add-rings near the artwork edge.
+  static double _circleStrokeOuterRadius(CompassCircle circle, CompassLayer layer) {
+    double offset = 0.0;
+    for (final region in circle.strokeRegions) {
+      if (region.width <= 0) continue;
+      offset += region.width;
+    }
+    return circle.radius.value + offset;
+  }
+
   /// Renders the engine to PNG bytes at the given pixel scale (1.0 = artwork's
   /// natural logical size, 2.0 = double resolution, etc). Background is left
   /// fully transparent, matching the SVG export's no-background behavior, so
@@ -44,13 +59,22 @@ class PNGExporter {
       for (var shape in layer.shapes) {
         if (!shape.isVisible) continue;
         if (shape is CompassCircle) {
+          // A stroke stack bulges OUTWARD past the disk -- each band stacks on the
+          // last, so the cumulative outer radius is the sum walk in
+          // _circleStrokeOuterRadius (which reduces to r for an empty stack). Use
+          // the larger of the disk radius and that outer reach. Only ADD bands
+          // actually paint outside the disk -- a subtract/intersect band removes
+          // area already inside it -- but widening for the whole stack's extent is
+          // harmless (the margin is at most the summed widths) and keeps the rule
+          // simple and order-independent.
           final r = shape.radius.value;
+          final effR = max(r, _circleStrokeOuterRadius(shape, layer));
           final cx = shape.center.x.value;
           final cy = shape.center.y.value;
-          if (cx - r < minX) minX = cx - r;
-          if (cy - r < minY) minY = cy - r;
-          if (cx + r > maxX) maxX = cx + r;
-          if (cy + r > maxY) maxY = cy + r;
+          if (cx - effR < minX) minX = cx - effR;
+          if (cy - effR < minY) minY = cy - effR;
+          if (cx + effR > maxX) maxX = cx + effR;
+          if (cy + effR > maxY) maxY = cy + effR;
         } else if (shape is CompassRectangle) {
           final minXP = min(shape.p1.x.value, shape.p2.x.value);
           final minYP = min(shape.p1.y.value, shape.p2.y.value);
@@ -121,6 +145,9 @@ class PNGExporter {
       // fillPath includes closed width-spline centerlines (matching the renderer's
       // step 1a); layerPath excludes width splines and remains the target of the
       // uniform stroke (1b), so no hairline runs along a ribbon's inner edge.
+      // Both now also fold in each shape's whole stroke STACK (all regions, in
+      // order, before the fill op), so a stroke-subtract gap -- or concentric
+      // tree-rings -- is baked into fillPath here with no extra handling.
       final fillPath = layer.getLayerFillPath();
       final layerPath = layer.getLayerPath();
       final strokeAreaPath = layer.getLayerStrokeAreaPath();
@@ -141,6 +168,7 @@ class PNGExporter {
           ..strokeWidth = layer.strokeWidth
           ..style = PaintingStyle.stroke
           ..isAntiAlias = true;
+          
         canvas.drawPath(layerPath, strokePaint);
       }
 
@@ -151,6 +179,26 @@ class PNGExporter {
           ..style = PaintingStyle.fill
           ..isAntiAlias = true;
         canvas.drawPath(strokeAreaPath, areaStrokePaint);
+      }
+
+      // 1c'. Colored stroke ADD-band overpaints -- the exact mirror of the canvas
+      // renderer's step 1c'. Each colored add band was unioned into fillPath above
+      // and thus painted in the LAYER fill color in 1a; here we repaint each in its
+      // OWN color, on top, in stack order. The band paths come back already
+      // intersected with fillPath, so a band carved by a shape above it paints only
+      // where it survives and color can't bleed into a gap. Null-color add bands are
+      // NOT in this list (they ride the layer color), so nothing double-paints. Done
+      // after the flat fill/stroke but before the mesh pass, keeping a gradient mesh
+      // above its layer's solid geometry as on-canvas.
+      if (layer.color != Colors.transparent) {
+        final overpaints = layer.getStrokeAddBandOverpaints(fillPath);
+        for (final (bandPath, bandColor) in overpaints) {
+          final bandPaint = Paint()
+            ..color = bandColor
+            ..style = PaintingStyle.fill
+            ..isAntiAlias = true;
+          canvas.drawPath(bandPath, bandPaint);
+        }
       }
 
       // 1d. Gradient Meshes -- mirrors the renderer's mesh pass exactly: each mesh

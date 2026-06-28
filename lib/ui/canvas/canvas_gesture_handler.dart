@@ -267,10 +267,17 @@ class CanvasGestureHandler {
           } else if (shape is CompassCircle) {
             final cx = shape.center.x.value;
             final cy = shape.center.y.value;
-            final r = shape.radius.value;
+            
+            // Widen the hit-testing radius to include the outward-stacked strokes
+            double effR = shape.radius.value + layer.strokeWidth / 2.0;
+            for (final r in shape.strokeRegions) {
+              if (r.width > 0) effR += r.width;
+            }
+            effR = max(shape.radius.value, effR);
+
             final distToCenter = sqrt(pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2));
-            final distToCircumference = (distToCenter - r).abs();
-            if (distToCircumference <= scaledThreshold || distToCenter <= r) { clickedShape = shape; break; }
+            final distToCircumference = (distToCenter - effR).abs();
+            if (distToCircumference <= scaledThreshold || distToCenter <= effR) { clickedShape = shape; break; }
           } else if (shape is CompassSpiral) {
             final cx = shape.center.x.value;
             final cy = shape.center.y.value;
@@ -402,9 +409,16 @@ class CanvasGestureHandler {
           if (shape is CompassCircle) {
             final cx = shape.center.x.value;
             final cy = shape.center.y.value;
-            final r = shape.radius.value;
+            
+            // Widen the hit-testing radius to include the outward-stacked strokes
+            double effR = shape.radius.value + layer.strokeWidth / 2.0;
+            for (final r in shape.strokeRegions) {
+              if (r.width > 0) effR += r.width;
+            }
+            effR = max(shape.radius.value, effR);
+
             final dist2 = pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2);
-            if (dist2 <= r * r) { hitShape = shape; break; }
+            if (dist2 <= effR * effR) { hitShape = shape; break; }
           } else if (shape is CompassSpiral) {
             final cx = shape.center.x.value;
             final cy = shape.center.y.value;

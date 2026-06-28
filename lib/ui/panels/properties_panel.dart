@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../engine.dart';
+import '../../models/geometry/shape.dart';  // <--- StrokeRegion + CompassBooleanOp
+import '../../models/geometry/circle.dart'; // <--- stroke-region capable shape
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/mesh.dart'; // <--- NEW: Import mesh model
 import '../widgets/compass_color_picker.dart';
@@ -39,6 +41,20 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
   // custom even if its hex coincides with a preset's shade.
   bool _isCustomColor(Color c) =>
       c != Colors.transparent && !widget.swatchColors.contains(c);
+
+  // Per-op color for the small stroke-region labels, matching the layers panel.
+  Color _strokeOpColor(CompassBooleanOp op) {
+    switch (op) {
+      case CompassBooleanOp.add:
+        return Colors.green;
+      case CompassBooleanOp.subtract:
+        return Colors.redAccent;
+      case CompassBooleanOp.intersect:
+        return Colors.blueAccent;
+      case CompassBooleanOp.none:
+        return Colors.grey;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -167,6 +183,96 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                   widget.engine.changeLayerStrokeWidth(activeLayer, value);
                 },
               ),
+
+              // --- STROKE REGIONS SECTION (outward-stacked per-shape stroke stack) ---
+              // Appears when a stroke-capable shape (circle today) is selected AND it
+              // has at least one stroke region. One slider per region, innermost
+              // first, each driving that region's width live. The list is rebuilt
+              // every frame inside the ListenableBuilder, so adding/removing a stroke
+              // in the layers panel makes a slider appear/disappear here on the next
+              // notify -- the dynamic accumulation. Each region's op shows as a small
+              // colored label so it's clear which band a slider controls. Region 0
+              // straddles the outline; each later band stacks outward, so dragging an
+              // inner slider also shifts every band outside it (the layer's outward
+              // cursor depends on each width). Widths are NOT capped to the layer
+              // stroke slider -- a stroke region carries its own independent width.
+              if (selectedShape is CompassCircle &&
+                  selectedShape.strokeRegions.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                const Divider(),
+                const SizedBox(height: 24),
+
+                Row(
+                  children: [
+                    const Icon(Icons.donut_large, size: 18, color: Colors.orangeAccent),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Stroke Regions',
+                      style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Each band stacks outward from the shape outline. Add or remove '
+                  'strokes from the shape\'s row in the hierarchy.',
+                  style: TextStyle(fontSize: 12, color: theme.textTheme.bodySmall?.color?.withOpacity(0.8)),
+                ),
+                const SizedBox(height: 8),
+
+                ...List.generate(selectedShape.strokeRegions.length, (i) {
+                  final region = selectedShape.strokeRegions[i];
+                  // Clamp the displayed slider value into the slider's range so a
+                  // width set larger than the max (e.g. via a future text entry)
+                  // can't throw; the model keeps the true value.
+                  final double sliderVal = region.width.clamp(0.0, 100.0);
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Text(
+                              'Stroke ${i + 1}',
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                color: theme.textTheme.bodySmall?.color,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            // Op label, colored, so a slider is tied to its band's role.
+                            Text(
+                              region.op.name.toUpperCase(),
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                                color: _strokeOpColor(region.op),
+                              ),
+                            ),
+                            const Spacer(),
+                            Text(
+                              region.width.toStringAsFixed(1),
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                        Slider(
+                          value: sliderVal,
+                          min: 0.0,
+                          max: 100.0,
+                          divisions: 200,
+                          activeColor: _strokeOpColor(region.op),
+                          onChanged: (value) {
+                            widget.engine.setStrokeRegionWidth(selectedShape, i, value);
+                          },
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+                const SizedBox(height: 8),
+              ],
 
               // --- AREA STROKE PROFILE SECTION ---
               if (selectedShape is CompassXSpline) ...[

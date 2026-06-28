@@ -158,6 +158,26 @@ class CompassRenderer extends CustomPainter {
           canvas.drawPath(strokeAreaPath, areaStrokePaint);
         }
 
+        // 1c'. Colored stroke ADD-band overpaints. A stroke-add region with its own
+        // color was unioned into fillPath above and thus painted in the LAYER fill
+        // color in 1a; here we repaint each such band in its OWN color, on top, in
+        // stack order. The band paths come back already intersected with fillPath,
+        // so a band carved by a shape above it paints only where it survives and
+        // color can't bleed into a gap. Null-color add bands are NOT in this list
+        // (they're meant to ride the layer color), so nothing is double-painted.
+        // Done AFTER the flat fill/stroke but BEFORE the mesh pass, so a gradient
+        // mesh still sits above its layer's solid geometry as before.
+        if (layer.color != Colors.transparent) {
+          final overpaints = layer.getStrokeAddBandOverpaints(fillPath);
+          for (final (bandPath, bandColor) in overpaints) {
+            final bandPaint = Paint()
+              ..color = bandColor
+              ..style = PaintingStyle.fill
+              ..isAntiAlias = true;
+            canvas.drawPath(bandPath, bandPaint);
+          }
+        }
+
         // 1d. Gradient Meshes (their own self-painted, boolean-clipped category).
         // Each mesh paints its interpolated color field via drawVertices, clipped
         // to its boolean-carved silhouette (getLayerMeshClipPath). Done per-mesh

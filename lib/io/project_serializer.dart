@@ -17,6 +17,99 @@ import '../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
 import '../models/layer.dart';
 
 class ProjectSerializer {
+  // The optional per-shape STROKE token, appended as the LAST comma-field of a
+  // SHAPE line. Emitted ONLY when the shape has at least one stroke region -- a
+  // shape with an empty stroke stack serializes byte-for-byte as it always did, so
+  // legacy files round-trip unchanged and older code opening a new file simply
+  // ignores this trailing field.
+  //
+  // Format: `STROKE:op:width[:color]|op:width[:color]|...` -- one region per pipe
+  // group, in stack order (region 0 = innermost, straddling the outline; later
+  // regions stack outward). Each region carries its own width, and an ADD band may
+  // carry its own COLOR (the int ARGB value). The color segment is OMITTED when the
+  // region's color is null (inherit the layer fill color), so an uncolored band is
+  // still exactly `op:width` and pre-color files round-trip byte-for-byte.
+  //
+  // Read by scanning for the 'STROKE:' prefix rather than by a fixed index, so it
+  // never perturbs the positional argOffset parsing or the variable-length node
+  // blob. Point/layer ids are UniqueKey strings ([#xxxxx]) and node tokens start
+  // with a point id, so nothing else in a line can collide with the prefix. The
+  // pipe separator is also used by the mesh/xspline node blobs, but those never
+  // start with 'STROKE:', and this token always sits last, so there is no ambiguity.
+  //
+  // BACKWARD COMPAT, every older form still loads:
+  //   * `STROKE:op`               (oldest: op only, no width)   -> one region, w 8.0, no color
+  //   * `STROKE:op:width`         (interim: single op + width)  -> one region, that width, no color
+  //   * `STROKE:op:width|...`     (stack, pre-color)            -> each region, no color
+  //   * `STROKE:op:width:color|...` (stack, with color)         -> add bands keep their color
+  // Detected positionally per segment; see _parse below.
+  static String _strokeToken(CompassShape shape) {
+    if (shape.strokeRegions.isEmpty) return '';
+    final body = shape.strokeRegions.map((r) {
+      // Color is only meaningful for an add band, but persist whatever is set so a
+      // later op flip to add restores it. Omit the segment entirely when null so
+      // uncolored bands stay byte-identical to the pre-color format.
+      if (r.color != null) {
+        return '${r.op.name}:${r.width}:${r.color!.value}';
+      }
+      return '${r.op.name}:${r.width}';
+    }).join('|');
+    return ',STROKE:$body';
+  }
+
+  // Decodes the optional STROKE token into a list of StrokeRegion. Absent token ->
+  // empty list (no stroke). Trims each candidate first so a trailing '\r' from a
+  // CRLF-saved file can't corrupt the parse.
+  //
+  // Grammar after the 'STROKE:' prefix is one or more pipe-separated regions, each
+  // `op[:width[:color]]`:
+  //   * seg[0] = op name (required; an unrecognized name falls back to none, which
+  //     is not a valid stroke op, so that region is skipped);
+  //   * seg[1] = width (optional; defaults to 8.0 for the oldest op-only format; a
+  //     non-positive or unparseable value also keeps the 8.0 default);
+  //   * seg[2] = color int ARGB (optional; absent -> null = inherit layer color; an
+  //     unparseable value -> null rather than a wrong color).
+  static List<StrokeRegion> _parseStrokeToken(List<String> parts) {
+    for (final raw in parts) {
+      final t = raw.trim();
+      if (!t.startsWith('STROKE:')) continue;
+
+      final body = t.substring('STROKE:'.length);
+      final regionStrs = body.split('|');
+      final out = <StrokeRegion>[];
+
+      for (final rs in regionStrs) {
+        if (rs.isEmpty) continue;
+        final seg = rs.split(':');
+        if (seg.isEmpty) continue;
+
+        final op = CompassBooleanOp.values.firstWhere(
+          (e) => e.name == seg[0],
+          orElse: () => CompassBooleanOp.none,
+        );
+        // none is not a valid stroke op (off = absent from the list), so skip it.
+        if (op == CompassBooleanOp.none) continue;
+
+        double width = 8.0;
+        if (seg.length >= 2) {
+          width = double.tryParse(seg[1]) ?? 8.0;
+        }
+        if (width <= 0) width = 8.0;
+
+        Color? color;
+        if (seg.length >= 3) {
+          final cv = int.tryParse(seg[2]);
+          if (cv != null) color = Color(cv);
+        }
+
+        out.add(StrokeRegion(op: op, width: width, color: color));
+      }
+
+      return out;
+    }
+    return const [];
+  }
+
   static String serialize(CompassEngine engine) {
     final buffer = StringBuffer();
     for (var p in engine.points) {
@@ -50,14 +143,17 @@ class ProjectSerializer {
     for (var layer in engine.layers) {
       buffer.writeln('LAYER,${layer.id},${layer.name},${layer.isVisible},${layer.isExpanded},${layer.color.value},${layer.strokeColor.value},${layer.strokeWidth},${layer.isLocked}');
       for (var shape in layer.shapes) {
+        // Computed once per shape; '' unless this shape has a stroke stack.
+        final strk = _strokeToken(shape);
+
         if (shape is CompassLine) {
-          buffer.writeln('SHAPE,LINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.start.id},${shape.end.id}');
+          buffer.writeln('SHAPE,LINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.start.id},${shape.end.id}$strk');
         } else if (shape is CompassCircle) {
-          buffer.writeln('SHAPE,CIRCLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.radiusPoint?.id ?? ""}');
+          buffer.writeln('SHAPE,CIRCLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.radiusPoint?.id ?? ""}$strk');
         } else if (shape is CompassSpiral) {
-          buffer.writeln('SHAPE,SPIRAL,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.startPoint.id},${shape.isClockwise},${shape.revolutions}');
+          buffer.writeln('SHAPE,SPIRAL,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.startPoint.id},${shape.isClockwise},${shape.revolutions}$strk');
         } else if (shape is CompassRectangle) {
-          buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}');
+          buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}$strk');
         } else if (shape is CompassMesh) {
           // --- UPGRADE: Mesh nodes now serialize their Tension values ---
           // Format: `nodeId:colorValue:tension`. Safe because legacy files only had 2 parts,
@@ -66,7 +162,7 @@ class ProjectSerializer {
             final node = shape.nodes[i];
             return '${node.point.id}:${shape.colors[i].value}:${node.tension.value}';
           }).join('|');
-          buffer.writeln('SHAPE,MESH,${layer.id},${shape.operation.name},${shape.isVisible},${shape.rows},${shape.cols},${shape.anchorPoint?.id ?? ""},$nodesStr');
+          buffer.writeln('SHAPE,MESH,${layer.id},${shape.operation.name},${shape.isVisible},${shape.rows},${shape.cols},${shape.anchorPoint?.id ?? ""},$nodesStr$strk');
         } else if (shape is CompassXSpline) {
           // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR:pinL:pinR
           // when the node carries explicit Bezier handles, variable width, or width pins. 
@@ -85,7 +181,7 @@ class ProjectSerializer {
             }
             return '${n.point.id}:${n.tension.value}';
           }).join('|');
-          buffer.writeln('SHAPE,XSPLINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.isClosed},${shape.anchorPoint?.id ?? ""},$nodesStr');
+          buffer.writeln('SHAPE,XSPLINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.isClosed},${shape.anchorPoint?.id ?? ""},$nodesStr$strk');
         }
       }
     }
@@ -202,6 +298,14 @@ class ProjectSerializer {
         final shapeType = parts[1];
         final layer = layerMap[parts[2]];
         final op = CompassBooleanOp.values.firstWhere((e) => e.name == parts[3], orElse: () => CompassBooleanOp.add);
+
+        // Optional stroke stack, scanned from the trailing STROKE token. Applied
+        // via cascade to EVERY shape type below (parallel to op/isVisible), so the
+        // stack round-trips uniformly -- even on primitives whose getStrokeOutlinePath
+        // is still the empty-Path base (harmless no-op), which future-proofs them for
+        // when their overrides land. Each region carries its own width and optional
+        // add-band color, read here.
+        final strokeRegions = _parseStrokeToken(parts);
         
         if (layer != null) {
           bool isVisible = true;
@@ -229,13 +333,19 @@ class ProjectSerializer {
             final p1 = pointMap[parts[argOffset]];
             final p2 = pointMap[parts[argOffset + 1]];
             if (p1 != null && p2 != null) {
-              layer.shapes.add(CompassLine(start: p1, end: p2)..operation = op..isVisible = isVisible);
+              layer.shapes.add(CompassLine(start: p1, end: p2)
+                ..operation = op
+                ..strokeRegions = strokeRegions
+                ..isVisible = isVisible);
             }
           } else if (shapeType == 'CIRCLE') {
             final center = pointMap[parts[argOffset]];
             final radiusPoint = pointMap[parts[argOffset + 1]];
             if (center != null && radiusPoint != null) {
-               final circle = CompassCircle(center: center, radiusPoint: radiusPoint, radius: 0)..operation = op..isVisible = isVisible;
+               final circle = CompassCircle(center: center, radiusPoint: radiusPoint, radius: 0)
+                ..operation = op
+                ..strokeRegions = strokeRegions
+                ..isVisible = isVisible;
                
                center.attach(radiusPoint);
                void enforceRadius() {
@@ -263,7 +373,10 @@ class ProjectSerializer {
                 startPoint: startPoint,
                 isClockwise: isClockwise,
                 revolutions: revolutions,
-              )..operation = op..isVisible = isVisible;
+              )
+                ..operation = op
+                ..strokeRegions = strokeRegions
+                ..isVisible = isVisible;
               
               center.attach(startPoint);
               layer.shapes.add(spiral);
@@ -281,6 +394,7 @@ class ProjectSerializer {
             if (p1 != null && p2 != null) {
               final rect = CompassRectangle(p1: p1, p2: p2, radius: radius, isSquare: isSquare)
                 ..operation = op
+                ..strokeRegions = strokeRegions
                 ..isVisible = isVisible;
                 
               if (isSquare) {
@@ -335,7 +449,10 @@ class ProjectSerializer {
                 nodes: nodes,
                 colors: colors,
                 anchorPoint: anchorPt,
-              )..operation = op..isVisible = isVisible;
+              )
+                ..operation = op
+                ..strokeRegions = strokeRegions
+                ..isVisible = isVisible;
               layer.shapes.add(mesh);
             }
           } else if (shapeType == 'XSPLINE') {
@@ -352,7 +469,10 @@ class ProjectSerializer {
               nodesRawStr = parts[argOffset + 2];
             }
 
-            final spline = CompassXSpline(isClosed: isClosed, anchorPoint: anchorPt)..operation = op..isVisible = isVisible;
+            final spline = CompassXSpline(isClosed: isClosed, anchorPoint: anchorPt)
+              ..operation = op
+              ..strokeRegions = strokeRegions
+              ..isVisible = isVisible;
             
             bool valid = true;
             final nodesData = nodesRawStr.split('|');

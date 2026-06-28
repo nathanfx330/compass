@@ -1,9 +1,10 @@
-// /lib/io/svg_exporter.dart
+// lib/io/svg_exporter.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../engine.dart';
+import '../models/layer.dart';           
 import '../models/geometry/shape.dart';
 import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
@@ -47,6 +48,68 @@ class SVGExporter {
     return sb.toString().trim();
   }
 
+  // ONE band of a circle's stroke stack as an even-odd two-circle SVG path `d`
+  // string: outer ring r + innerOffset + width, inner hole r + innerOffset (inner
+  // omitted if the band reaches the center, matching
+  // CompassCircle.getStrokeOutlinePath(width, innerOffset)). Used in BOTH roles --
+  // black-fill geometry inside a subtract mask, and colored-fill geometry in the
+  // add pass -- so the ring shape for a given band is defined once.
+  static String _circleBandSvgData(
+      CompassCircle circle, double width, double innerOffset) {
+    final r = circle.radius.value;
+    if (r <= 0 || width <= 0) return '';
+
+    final cx = circle.center.x.value;
+    final cy = circle.center.y.value;
+    final inner = r + innerOffset;
+    final outer = inner + width;
+    if (outer <= 0) return '';
+
+    // Two full circles via arc commands; even-odd makes the inner one a hole.
+    final sb = StringBuffer();
+    sb.write('M ${cx - outer} $cy ');
+    sb.write('a $outer $outer 0 1 0 ${outer * 2} 0 ');
+    sb.write('a $outer $outer 0 1 0 ${-outer * 2} 0 ');
+    sb.write('Z ');
+    if (inner > 0) {
+      sb.write('M ${cx - inner} $cy ');
+      sb.write('a $inner $inner 0 1 0 ${inner * 2} 0 ');
+      sb.write('a $inner $inner 0 1 0 ${-inner * 2} 0 ');
+      sb.write('Z ');
+    }
+    return sb.toString().trim();
+  }
+
+  // Walks a circle's OUTWARD-STACKED stroke stack, yielding (region, width,
+  // innerOffset) for each region in order -- the single source of the stacking
+  // geometry for the SVG exporter, mirroring CompassLayer's walk. Region 0 starts
+  // exactly at the shape's boundary (0.0); each later region's inner edge is the 
+  // previous band's outer edge. Zero-width regions are skipped.
+  static List<({StrokeRegion region, double width, double innerOffset})>
+      _circleStrokeBands(CompassCircle circle) {
+    final out = <({StrokeRegion region, double width, double innerOffset})>[];
+    double offset = 0.0;
+    for (final region in circle.strokeRegions) {
+      final w = region.width;
+      if (w <= 0) continue;
+      out.add((region: region, width: w, innerOffset: offset));
+      offset += w;
+    }
+    return out;
+  }
+
+  // The outermost radius reached by a circle's stroke stack (for bbox widening),
+  // mirroring the PNG exporter.
+  static double _circleStrokeOuterRadius(CompassCircle circle) {
+    double offset = 0.0;
+    for (final region in circle.strokeRegions) {
+      final w = region.width;
+      if (w <= 0) continue;
+      offset += w;
+    }
+    return circle.radius.value + offset;
+  }
+
   static String toSVG(CompassEngine engine) {
     final buffer = StringBuffer();
 
@@ -66,7 +129,10 @@ class SVGExporter {
       for (var shape in layer.shapes) {
         if (!shape.isVisible) continue;
         if (shape is CompassCircle) {
-           double r = shape.radius.value;
+           // Widen to the stroke stack's cumulative OUTER radius (parity with the
+           // PNG exporter). Each band stacks outward, so this is the sum walk in
+           // _circleStrokeOuterRadius (which reduces to r for an empty stack).
+           double r = max(shape.radius.value, _circleStrokeOuterRadius(shape));
            double cx = shape.center.x.value;
            double cy = shape.center.y.value;
            if (cx - r < minX) minX = cx - r;
@@ -122,7 +188,8 @@ class SVGExporter {
       return '#${c.value.toRadixString(16).substring(2, 8).toUpperCase()}';
     }
 
-    // Opaque-hex (no 'none') for a specific vertex color, used by the mesh facets.
+    // Opaque-hex (no 'none') for a specific vertex color, used by the mesh facets
+    // and by colored stroke-add bands.
     String toHexOpaque(Color c) {
       return '#${c.value.toRadixString(16).substring(2, 8).toUpperCase()}';
     }
@@ -138,6 +205,29 @@ class SVGExporter {
       final addShapes = layer.shapes.where((s) => s.isVisible && s.operation == CompassBooleanOp.add).toList();
       final subShapes = layer.shapes.where((s) => s.isVisible && s.operation == CompassBooleanOp.subtract).toList();
 
+      // --- STROKE-STACK contributors (outline-as-boolean) ---
+      // A shape's stroke stack is INDEPENDENT of its fill op, so the same circle can
+      // be an `add` disk AND carry subtract bands (the Ubuntu dot), or carry a mix
+      // of subtract and add bands (tree-rings). Only circles implement
+      // getStrokeOutlinePath today, so only circles populate the stroke passes;
+      // extend the type checks as more overrides land.
+      //
+      // We collect circles whose stack has ANY subtract band (for the mask) and ANY
+      // add band (for the add pass) -- the SAME circle can be in both, and even a
+      // single band's op decides only that band. Each band's radius comes from
+      // _circleStrokeBands (the outward-cursor walk), so the SVG geometry matches
+      // the canvas exactly.
+      //
+      // stroke-INTERSECT bands are intentionally unsupported in SVG: the <mask>
+      // model has no clean intersect primitive (fill-level intersect is likewise
+      // unhandled here), so faking it would diverge from the canvas. Such bands are
+      // silently skipped per-band -- PNG/canvas still honor them.
+      final strokeCircles =
+          layer.shapes.where((s) => s.isVisible && s is CompassCircle).cast<CompassCircle>().toList();
+      bool circleHasSubtractBand(CompassCircle c) =>
+          c.strokeRegions.any((r) => r.op == CompassBooleanOp.subtract && r.width > 0);
+      final strokeSubCircles = strokeCircles.where(circleHasSubtractBand).toList();
+
       // Meshes are `add`, but they are NOT flat-fill shapes -- they're faceted in
       // their own pass below, so pull them out of the normal add-shapes loop (which
       // would otherwise iterate them and emit nothing).
@@ -145,8 +235,12 @@ class SVGExporter {
       addShapes.removeWhere((s) => s is CompassMesh);
 
       buffer.writeln('  <!-- Layer: ${layer.name} -->');
-      
-      if (subShapes.isNotEmpty) {
+
+      // The mask is needed if ANYTHING carves this layer: a fill-subtract shape OR
+      // any circle with a subtract band in its stroke stack.
+      final bool needsMask = subShapes.isNotEmpty || strokeSubCircles.isNotEmpty;
+
+      if (needsMask) {
         final maskId = 'mask_$cleanLayerId';
         buffer.writeln('  <defs>');
         buffer.writeln('    <mask id="$maskId" maskUnits="userSpaceOnUse" x="$minX" y="$minY" width="$width" height="$height">');
@@ -161,6 +255,23 @@ class SVGExporter {
             buffer.writeln('      <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="black" />');
           } else if (shape is CompassXSpline) {
             buffer.writeln('      <path d="${shape.getSvgPathData()}" fill="black" fill-rule="evenodd" />');
+          }
+        }
+
+        // Each circle's SUBTRACT bands carve the mask: the ring band reads black
+        // (cut), the inner hole stays white (kept), because the even-odd path leaves
+        // the center uncovered. This is what bites the Ubuntu rim gap, and stacks
+        // for concentric subtract rings. Bands are walked in outward order; only
+        // subtract bands are emitted here (add bands go in the add pass, intersect
+        // bands are skipped). A subtract band paints NOTHING visible -- it only
+        // carves -- so a region's color never enters the mask.
+        for (var circle in strokeSubCircles) {
+          for (final band in _circleStrokeBands(circle)) {
+            if (band.region.op != CompassBooleanOp.subtract) continue;
+            final d = _circleBandSvgData(circle, band.width, band.innerOffset);
+            if (d.isNotEmpty) {
+              buffer.writeln('      <path d="$d" fill="black" fill-rule="evenodd" />');
+            }
           }
         }
         
@@ -210,6 +321,28 @@ class SVGExporter {
           } else {
             buffer.writeln('    <path d="${shape.getSvgPathData()}" fill="${shape.isClosed ? fillHex : 'none'}" fill-rule="evenodd" stroke="$strokeHex" stroke-width="$sWidth" />');
           }
+        }
+      }
+
+      // --- STROKE-ADD bands (filled ring as standalone geometry) ---
+      // Each circle's ADD bands paint as even-odd outer/inner paths at their stacked
+      // radii. The fill is the band's OWN color when one is set, else the layer FILL
+      // color (null = inherit) -- exactly matching the canvas/PNG overpaint, where a
+      // null-color add band rides the layer fill and a colored one paints its own
+      // hue. Drawn here in the add pass, INSIDE the same masked <g>, so a
+      // fill-subtract or a subtract band elsewhere carves them just like any other
+      // add geometry. A circle that is BOTH fill-add and carries add bands emits its
+      // disk above AND its rings here; a circle with a mix of add and subtract bands
+      // has its subtract bands in the mask above and its add bands here. Bands walked
+      // in outward order.
+      for (var circle in strokeCircles) {
+        for (final band in _circleStrokeBands(circle)) {
+          if (band.region.op != CompassBooleanOp.add) continue;
+          final d = _circleBandSvgData(circle, band.width, band.innerOffset);
+          if (d.isEmpty) continue;
+          final bandColor = band.region.color;
+          final bandFill = bandColor != null ? toHexOpaque(bandColor) : fillHex;
+          buffer.writeln('    <path d="$d" fill="$bandFill" fill-rule="evenodd" stroke="none" />');
         }
       }
 

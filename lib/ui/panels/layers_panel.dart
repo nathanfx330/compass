@@ -3,16 +3,22 @@
 import 'package:flutter/material.dart';
 
 import '../../engine.dart';
-import '../../models/geometry/shape.dart';
-import '../../models/geometry/point.dart';
-import '../../models/geometry/line.dart';
-import '../../models/geometry/circle.dart';
-import '../../models/geometry/spiral.dart';
-import '../../models/geometry/rectangle.dart';
-import '../../models/geometry/spline.dart';
-import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
-import '../workspace/dialogs.dart';
+import 'layer_tile.dart';
 
+/// The hierarchy panel: a header, a reorderable z-stack of layer cards, and the
+/// pinned reference-image footer. Slimmed to an orchestrator -- the per-shape row
+/// lives in shape_row.dart, the whole layer card (header + shape list + shape
+/// drop targets) lives in layer_tile.dart, and every mutation routes through the
+/// engine. (The reference footer is still inline here; it's slated to move to
+/// reference_layer_tile.dart as a follow-up, but it's outside the reordering
+/// surface so it isn't urgent.)
+///
+/// LAYER REORDERING: a ReorderableListView with buildDefaultDragHandles:false, so
+/// the ONLY drag trigger is the explicit grip inside each LayerTile -- that's what
+/// keeps layer-card dragging from colliding with the per-shape LongPressDraggable
+/// nested in each ShapeRow. The list is rendered TOP-OF-STACK-FIRST (visual index
+/// 0 = highest model index), so onReorder converts visual<->model per the recipe
+/// in hierarchy_ops.dart before calling engine.reorderLayer.
 class LayersPanel extends StatelessWidget {
   final CompassEngine engine;
   final VoidCallback onLoadReferenceImage;
@@ -22,49 +28,6 @@ class LayersPanel extends StatelessWidget {
     required this.engine,
     required this.onLoadReferenceImage,
   });
-
-  // --- NEW: Helper method to detect if a shape's points are tied to anything else
-  bool _isShapeLinked(CompassShape shape) {
-    List<CompassPoint> shapePts = [];
-    if (shape is CompassLine) {
-      shapePts = [shape.start, shape.end];
-    } else if (shape is CompassCircle) {
-      shapePts = [shape.center, if (shape.radiusPoint != null) shape.radiusPoint!];
-    } else if (shape is CompassSpiral) {
-      shapePts = [shape.center, shape.startPoint];
-    } else if (shape is CompassRectangle) {
-      shapePts = [shape.p1, shape.p2];
-    } else if (shape is CompassXSpline) {
-      shapePts.addAll(shape.nodes.map((n) => n.point));
-      if (shape.anchorPoint != null) shapePts.add(shape.anchorPoint!);
-    } else if (shape is CompassMesh) { // <--- UPGRADE: Mesh check
-      shapePts.addAll(shape.nodes.map((n) => n.point));
-      if (shape.anchorPoint != null) shapePts.add(shape.anchorPoint!);
-    }
-
-    for (var p in shapePts) {
-      // Is this point acting as a parent to something else?
-      if (p.attachedPoints.isNotEmpty) return true;
-      // Is this point a child of something else in the global engine?
-      for (var other in engine.points) {
-        if (other != p && other.attachedPoints.contains(p)) return true;
-      }
-    }
-    return false;
-  }
-
-  Color _getOpColor(CompassBooleanOp op) {
-    switch (op) {
-      case CompassBooleanOp.add:
-        return Colors.green;
-      case CompassBooleanOp.subtract:
-        return Colors.redAccent;
-      case CompassBooleanOp.intersect:
-        return Colors.blueAccent;
-      case CompassBooleanOp.none:
-        return Colors.grey;
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -95,8 +58,8 @@ class LayersPanel extends StatelessWidget {
           ),
         ),
         const Divider(height: 1),
-        
-        // MATHEMATICAL LAYERS
+
+        // MATHEMATICAL LAYERS (reorderable z-stack, top-of-stack first)
         Expanded(
           child: ListenableBuilder(
             listenable: engine,
@@ -110,312 +73,47 @@ class LayersPanel extends StatelessWidget {
                 );
               }
 
-              return ListView.builder(
-                itemCount: engine.layers.length,
+              final int n = engine.layers.length;
+
+              return ReorderableListView.builder(
+                buildDefaultDragHandles: false,
+                itemCount: n,
+                // Lift the dragged card onto its own Material so it reads as a
+                // floating tile (elevation + rounded corners) rather than carrying
+                // the panel's flat full-bleed look while in flight.
+                proxyDecorator: (child, index, animation) {
+                  return Material(
+                    elevation: 6,
+                    borderRadius: BorderRadius.circular(8),
+                    color: theme.colorScheme.surface,
+                    child: child,
+                  );
+                },
+                onReorder: (oldIndex, newIndex) {
+                  // ReorderableListView's newIndex is an INSERTION index in the
+                  // pre-removal list; when dragging downward it points one past the
+                  // target slot, so pull it back by one. Then flip both visual
+                  // indices to model indices (the list is shown reversed). See the
+                  // recipe in hierarchy_ops.dart.
+                  if (newIndex > oldIndex) newIndex -= 1;
+                  final from = (n - 1) - oldIndex;
+                  final to = (n - 1) - newIndex;
+                  engine.reorderLayer(from, to);
+                },
                 itemBuilder: (context, index) {
-                  final layerIndex = engine.layers.length - 1 - index;
+                  // Visual index -> model index (reversed): visual 0 is the top of
+                  // the z-stack = the LAST layer in engine.layers.
+                  final layerIndex = (n - 1) - index;
                   final layer = engine.layers[layerIndex];
-                  final isActiveLayer = layer == engine.activeLayer;
 
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      // --- LAYER HEADER ---
-                      Material(
-                        color: isActiveLayer 
-                            ? theme.colorScheme.primary.withOpacity(0.08)
-                            : Colors.transparent,
-                        child: InkWell(
-                          onTap: () {
-                            if (isActiveLayer) {
-                              engine.toggleLayerExpanded(layer);
-                            } else {
-                              engine.selectLayer(layer);
-                            }
-                          },
-                          // --- Right-click a layer for layer-level actions:
-                          //   * Bake to X-Spline -- flatten the boolean result into
-                          //     editable splines on a fresh layer above (in-app).
-                          //   * Export to OBJ -- write the resolved fill as a flat
-                          //     triangle mesh to disk (off-app, for Blender/Godot).
-                          // ---
-                          onSecondaryTapDown: (details) async {
-                            final selected = await showMenu<String>(
-                              context: context,
-                              position: RelativeRect.fromLTRB(
-                                details.globalPosition.dx,
-                                details.globalPosition.dy,
-                                details.globalPosition.dx,
-                                details.globalPosition.dy,
-                              ),
-                              items: const [
-                                PopupMenuItem<String>(
-                                  value: 'bake',
-                                  child: Row(
-                                    children: [
-                                      Icon(Icons.draw, size: 18),
-                                      SizedBox(width: 12),
-                                      Text('Bake to X-Spline'),
-                                    ],
-                                  ),
-                                ),
-                                PopupMenuDivider(),
-                                PopupMenuItem<String>(
-                                  value: 'export_obj',
-                                  child: Row(
-                                    children: [
-                                      Icon(Icons.view_in_ar, size: 18),
-                                      SizedBox(width: 12),
-                                      Text('Export to OBJ…'),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            );
-
-                            if (selected == 'bake') {
-                              // Guard the silent no-op: check BOTH the standard fill 
-                              // and the area stroke path to ensure geometry exists.
-                              final fillEmpty = layer.getLayerFillPath().computeMetrics().isEmpty;
-                              final areaEmpty = layer.getLayerStrokeAreaPath().computeMetrics().isEmpty;
-
-                              if (fillEmpty && areaEmpty) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Nothing to bake — this layer has no filled area.'),
-                                    ),
-                                  );
-                                }
-                                return;
-                              }
-
-                              engine.bakeLayer(layer);
-                            } else if (selected == 'export_obj') {
-                              // No pre-guard here: the OBJ exporter reads the FILL
-                              // path (getLayerFillPath), which differs from the bake
-                              // guard's getLayerPath for closed width-splines. Rather
-                              // than risk blocking a valid export with the wrong path
-                              // check, we let showExportOBJ surface the empty case via
-                              // toOBJ's empty-string return -- the exporter stays the
-                              // single source of truth for "is there fillable area."
-                              if (context.mounted) {
-                                CompassDialogs.showExportOBJ(context, engine, layer);
-                              }
-                            }
-                          },
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
-                            child: Row(
-                              children: [
-                                Icon(
-                                  layer.isExpanded ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_right,
-                                  size: 20,
-                                  color: theme.iconTheme.color?.withOpacity(0.6),
-                                ),
-                                const SizedBox(width: 4),
-                                
-                                IconButton(
-                                  iconSize: 18,
-                                  padding: EdgeInsets.zero,
-                                  constraints: const BoxConstraints(),
-                                  icon: Icon(
-                                    layer.isVisible ? Icons.visibility : Icons.visibility_off,
-                                    color: layer.isVisible ? theme.iconTheme.color : theme.disabledColor,
-                                  ),
-                                  onPressed: () {
-                                    layer.isVisible = !layer.isVisible;
-                                    engine.selectLayer(layer); 
-                                  },
-                                ),
-                                const SizedBox(width: 8),
-
-                                Container(
-                                  width: 12,
-                                  height: 12,
-                                  margin: const EdgeInsets.only(right: 8),
-                                  decoration: BoxDecoration(
-                                    color: layer.color == Colors.transparent ? theme.scaffoldBackgroundColor : layer.color,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(color: theme.dividerColor),
-                                  ),
-                                  child: layer.color == Colors.transparent 
-                                    ? const Center(child: Icon(Icons.close, size: 8, color: Colors.grey))
-                                    : null,
-                                ),
-                                Expanded(
-                                  child: Text(
-                                    layer.name,
-                                    style: TextStyle(
-                                      fontWeight: isActiveLayer ? FontWeight.bold : FontWeight.w500,
-                                      color: isActiveLayer ? theme.colorScheme.primary : (layer.isLocked ? theme.disabledColor : null),
-                                    ),
-                                  ),
-                                ),
-                                
-                                // --- NEW: Layer Lock Button ---
-                                IconButton(
-                                  iconSize: 16,
-                                  padding: EdgeInsets.zero,
-                                  constraints: const BoxConstraints(),
-                                  icon: Icon(
-                                    layer.isLocked ? Icons.lock : Icons.lock_open,
-                                    color: layer.isLocked ? theme.disabledColor : Colors.orange,
-                                  ),
-                                  tooltip: layer.isLocked ? 'Unlock Layer' : 'Lock Layer',
-                                  onPressed: () {
-                                    engine.toggleLayerLock(layer);
-                                  },
-                                ),
-                                const SizedBox(width: 4),
-
-                                IconButton(
-                                  iconSize: 16,
-                                  padding: EdgeInsets.zero,
-                                  constraints: const BoxConstraints(),
-                                  icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                                  tooltip: 'Delete Layer',
-                                  onPressed: () {
-                                    engine.removeLayer(layer);
-                                  },
-                                ),
-                                const SizedBox(width: 8),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-
-                      // --- SHAPES INSIDE THE LAYER ---
-                      if (layer.isExpanded && layer.shapes.isNotEmpty)
-                        ...layer.shapes.reversed.map((shape) {
-                          final isSelectedShape = shape == engine.selectedShape;
-
-                          String shapeName = 'Unknown Shape';
-                          IconData shapeIcon = Icons.shape_line;
-
-                          // UPGRADE: Bulletproof dynamic type checking using `is` keyword
-                          if (shape is CompassLine) {
-                            shapeName = 'Line';
-                            shapeIcon = Icons.show_chart;
-                          } else if (shape is CompassCircle) {
-                            shapeName = 'Circle';
-                            shapeIcon = Icons.radio_button_unchecked;
-                          } else if (shape is CompassSpiral) {
-                            shapeName = 'Spiral';
-                            shapeIcon = Icons.cyclone;
-                          } else if (shape is CompassRectangle) { 
-                            shapeName = 'Rectangle';
-                            shapeIcon = Icons.crop_square;
-                          } else if (shape is CompassXSpline) {
-                            shapeName = 'X-Spline';
-                            shapeIcon = Icons.draw;
-                          } else if (shape is CompassMesh) { 
-                            shapeName = 'Gradient Mesh';
-                            shapeIcon = Icons.grid_on;
-                          }
-
-                          return Padding(
-                            padding: const EdgeInsets.only(left: 32.0),
-                            child: ListTile(
-                              selected: isSelectedShape,
-                              selectedTileColor: theme.colorScheme.primary.withOpacity(0.15),
-                              selectedColor: theme.colorScheme.primary,
-                              leading: Icon(
-                                shapeIcon, 
-                                size: 16,
-                                color: (shape.isVisible && !layer.isLocked) ? null : theme.disabledColor,
-                              ),
-                              title: Row(
-                                children: [
-                                  Text(
-                                    shapeName, 
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      color: (shape.isVisible && !layer.isLocked) ? null : theme.disabledColor,
-                                    ),
-                                  ),
-                                  // --- NEW: Add the link icon if relationships exist
-                                  if (_isShapeLinked(shape)) ...[
-                                    const SizedBox(width: 6),
-                                    Tooltip(
-                                      message: 'Shape shares mathematical constraints',
-                                      child: Icon(Icons.link, size: 12, color: theme.colorScheme.primary.withOpacity(0.7)),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                              subtitle: Text(
-                                shape.operation.name.toUpperCase(),
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: isSelectedShape 
-                                      ? theme.colorScheme.primary 
-                                      : (shape.isVisible && !layer.isLocked ? _getOpColor(shape.operation) : theme.disabledColor),
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              trailing: layer.isLocked ? const SizedBox.shrink() : Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  // Visibility Toggle
-                                  IconButton(
-                                    iconSize: 16,
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
-                                    icon: Icon(
-                                      shape.isVisible ? Icons.visibility : Icons.visibility_off,
-                                      color: shape.isVisible ? theme.iconTheme.color?.withOpacity(0.7) : theme.disabledColor,
-                                    ),
-                                    tooltip: shape.isVisible ? 'Hide Shape' : 'Show Shape',
-                                    onPressed: () {
-                                      engine.toggleShapeVisibility(shape);
-                                    },
-                                  ),
-                                  const SizedBox(width: 4),
-                                  // Quick Operation Toggle
-                                  PopupMenuButton<CompassBooleanOp>(
-                                    initialValue: shape.operation,
-                                    tooltip: 'Change Operation',
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(4.0),
-                                      child: Icon(Icons.tune, size: 16, color: theme.iconTheme.color?.withOpacity(0.7)),
-                                    ),
-                                    onSelected: (op) => engine.changeShapeOperation(shape, op),
-                                    itemBuilder: (context) => CompassBooleanOp.values.map((op) {
-                                      return PopupMenuItem(
-                                        value: op,
-                                        child: Text(op.name.toUpperCase(), style: const TextStyle(fontSize: 12)),
-                                      );
-                                    }).toList(),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  // Delete Button
-                                  IconButton(
-                                    iconSize: 16,
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
-                                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                                    tooltip: 'Delete Shape',
-                                    onPressed: () {
-                                      engine.removeShape(shape);
-                                    },
-                                  ),
-                                ],
-                              ),
-                              dense: true,
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 16.0),
-                              visualDensity: VisualDensity.compact,
-                              onTap: () {
-                                // Delegate to engine to handle locked check
-                                engine.selectShape(shape);
-                              },
-                            ),
-                          );
-                        }),
-                        
-                      const Divider(height: 1),
-                    ],
+                  // ReorderableListView requires a stable key per item, keyed to
+                  // the LAYER identity so it follows the card across a reorder.
+                  return LayerTile(
+                    key: ValueKey(layer),
+                    engine: engine,
+                    layer: layer,
+                    // The grip forwards THIS visual index straight to onReorder.
+                    dragIndex: index,
                   );
                 },
               );
@@ -424,11 +122,13 @@ class LayersPanel extends StatelessWidget {
         ),
 
         // --- THE REFERENCE IMAGE LAYER (PERMANENTLY PINNED TO BOTTOM) ---
+        // Inline for now; outside the reordering surface. Candidate for extraction
+        // into reference_layer_tile.dart as a follow-up.
         ListenableBuilder(
           listenable: engine,
           builder: (context, _) {
             final ref = engine.referenceLayer;
-            
+
             return Container(
               color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.5),
               child: Column(
@@ -447,12 +147,11 @@ class LayersPanel extends StatelessWidget {
                             style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey),
                           ),
                         ),
-                        
                         if (ref == null)
-                           TextButton(
-                             onPressed: onLoadReferenceImage,
-                             child: const Text('Load...'),
-                           )
+                          TextButton(
+                            onPressed: onLoadReferenceImage,
+                            child: const Text('Load...'),
+                          )
                         else ...[
                           IconButton(
                             iconSize: 18,
@@ -491,7 +190,7 @@ class LayersPanel extends StatelessWidget {
                 ],
               ),
             );
-          }
+          },
         ),
       ],
     );

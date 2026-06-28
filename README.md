@@ -39,14 +39,15 @@ If you drag Point A, the line moves, and the circle moves. If you drag Point B, 
 Compass is rapidly evolving into a desktop-grade parametric engine. It currently supports:
 
 * **Parametric Geometry:** Lines, Circles, perfectly calculated Golden Spirals, and dynamic X-Splines. Splines live in two mathematical modes: a *fluid* Catmull-Rom curve whose vertex tension you adjust with the `A` key via a global distance tether, or *explicit* Bézier—right-click any vertex to **Convert to Bézier** and freeze its current tangent into independently draggable in/out handles for exact, asymmetric control. Right-click again to **Reset Handles** and dissolve back into fluid curvature. Conversion is loss-free: the curve never jumps, it simply becomes editable.
-* **Coons Patch Gradient Meshes:** Convert any Rectangle into a live Gradient Mesh. Built on true **Bicubic Coons Patch** interpolation rather than flat planar math, you can use the `A` key to adjust node tension and seamlessly bow the internal gradient and outer boundary edges. Meshes are fully integrated into the Boolean Engine—drop a Subtract shape over a mesh to non-destructively punch a hole through the color field. Use the `X` key to mathematically slice new rows and columns directly into the grid without breaking structural integrity.
+* **Coons Patch Gradient Meshes:** Convert any Rectangle into a live Gradient Mesh. Built on true **Bicubic Coons Patch** interpolation rather than flat planar math, you can use the `A` key to adjust node tension and seamlessly bow the internal gradient and outer boundary edges. Meshes are fully integrated into the Boolean Engine—drop a Subtract shape over a mesh to non-destructively punch a hole through the color field. Use the `X` key to mathematically slice new rows and columns directly into the grid without breaking structural integrity. Select nodes and use the Custom Color Picker to paint the mesh.
 * **Parametric Area Strokes & Width Constraints:** Hold `W` to sculpt variable-width ribbon strokes. Instead of manually smoothing hundreds of points, **Right-click a width handle** to drop a Constraint Flag (turning it orange). Drop two flags, and Compass dynamically calculates the parametric distance between them, fluidly interpolating the width of every node in-between. Dragging a pinned flag mathematically updates the entire tapered section in real-time. 
+* **Interactive Drag-and-Drop Hierarchy:** Fully reorderable Z-layers and shapes. Drag a layer to change global Z-order, drag a shape within a layer to dynamically change its Boolean evaluation order, or seamlessly drag a shape across layers to migrate it. **Lock layers** to freeze underlying scaffolding and safely work on top of complex construction geometry.
+* **Advanced Stroke Stacking:** Shapes are not limited to a single outline. Build an ordered stack of outward-expanding stroke rings per shape. Each ring acts as an independent Boolean operand—set it to "Fill" with a custom color, or "Cut" to non-destructively carve a gap through the underlying geometry. Drag rings up and down the stack to build complex concentric gaps or tree-ring effects.
+* **Live Boolean Engine:** Assign Union, Subtract, Intersect, or "Construction" (invisible guide) rules to any shape or stroke, recalculating the master path at 60fps.
 * **Rigid Body Transformations:** Use `Shift+R` to mathematically rotate an entire hierarchical system around a pivot, `R` to rotate a shape locally, `Ctrl/Cmd+R` to explicitly rotate isolated Bézier handles, or `Shift+Drag` to translate complex shape groupings. Explicit Bézier handles rotate in perfect lockstep with their points, so a hand-tuned corner stays mathematically true through any rotation.
 * **Axis-Locked Editing:** Hold `1` or `2` while dragging a vertex to constrain its motion to a single axis—horizontal or vertical—anchored exactly to the point where the drag began, for pixel-true orthogonal moves without guesswork.
 * **Infinite Mathematical Canvas:** Pan infinitely using the middle mouse button and zoom seamlessly without breaking underlying coordinate math.
 * **Reference Imagery:** Load, scale, position, and lock underlying raster sketches to trace over with perfect mathematics.
-* **Hierarchical Z-Layers:** Create layers, reorder shapes, and assign independent Fill Colors, Stroke Colors, and Stroke Widths. **Lock layers** to freeze underlying scaffolding and safely work on top of complex construction geometry.
-* **Live Boolean Engine:** Assign Union, Subtract, Intersect, or "Construction" (invisible guide) rules to any shape, recalculating the master path at 60fps.
 * **Bake Layers to Editable Splines:** Right-click any layer to *bake* its live Boolean result into clean, editable X-Splines on a fresh layer above—the source layer is preserved and simply switched off, never destroyed. Because the merged Boolean boundary exists only as an opaque rendered path, Compass samples that outline and reconstructs it with a **least-squares Bézier curve fit**: the output is sparse, smooth, and fully handle-editable, and—unlike a flattened polygon—stays mathematically smooth at *any* zoom level on the infinite canvas. Holes and disjoint islands are faithfully preserved by emitting outer contours as Union and inner contours as Subtract, so the baked silhouette is identical to the original. Only filled geometry is baked; pure strokes and construction guides are correctly ignored.
 * **Scaffolding Toggle:** Right-click the canvas (or use the View menu) to instantly hide all points, rules, and wireframes, leaving only your pure, clean vector geometry.
 * **Native `.compass` Serialization:** Save and Open projects directly to your local file system, preserving every mathematical constraint.
@@ -61,10 +62,11 @@ Compass is rapidly evolving into a desktop-grade parametric engine. It currently
 Compass heavily utilizes keyboard modifiers to keep the UI clean while providing complex mathematical transformations.
 
 **Mouse Controls:**
-* **Left Click:** Select shapes, drag points. Drag the purple in/out dots of a Bézier vertex to sculpt its curve handles directly. Right-click a Gradient Mesh node to change its color.
+* **Left Click:** Select shapes, drag points. Drag the purple in/out dots of a Bézier vertex to sculpt its curve handles directly.
 * **Right Click:** Context menu for Boolean operations, baking a layer into editable X-Splines, exporting to OBJ, converting geometry to splines/meshes, converting a vertex to or from Bézier handles, **toggling parametric width constraint flags**, and hiding scaffolding.
 * **Middle Click & Drag:** Pan the infinite canvas.
 * **Scroll Wheel:** Zoom the infinite canvas.
+* **Drag in Hierarchy Panel:** Grab the indicator dot next to a layer or shape to dynamically reorder Z-index, restack boolean logic, or move geometry between layers.
 
 **Keyboard Modifiers:**
 * **`Shift + Drag`**: Pan a rigid-body shape hierarchy.
@@ -85,12 +87,13 @@ Compass heavily utilizes keyboard modifiers to keep the UI clean while providing
 ### 🏗️ Project Architecture
 
 Compass uses a highly decoupled, feature-driven architecture to ensure scalable mathematics and 60fps rendering:
-* `models/geometry/`: The pure data models representing shapes, splines, and points.
+* `models/geometry/`: The pure data models representing shapes, splines, meshes, and points.
 * `constraints.dart`: The mathematical rule engine enforcing logic (e.g., Point-on-Circle, Distance-Radius).
+* `hierarchy_ops.dart`: Safely mutates Z-order and layer containment without breaking constraints.
 * `engine.dart`: The centralized state holder that cascades updates from the models to the UI.
 * `path_baker.dart`: Reconstructs editable Bézier geometry from opaque rendered Boolean paths via least-squares curve fitting—the math behind Layer Baking.
 * `io/`: Standalone serializers and compilers—the `.compass` project format, the SVG XML exporter, the offscreen PNG raster exporter, and the OBJ mesh tessellator.
-* `ui/`: Modular UI panels, dynamic HUDs, and the interactive `CustomPainter` canvas.
+* `ui/`: Modular UI panels (`layer_tile.dart`, `shape_row.dart`), pure-Dart color pickers, dynamic HUDs, and the interactive `CustomPainter` canvas.
 
 ---
 

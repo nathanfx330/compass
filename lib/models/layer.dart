@@ -26,123 +26,213 @@ class CompassLayer {
     String? id,
   }) : id = id ?? UniqueKey().toString();
 
+  /// Applies one (path, op) to the running [master], preserving the ORIGINAL
+  /// seeding rule the boolean walk has always used: an `add` against an empty
+  /// master ESTABLISHES the base region; a subtract/intersect against nothing
+  /// yields nothing (you cannot carve what is not there). An empty contribution
+  /// or a `none` op is a no-op.
+  ///
+  /// This is the single chokepoint that BOTH a shape's fill op and its stroke
+  /// regions route through, so the committed "stroke before fill" ordering is
+  /// simply the order of the calls within a shape's turn -- no per-call casing.
+  ///
+  /// The contribution is always a freshly-built Path (getPath / getCenterPath /
+  /// getStrokeOutlinePath all return new paths), so returning it directly when
+  /// seeding cannot alias a shape's internal state, and Path.combine never mutates
+  /// its inputs.
+  Path _combine(Path master, Path contribution, CompassBooleanOp op) {
+    if (op == CompassBooleanOp.none) return master;
+    if (contribution.computeMetrics().isEmpty) return master;
+
+    if (master.computeMetrics().isEmpty) {
+      return op == CompassBooleanOp.add ? contribution : master;
+    }
+
+    switch (op) {
+      case CompassBooleanOp.add:
+        return Path.combine(PathOperation.union, master, contribution);
+      case CompassBooleanOp.subtract:
+        return Path.combine(PathOperation.difference, master, contribution);
+      case CompassBooleanOp.intersect:
+        return Path.combine(PathOperation.intersect, master, contribution);
+      case CompassBooleanOp.none:
+        return master;
+    }
+  }
+
+  /// Walks a shape's OUTWARD-STACKED stroke stack and yields one record per
+  /// non-zero-width region, in list order, carrying that region plus its band
+  /// geometry inputs (width + innerOffset). This is the SINGLE source of the
+  /// stacking-cursor math: region 0 starts exactly at the shape's boundary (0.0).
+  ///
+  /// Starting at 0.0 means the custom ring touches the base shape perfectly, 
+  /// allowing the boolean engine to merge them into a single continuous object.
+  List<({StrokeRegion region, double width, double innerOffset})> _strokeBands(
+      CompassShape shape) {
+    final out = <({StrokeRegion region, double width, double innerOffset})>[];
+    
+    // Start exactly at the shape's boundary (0.0 offset).
+    // This pushes the strokes purely OUTWARD without leaving a mathematical gap.
+    double offset = 0.0; 
+    
+    for (final region in shape.strokeRegions) {
+      final w = region.width;
+      if (w <= 0) continue;
+      
+      out.add((region: region, width: w, innerOffset: offset));
+      offset += w;
+    }
+    return out;
+  }
+
+  /// Applies a shape's stroke stack to [master], in list order, returning the
+  /// updated path. The stacking geometry comes from _strokeBands (shared with the
+  /// overpaint collector), so all four boolean walks and the paint pass agree on
+  /// where every band sits.
+  ///
+  /// [addsAllowed] false means only subtract/intersect regions are applied (the
+  /// ribbon-area and mesh-clip walks, which can only be CARVED, never seeded, by a
+  /// stroke). When true (the fill/outline walks) all three ops apply through
+  /// _combine, which also handles seeding an empty master from an `add`. An add
+  /// region skipped under addsAllowed:false still advanced the cursor inside
+  /// _strokeBands, so later subtract/intersect bands land at the right radii.
+  Path _applyStrokeStack(Path master, CompassShape shape, {required bool addsAllowed}) {
+    for (final b in _strokeBands(shape)) {
+      final op = b.region.op;
+      final apply = addsAllowed ||
+          op == CompassBooleanOp.subtract ||
+          op == CompassBooleanOp.intersect;
+      if (!apply) continue;
+
+      final band = shape.getStrokeOutlinePath(b.width, b.innerOffset);
+      if (addsAllowed) {
+        master = _combine(master, band, op);
+      } else if (master.computeMetrics().isNotEmpty &&
+          band.computeMetrics().isNotEmpty) {
+        // Carve-only path: never seed, only difference/intersect an existing master.
+        master = op == CompassBooleanOp.subtract
+            ? Path.combine(PathOperation.difference, master, band)
+            : Path.combine(PathOperation.intersect, master, band);
+      }
+    }
+    return master;
+  }
+
+  /// True if any of the shape's stroke regions can CARVE (subtract/intersect) --
+  /// the cheap gate the ribbon-area walk uses to decide a shape is interesting.
+  bool _hasCarvingStroke(CompassShape shape) {
+    for (final r in shape.strokeRegions) {
+      if (r.op == CompassBooleanOp.subtract || r.op == CompassBooleanOp.intersect) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// The master boolean path intended to be OUTLINED with the uniform stroke.
   /// Excludes Variable-Width Splines, which live in their own Stroke Area Path.
-  ///
-  /// NOTE: this is deliberately NOT the fill path anymore. It still excludes
-  /// width splines so the uniform stroke pass (renderer step 1b) never paints a
-  /// hairline along the inner edge of a fat ribbon. The actual fill region --
-  /// which DOES include a closed width spline's centerline -- comes from
-  /// getLayerFillPath() below. Kept byte-for-byte identical to its old self so
-  /// nothing that already depends on it (the uniform stroke) shifts.
   Path getLayerPath() {
     Path master = Path();
     for (var shape in shapes) {
-      if (!shape.isVisible || shape.operation == CompassBooleanOp.none) continue;
+      if (!shape.isVisible) continue;
 
-      // Gradient meshes are their own render category: they paint themselves via
-      // drawVertices, clipped to the boolean-carved silhouette in the renderer's
-      // dedicated mesh pass. They must never join the flat fill/stroke boolean
-      // union (that would stroke the mesh's quad outline as if it were a normal
-      // shape boundary), so skip them here.
+      // Gradient meshes are their own render category.
       if (shape is CompassMesh) continue;
 
-      // Variable-width splines are treated as area strokes. They do not add to the fill.
-      if (shape.operation == CompassBooleanOp.add) {
-        if (shape is CompassXSpline && shape.hasWidthProfile) continue;
-      }
+      // --- STROKE STACK (before fill) ---
+      master = _applyStrokeStack(master, shape, addsAllowed: true);
 
-      final shapePath = shape.getPath();
-      if (shapePath.computeMetrics().isEmpty) continue;
-
-      if (master.computeMetrics().isEmpty && shape.operation == CompassBooleanOp.add) {
-        master = shapePath;
-        continue;
-      }
-
-      if (shape.operation == CompassBooleanOp.add) {
-        master = Path.combine(PathOperation.union, master, shapePath);
-      } else if (shape.operation == CompassBooleanOp.subtract) {
-        master = Path.combine(PathOperation.difference, master, shapePath);
-      } else if (shape.operation == CompassBooleanOp.intersect) {
-        master = Path.combine(PathOperation.intersect, master, shapePath);
+      // --- FILL CONTRIBUTION ---
+      if (shape.operation != CompassBooleanOp.none) {
+        final bool isAddWidthSpline = shape.operation == CompassBooleanOp.add &&
+            shape is CompassXSpline &&
+            shape.hasWidthProfile;
+        
+        if (!isAddWidthSpline) {
+          master = _combine(master, shape.getPath(), shape.operation);
+        }
       }
     }
     return master;
   }
 
   /// The master boolean path intended to be FILLED.
-  ///
-  /// Identical to getLayerPath() for every non-width shape, with ONE addition: a
-  /// variable-width spline that is `add` AND CLOSED contributes its centerline
-  /// region (getCenterPath) to the fill. This is what promotes an area stroke to
-  /// a first-class stroke -- the centerline is the fill, the ribbon (from
-  /// getLayerStrokeAreaPath) is the centered stroke, and the two coexist.
-  ///
-  /// An OPEN width spline encloses no area, so it contributes nothing here; its
-  /// ribbon still draws as a capsule via the stroke-area path. Because the fill
-  /// region is derived live from `isClosed` and never stored, an
-  /// open -> close -> open round-trip is lossless: close fills, open empties,
-  /// close fills again, with nothing to persist or rebuild.
-  ///
-  /// Subtract/intersect semantics are unchanged from getLayerPath() -- a width
-  /// spline used as a subtractor still carves with its ribbon (getPath), exactly
-  /// as before. The ONLY behavioral difference between the two methods is the
-  /// closed-width-spline centerline union.
   Path getLayerFillPath() {
     Path master = Path();
     for (var shape in shapes) {
-      if (!shape.isVisible || shape.operation == CompassBooleanOp.none) continue;
+      if (!shape.isVisible) continue;
 
       // Gradient meshes never join the flat fill union -- they're a separate
-      // self-painted, separately-clipped render category. Skipping them here is
-      // what keeps a mesh from being painted as a solid `layer.color` block
-      // (renderer step 1a) underneath its own gradient surface.
+      // self-painted, separately-clipped render category.
       if (shape is CompassMesh) continue;
 
-      // Decide what this shape contributes to the FILL.
-      Path shapePath;
-      if (shape is CompassXSpline &&
-          shape.hasWidthProfile &&
-          shape.operation == CompassBooleanOp.add) {
-        // Closed: the centerline loop is the fill region. Open: no enclosed
-        // area, so skip (the ribbon still strokes via getLayerStrokeAreaPath).
-        if (!shape.isClosed) continue;
-        shapePath = shape.getCenterPath()..fillType = PathFillType.evenOdd;
-      } else {
-        shapePath = shape.getPath();
-      }
+      // --- STROKE STACK (before fill) ---
+      master = _applyStrokeStack(master, shape, addsAllowed: true);
 
-      if (shapePath.computeMetrics().isEmpty) continue;
+      // --- FILL CONTRIBUTION ---
+      if (shape.operation != CompassBooleanOp.none) {
+        Path? fillPath;
+        if (shape is CompassXSpline &&
+            shape.hasWidthProfile &&
+            shape.operation == CompassBooleanOp.add) {
+          if (shape.isClosed) {
+            fillPath = shape.getCenterPath()..fillType = PathFillType.evenOdd;
+          }
+        } else {
+          fillPath = shape.getPath();
+        }
 
-      if (master.computeMetrics().isEmpty && shape.operation == CompassBooleanOp.add) {
-        master = shapePath;
-        continue;
-      }
-
-      if (shape.operation == CompassBooleanOp.add) {
-        master = Path.combine(PathOperation.union, master, shapePath);
-      } else if (shape.operation == CompassBooleanOp.subtract) {
-        master = Path.combine(PathOperation.difference, master, shapePath);
-      } else if (shape.operation == CompassBooleanOp.intersect) {
-        master = Path.combine(PathOperation.intersect, master, shapePath);
+        if (fillPath != null) {
+          master = _combine(master, fillPath, shape.operation);
+        }
       }
     }
     return master;
   }
 
+  /// The colored ADD-band overpaints for this layer, in paint order (Z-order across
+  /// shapes, then stack order -- innermost first -- within a shape), as (path,
+  /// color) pairs. The renderer/PNG paint these on TOP of the flat layer fill so a
+  /// custom-colored band shows in its own color instead of the layer fill color.
+  List<(Path, Color)> getStrokeAddBandOverpaints(Path fillMaster) {
+    if (fillMaster.computeMetrics().isEmpty) return const [];
+
+    final out = <(Path, Color)>[];
+    for (var shape in shapes) {
+      if (!shape.isVisible) continue;
+      if (shape is CompassMesh) continue; // meshes carry no stroke bands
+
+      for (final b in _strokeBands(shape)) {
+        if (b.region.op != CompassBooleanOp.add) continue;
+        final color = b.region.color;
+        if (color == null) continue; // null-color add bands ride the master
+
+        final band = shape.getStrokeOutlinePath(b.width, b.innerOffset);
+        if (band.computeMetrics().isEmpty) continue;
+
+        final clipped = Path.combine(PathOperation.intersect, fillMaster, band);
+        if (clipped.computeMetrics().isEmpty) continue;
+
+        out.add((clipped, color));
+      }
+    }
+    return out;
+  }
+
   /// The master boolean path for Variable-Width Area Strokes.
-  /// Unions all variable-width splines together, while still respecting
-  /// subtractions and intersections from ALL other shapes on the layer.
-  ///
-  /// Meshes need no special handling here: a mesh is always `add` and is not a
-  /// width spline, so it falls through the `add` branch's inner check and is
-  /// never unioned in; and being `add` it is never a subtract/intersect cutter
-  /// either. So it can neither contribute to nor carve the area-stroke master.
   Path getLayerStrokeAreaPath() {
     Path master = Path();
     for (var shape in shapes) {
-      if (!shape.isVisible || shape.operation == CompassBooleanOp.none) continue;
+      if (!shape.isVisible) continue;
+      if (shape.operation == CompassBooleanOp.none && !_hasCarvingStroke(shape)) {
+        continue;
+      }
+
+      // --- STROKE STACK carve (before fill) --- carve-only: never seeds the master.
+      master = _applyStrokeStack(master, shape, addsAllowed: false);
+
+      // --- FILL handling (original area-stroke logic) ---
+      if (shape.operation == CompassBooleanOp.none) continue;
 
       final shapePath = shape.getPath();
       if (shapePath.computeMetrics().isEmpty) continue;
@@ -172,30 +262,20 @@ class CompassLayer {
   }
 
   /// The clip silhouette for a SINGLE gradient mesh on this layer: the mesh's own
-  /// outer ring, carved by the layer's boolean stack. This is the "shape it with
-  /// booleans like Illustrator, but non-destructive" mechanism -- the renderer
-  /// clips the mesh's drawVertices output to this path each frame.
-  ///
-  /// Construction: seed with mesh.getPath() (the deformable outer-ring quad), then
-  /// walk the layer's shapes IN Z-ORDER, applying every `subtract` shape as a
-  /// difference and every `intersect` shape as an intersection -- the same
-  /// order-dependent semantics getLayerFillPath uses, so a mesh carves the way a
-  /// fill carves. Drop a circle on `subtract` and it bites a hole; set a shape to
-  /// `intersect` and the mesh is masked to that shape's interior.
-  ///
-  /// Meshes are skipped as cutters entirely (the `is CompassMesh` guard covers
-  /// both THIS mesh -- a mesh can't carve itself -- and any sibling mesh, since a
-  /// mesh is always additive content and never a subtractor). Construction guides
-  /// (`none`) and hidden shapes don't cut, matching the fill path. If nothing
-  /// carves, this returns the bare quad, so an uncut mesh fills its full frame.
+  /// outer ring, carved by the layer's boolean stack. The renderer clips the
+  /// mesh's drawVertices output to this path each frame.
   Path getLayerMeshClipPath(CompassMesh mesh) {
     Path clip = mesh.getPath();
     if (clip.computeMetrics().isEmpty) return clip;
 
     for (var shape in shapes) {
-      if (!shape.isVisible || shape.operation == CompassBooleanOp.none) continue;
+      if (!shape.isVisible) continue;
       if (shape is CompassMesh) continue; // self + siblings: meshes never carve
 
+      // --- STROKE STACK cut (before fill) --- carve-only: add regions do nothing.
+      clip = _applyStrokeStack(clip, shape, addsAllowed: false);
+
+      // --- FILL cut ---
       if (shape.operation == CompassBooleanOp.subtract) {
         final cutter = shape.getPath();
         if (cutter.computeMetrics().isEmpty) continue;

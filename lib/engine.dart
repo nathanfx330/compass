@@ -31,6 +31,9 @@ import 'io/obj_exporter.dart';
 import 'path_baker.dart';
 import 'shape_converter.dart'; // <--- NEW: Extracted Shape Converter
 
+// --- HIERARCHY OPS ---
+import 'hierarchy_ops.dart'; // <--- NEW: Extracted Z-order / containment mutations
+
 /// The state holder and brain of the application.
 class CompassEngine extends ChangeNotifier {
   final List<CompassPoint> points = [];
@@ -458,6 +461,33 @@ class CompassEngine extends ChangeNotifier {
   }
 
   // ===========================================================================
+  // HIERARCHY Z-ORDER ACTIONS (Delegated to hierarchy_ops.dart)
+  // ===========================================================================
+  // Thin pass-throughs to HierarchyOps, parallel to the ShapeConverter block
+  // above. Each indexed argument is a MODEL index (into engine.layers /
+  // layer.shapes) and means the FINAL index the moved item should occupy -- the
+  // panel converts its reversed visual indices to model indices before calling.
+  // See hierarchy_ops.dart for the full index contract and the panel conversion
+  // recipe. HierarchyOps owns the snapshot + notify, so these add nothing.
+
+  void reorderLayer(int from, int to) {
+    HierarchyOps.reorderLayer(this, from, to);
+  }
+
+  void reorderShape(CompassLayer layer, int from, int to) {
+    HierarchyOps.reorderShape(this, layer, from, to);
+  }
+
+  void moveShapeToLayer(
+    CompassShape shape,
+    CompassLayer fromLayer,
+    CompassLayer toLayer,
+    int insertIndex,
+  ) {
+    HierarchyOps.moveShapeToLayer(this, shape, fromLayer, toLayer, insertIndex);
+  }
+
+  // ===========================================================================
   // GRADIENT MESH ENGINE ACTIONS
   // ===========================================================================
 
@@ -616,6 +646,88 @@ class CompassEngine extends ChangeNotifier {
 
   void changeShapeOperation(CompassShape shape, CompassBooleanOp op) {
     shape.operation = op;
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  // ===========================================================================
+  // STROKE-REGION STACK ACTIONS
+  // ===========================================================================
+  // A shape owns an ordered list of outward-stacked stroke regions. Region 0 is the
+  // INNERMOST ring (straddling the shape outline); each later region rides OUTWARD
+  // on the previous one's outer edge, and if an inner ring widens the outer ones
+  // ride along. A stroke is binary: it either FILLS (add -- paints a ring, may have
+  // its own color) or CUTS (subtract -- carves the geometry beneath, paints
+  // nothing). These mutators are the only way the UI edits the list; each snapshots
+  // (undoable) and notifies (live reflow).
+
+  // Append a new region as the new OUTERMOST ring. Defaults to a FILL (add) of width
+  // 8 -- a painted ring that shows its color chip immediately. Flip it to a cut in
+  // the row toggle to carve instead. Called by the layers-panel "+ Add Stroke".
+  void addStrokeRegion(CompassShape shape,
+      {CompassBooleanOp op = CompassBooleanOp.add, double width = 8.0}) {
+    shape.strokeRegions.add(StrokeRegion(op: op, width: width));
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  // Remove the region at [index] from the stack. Removing the last region returns
+  // the shape to no-stroke. Out-of-range indices no-op.
+  void removeStrokeRegion(CompassShape shape, int index) {
+    if (index < 0 || index >= shape.strokeRegions.length) return;
+    shape.strokeRegions.removeAt(index);
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  // Set the op of the region at [index]. For a stroke this is binary in the UI --
+  // add (FILL) or subtract (CUT). `none`/`intersect` are not offered for strokes but
+  // are tolerated as harmless if ever passed. Out-of-range indices no-op.
+  void setStrokeRegionOp(CompassShape shape, int index, CompassBooleanOp op) {
+    if (index < 0 || index >= shape.strokeRegions.length) return;
+    shape.strokeRegions[index].op = op;
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  // Move the region at [index] by [delta] positions in the stack (delta -1 = one
+  // step INWARD toward index 0, +1 = one step OUTWARD). This is how a cut ring is
+  // restacked to sit on top of (outside) the fill rings, or fills are reordered.
+  // Because the bands stack outward by list order, reordering changes each ring's
+  // radius and where a cut bites. No-ops if either the source or target index is
+  // out of range (so the ends clamp naturally).
+  void moveStrokeRegion(CompassShape shape, int index, int delta) {
+    final list = shape.strokeRegions;
+    final target = index + delta;
+    if (index < 0 || index >= list.length) return;
+    if (target < 0 || target >= list.length) return;
+    final r = list.removeAt(index);
+    list.insert(target, r);
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  // Set the width of the region at [index]. This is what the Properties-panel
+  // per-stroke sliders drive: dragging one reflows that band (and every band
+  // stacked outside it, since the outward cursor depends on each width) live via
+  // notifyListeners. Snapshots so the change round-trips through undo. Non-positive
+  // widths are clamped to a tiny epsilon so a band never inverts. Out-of-range
+  // indices no-op.
+  void setStrokeRegionWidth(CompassShape shape, int index, double width) {
+    if (index < 0 || index >= shape.strokeRegions.length) return;
+    shape.strokeRegions[index].width = width <= 0 ? 0.01 : width;
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  // Set the fill color of the region at [index]. Only a FILL (add) ring paints, so
+  // this is meaningful only for fill rings -- but the value is stored regardless, so
+  // flipping a cut ring back to fill restores its color with no re-pick. Passing
+  // [color] = null reverts the ring to inheriting the owning layer's fill color.
+  // Discrete and undoable, so it snapshots. Out-of-range indices no-op.
+  void setStrokeRegionColor(CompassShape shape, int index, Color? color) {
+    if (index < 0 || index >= shape.strokeRegions.length) return;
+    shape.strokeRegions[index].color = color;
     saveSnapshot();
     notifyListeners();
   }
