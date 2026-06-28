@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'engine.dart';
+import 'theme_manager.dart'; // <--- NEW: Import ThemeManager
 import 'ui/canvas/compass_canvas.dart';
 
 // --- UI COMPONENTS ---
@@ -13,11 +14,11 @@ import 'ui/workspace/menu_bar.dart';
 import 'ui/workspace/dialogs.dart';
 
 class CompassWorkspace extends StatefulWidget {
-  final ValueNotifier<ThemeMode> themeNotifier;
+  final ThemeManager themeManager; // <--- CHANGED: Use ThemeManager
 
   const CompassWorkspace({
     super.key,
-    required this.themeNotifier,
+    required this.themeManager, // <--- CHANGED
   });
 
   @override
@@ -102,7 +103,7 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
               // === DESKTOP MENU BAR ===
               CompassMenuBar(
                 engine: _engine,
-                themeNotifier: widget.themeNotifier,
+                themeManager: widget.themeManager, // <--- CHANGED: Pass ThemeManager
                 showScaffolding: _showScaffolding,
                 onToggleScaffolding: _toggleScaffolding,
                 showHandles: _showHandles, // <--- NEW

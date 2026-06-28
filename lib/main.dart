@@ -1,5 +1,8 @@
+// /lib/main.dart
+
 import 'package:flutter/material.dart';
 import 'workspace.dart';
+import 'theme_manager.dart';
 
 void main() {
   runApp(const CompassApp());
@@ -13,41 +16,43 @@ class CompassApp extends StatefulWidget {
 }
 
 class _CompassAppState extends State<CompassApp> {
-  // Notifier to hold and broadcast the current theme state globally
-  final ValueNotifier<ThemeMode> _themeNotifier = ValueNotifier(ThemeMode.dark);
+  // Use our new ThemeManager to hold both light/dark mode and the active color theme
+  final ThemeManager _themeManager = ThemeManager();
 
   @override
   void dispose() {
-    _themeNotifier.dispose();
+    _themeManager.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: _themeNotifier,
-      builder: (context, currentThemeMode, child) {
+    return ListenableBuilder(
+      listenable: _themeManager,
+      builder: (context, _) {
+        final activeTheme = _themeManager.activeTheme;
+
         return MaterialApp(
           title: 'Compass',
-          themeMode: currentThemeMode,
+          themeMode: _themeManager.themeMode,
           darkTheme: ThemeData.dark(useMaterial3: true).copyWith(
             colorScheme: ColorScheme.fromSeed(
-              seedColor: Colors.blueGrey,
+              seedColor: activeTheme.seedColor,
               brightness: Brightness.dark,
             ),
-            scaffoldBackgroundColor: const Color(0xFF1E1E1E), // Dark IDE/Editor background
+            scaffoldBackgroundColor: activeTheme.darkBackground,
           ),
           theme: ThemeData(
+            useMaterial3: true,
             colorScheme: ColorScheme.fromSeed(
-              seedColor: Colors.blueGrey,
+              seedColor: activeTheme.seedColor,
               brightness: Brightness.light,
             ),
-            scaffoldBackgroundColor: const Color(0xFFF0F0F0), // Light IDE background
-            useMaterial3: true,
+            scaffoldBackgroundColor: activeTheme.lightBackground,
           ),
           debugShowCheckedModeBanner: false,
-          // We pass the notifier down so the UI can trigger the change
-          home: CompassWorkspace(themeNotifier: _themeNotifier),
+          // Pass the manager down so the UI can trigger theme changes
+          home: CompassWorkspace(themeManager: _themeManager),
         );
       },
     );

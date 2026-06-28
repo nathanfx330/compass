@@ -2,25 +2,27 @@
 
 import 'package:flutter/material.dart';
 import '../../engine.dart';
+import '../../theme_manager.dart'; // <--- NEW: Import ThemeManager
 import 'dialogs.dart';
+import 'settings_dialog.dart'; // <--- NEW: Import SettingsDialog
 
 class CompassMenuBar extends StatelessWidget {
   final CompassEngine engine;
-  final ValueNotifier<ThemeMode> themeNotifier;
+  final ThemeManager themeManager; // <--- CHANGED: Use ThemeManager
   final bool showScaffolding;
   final VoidCallback onToggleScaffolding;
-  final bool showHandles; // <--- NEW
-  final VoidCallback onToggleHandles; // <--- NEW
+  final bool showHandles; 
+  final VoidCallback onToggleHandles; 
   final VoidCallback onClearCanvas;
 
   const CompassMenuBar({
     super.key,
     required this.engine,
-    required this.themeNotifier,
+    required this.themeManager, // <--- CHANGED
     required this.showScaffolding,
     required this.onToggleScaffolding,
-    required this.showHandles, // <--- NEW
-    required this.onToggleHandles, // <--- NEW
+    required this.showHandles, 
+    required this.onToggleHandles, 
     required this.onClearCanvas,
   });
 
@@ -49,6 +51,18 @@ class CompassMenuBar extends StatelessWidget {
                       onPressed: () => CompassDialogs.showAboutDialog(context),
                       leadingIcon: const Icon(Icons.info_outline),
                       child: const Text('About Compass'),
+                    ),
+                    const CustomMenuItemDivider(),
+                    // <--- NEW: Preferences Option --->
+                    MenuItemButton(
+                      onPressed: () {
+                        showDialog(
+                          context: context,
+                          builder: (context) => SettingsDialog(themeManager: themeManager),
+                        );
+                      },
+                      leadingIcon: const Icon(Icons.settings),
+                      child: const Text('Preferences...'),
                     ),
                   ],
                   child: const Text(
@@ -117,7 +131,6 @@ class CompassMenuBar extends StatelessWidget {
                       leadingIcon: Icon(showScaffolding ? Icons.visibility : Icons.visibility_off),
                       child: Text(showScaffolding ? 'Hide Scaffolding' : 'Show Scaffolding'),
                     ),
-                    // <--- NEW: Menu Item for toggling Handles --->
                     MenuItemButton(
                       onPressed: onToggleHandles,
                       leadingIcon: Icon(showHandles ? Icons.gesture : Icons.timeline),
@@ -127,17 +140,19 @@ class CompassMenuBar extends StatelessWidget {
                     SubmenuButton(
                       menuChildren: [
                         MenuItemButton(
-                          onPressed: () => themeNotifier.value = ThemeMode.light,
+                          // <--- CHANGED: Use themeManager --->
+                          onPressed: () => themeManager.themeMode = ThemeMode.light, 
                           leadingIcon: const Icon(Icons.light_mode),
                           child: const Text('Light Mode'),
                         ),
                         MenuItemButton(
-                          onPressed: () => themeNotifier.value = ThemeMode.dark,
+                          // <--- CHANGED: Use themeManager --->
+                          onPressed: () => themeManager.themeMode = ThemeMode.dark, 
                           leadingIcon: const Icon(Icons.dark_mode),
                           child: const Text('Dark Mode'),
                         ),
                       ],
-                      child: const Text('Theme'),
+                      child: const Text('Quick Theme Mode'),
                     ),
                   ],
                   child: const Text('View'),
