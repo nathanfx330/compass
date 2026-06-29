@@ -270,6 +270,37 @@ class CompassXSpline extends CompassShape {
     ));
 
     if (n < 2) return resolvedBase;
+
+    // --- Effective peg-radius table (the fix for adjacent pulleys) ---
+    // Each node's effective peg radius: the active pulley size (round
+    // cornerRadius, else sharp miterSize, else 0), clamped ONCE here to 0.99 of
+    // its shorter incident raw edge. Open-spline endpoints carry no peg (0), and
+    // a node with no pulley is 0.
+    //
+    // This table is what makes a pulley and its NEIGHBOR agree on the tangent of
+    // the edge they share. Each pulley below builds its entry/exit tangent as the
+    // common EXTERNAL tangent to the neighbor's peg via acos((R - R_neighbor)/d).
+    // When the neighbor is a bare vertex (R_neighbor == 0) this is exactly the old
+    // acos(R/d), so plain-neighbor behavior is unchanged. When the neighbor is
+    // itself a peg (round or miter), both ends derive the SAME common tangent
+    // line, so the straight seam between them lands ON that line instead of the
+    // arc over-wrapping toward where a bare-vertex tangent would have sat.
+    final effR = List<double>.filled(n, 0.0);
+    for (int i = 0; i < n; i++) {
+      final bool canPulley = isClosed || (i > 0 && i < n - 1);
+      if (!canPulley) continue;
+      final double raw = nodes[i].cornerRadius.value > 0.01
+          ? nodes[i].cornerRadius.value
+          : (nodes[i].miterSize.value > 0.01 ? nodes[i].miterSize.value : 0.0);
+      if (raw <= 0.0) continue;
+      final prevIdx = (i - 1 + n) % n;
+      final nextIdx = (i + 1) % n;
+      final dA = (resolvedBase[prevIdx].point - resolvedBase[i].point).distance;
+      final dC = (resolvedBase[nextIdx].point - resolvedBase[i].point).distance;
+      final maxR = min(dA, dC) * 0.99;
+      effR[i] = raw > maxR ? maxR : raw;
+    }
+
     final result = <ResolvedSplineNode>[];
 
     for(int i = 0; i < n; i++) {
@@ -295,15 +326,15 @@ class CompassXSpline extends CompassShape {
              continue;
           }
 
-          double R = node.cornerRadius.value;
-          double maxR = min(dA, dC) * 0.99;
-          if (R > maxR) R = maxR;
+          double R = effR[i];
 
           double thetaA = atan2(vA.dy, vA.dx);
           double thetaC = atan2(vC.dy, vC.dx);
 
-          double betaA = acos((R / dA).clamp(-1.0, 1.0));
-          double betaC = acos((R / dC).clamp(-1.0, 1.0));
+          // Common external tangent to each neighbor's peg (effR[neighbor] == 0
+          // for a bare vertex -> reduces to acos(R/d)).
+          double betaA = acos(((R - effR[prevIdx]) / dA).clamp(-1.0, 1.0));
+          double betaC = acos(((R - effR[nextIdx]) / dC).clamp(-1.0, 1.0));
 
           double Z = vA.dx * vC.dy - vA.dy * vC.dx;
           double S = Z > 0 ? 1.0 : -1.0;
@@ -357,10 +388,13 @@ class CompassXSpline extends CompassShape {
           // to a point instead of a curve.
           //
           // The tangent construction is byte-for-byte the circular pulley's
-          // (thetaA/thetaC, betaA/betaC, Z/S, phiA/phiC). That is deliberate:
-          // because the round pulley already wraps on the correct (outer)
-          // side, reusing its exact angle math guarantees the sharp version
-          // wraps on the SAME side -- no winding-sign guesswork.
+          // (thetaA/thetaC, betaA/betaC, Z/S, phiA/phiC), now including the
+          // common-external-tangent neighbor term. That is deliberate: because
+          // the round pulley already wraps on the correct (outer) side, reusing
+          // its exact angle math guarantees the sharp version wraps on the SAME
+          // side -- no winding-sign guesswork -- and a miter sitting next to a
+          // round (or another miter) shares the same tangent line, so the seam
+          // connects cleanly instead of over-wrapping.
           //
           // Geometry: picture a peg of radius R centered on the vertex. The
           // rope runs tangent to the peg, and the two tangent lines (one from
@@ -399,16 +433,14 @@ class CompassXSpline extends CompassShape {
              continue;
           }
 
-          double R = node.miterSize.value;
-          double maxR = min(dA, dC) * 0.99;
-          if (R > maxR) R = maxR;
+          double R = effR[i];
 
           // --- Tangent construction: IDENTICAL to the circular pulley. ---
           double thetaA = atan2(vA.dy, vA.dx);
           double thetaC = atan2(vC.dy, vC.dx);
 
-          double betaA = acos((R / dA).clamp(-1.0, 1.0));
-          double betaC = acos((R / dC).clamp(-1.0, 1.0));
+          double betaA = acos(((R - effR[prevIdx]) / dA).clamp(-1.0, 1.0));
+          double betaC = acos(((R - effR[nextIdx]) / dC).clamp(-1.0, 1.0));
 
           double Z = vA.dx * vC.dy - vA.dy * vC.dx;
           double S = Z > 0 ? 1.0 : -1.0;
