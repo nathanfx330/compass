@@ -674,13 +674,13 @@ class CompassEngine extends ChangeNotifier {
   void insertPointIntoSpline(CompassPoint p, CompassXSpline spline) {
     final tap = Offset(p.x.value, p.y.value);
     final details = spline.getInsertDetailsForOffset(tap);
-    _spliceNodeIntoSpline(spline, p, details.$1, details.$2);
+    _spliceNodeIntoSpline(spline, p, details.$1, details.$2, exactPos: tap);
 
     saveSnapshot();
     notifyListeners();
   }
 
-  CompassPoint? subdivideSplineSegment(CompassXSpline spline, int segmentIndex, {double t = 0.5}) {
+  CompassPoint? subdivideSplineSegment(CompassXSpline spline, int segmentIndex, {double t = 0.5, Offset? exactPos}) {
     final int n = spline.nodes.length;
     if (n < 2) return null;
 
@@ -692,22 +692,25 @@ class CompassEngine extends ChangeNotifier {
 
     final a = spline.nodes[segmentIndex].point;
     final b = spline.nodes[(segmentIndex + 1) % n].point;
+    
+    // Utilize exact position on the resolved curve if provided
     final p = CompassPoint(
-      x: (a.x.value + b.x.value) / 2,
-      y: (a.y.value + b.y.value) / 2,
+      x: exactPos?.dx ?? (a.x.value + b.x.value) / 2,
+      y: exactPos?.dy ?? (a.y.value + b.y.value) / 2,
     );
+    
     points.add(p);
     p.x.addListener(notifyListeners);
     p.y.addListener(notifyListeners);
 
-    _spliceNodeIntoSpline(spline, p, index, t);
+    _spliceNodeIntoSpline(spline, p, index, t, exactPos: exactPos);
 
     saveSnapshot();
     notifyListeners();
     return p;
   }
 
-  void _spliceNodeIntoSpline(CompassXSpline spline, CompassPoint p, int index, double t) {
+  void _spliceNodeIntoSpline(CompassXSpline spline, CompassPoint p, int index, double t, {Offset? exactPos}) {
     final node = CompassSplineNode(point: p);
     
     node.tension.addListener(notifyListeners);
@@ -724,38 +727,48 @@ class CompassEngine extends ChangeNotifier {
       node.widthLeft.value = prevNode.widthLeft.value * (1.0 - t) + nextNode.widthLeft.value * t;
       node.widthRight.value = prevNode.widthRight.value * (1.0 - t) + nextNode.widthRight.value * t;
 
-      final controls = spline.getEvaluatedControls();
-      final hOut = controls[prevIdx].$1;
-      final hIn = controls[nextIdx].$2;
+      bool hasPulley = prevNode.cornerRadius.value > 0.01 || prevNode.miterSize.value > 0.01 ||
+                       nextNode.cornerRadius.value > 0.01 || nextNode.miterSize.value > 0.01;
 
-      final p0 = Offset(prevNode.point.x.value, prevNode.point.y.value);
-      final p3 = Offset(nextNode.point.x.value, nextNode.point.y.value);
+      if (exactPos != null && hasPulley) {
+        // If a pulley abstracts the corner, bypass baking handles
+        p.x.value = exactPos.dx;
+        p.y.value = exactPos.dy;
+      } else {
+        // Perform a standard raw de Casteljau split to preserve explicit curve geometry
+        final controls = spline.getEvaluatedControls();
+        final hOut = controls[prevIdx].$1;
+        final hIn = controls[nextIdx].$2;
 
-      final p1 = p0 + hOut;
-      final p2 = p3 + hIn;
+        final p0 = Offset(prevNode.point.x.value, prevNode.point.y.value);
+        final p3 = Offset(nextNode.point.x.value, nextNode.point.y.value);
 
-      final m0 = Offset.lerp(p0, p1, t)!;
-      final m1 = Offset.lerp(p1, p2, t)!;
-      final m2 = Offset.lerp(p2, p3, t)!;
-      final r0 = Offset.lerp(m0, m1, t)!;
-      final r1 = Offset.lerp(m1, m2, t)!;
-      final bPt = Offset.lerp(r0, r1, t)!;
+        final p1 = p0 + hOut;
+        final p2 = p3 + hIn;
 
-      p.x.value = bPt.dx;
-      p.y.value = bPt.dy;
+        final m0 = Offset.lerp(p0, p1, t)!;
+        final m1 = Offset.lerp(p1, p2, t)!;
+        final m2 = Offset.lerp(p2, p3, t)!;
+        final r0 = Offset.lerp(m0, m1, t)!;
+        final r1 = Offset.lerp(m1, m2, t)!;
+        final bPt = Offset.lerp(r0, r1, t)!;
 
-      Offset safeDivide(Offset v, double tension) {
-        return tension > 0.001 ? Offset(v.dx / tension, v.dy / tension) : Offset.zero;
+        p.x.value = exactPos?.dx ?? bPt.dx;
+        p.y.value = exactPos?.dy ?? bPt.dy;
+
+        Offset safeDivide(Offset v, double tension) {
+          return tension > 0.001 ? Offset(v.dx / tension, v.dy / tension) : Offset.zero;
+        }
+
+        prevNode.handleIn ??= safeDivide(controls[prevIdx].$2, prevNode.tension.value);
+        prevNode.handleOut = safeDivide(m0 - p0, prevNode.tension.value);
+
+        nextNode.handleOut ??= safeDivide(controls[nextIdx].$1, nextNode.tension.value);
+        nextNode.handleIn = safeDivide(m2 - p3, nextNode.tension.value);
+
+        node.handleIn = safeDivide(r0 - bPt, node.tension.value);
+        node.handleOut = safeDivide(r1 - bPt, node.tension.value);
       }
-
-      prevNode.handleIn ??= safeDivide(controls[prevIdx].$2, prevNode.tension.value);
-      prevNode.handleOut = safeDivide(m0 - p0, prevNode.tension.value);
-
-      nextNode.handleOut ??= safeDivide(controls[nextIdx].$1, nextNode.tension.value);
-      nextNode.handleIn = safeDivide(m2 - p3, nextNode.tension.value);
-
-      node.handleIn = safeDivide(r0 - bPt, node.tension.value);
-      node.handleOut = safeDivide(r1 - bPt, node.tension.value);
     }
 
     if (index >= spline.nodes.length) {

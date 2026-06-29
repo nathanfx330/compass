@@ -422,30 +422,36 @@ class CanvasController extends ChangeNotifier {
         if (!shape.isVisible) continue;
         if (shape is! CompassXSpline) continue;
 
-        final n = shape.nodes.length;
-        if (n < 2) continue;
+        final nRaw = shape.nodes.length;
+        if (nRaw < 2) continue;
 
-        final controls = shape.getEvaluatedControls();
-        final segCount = shape.isClosed ? n : n - 1;
+        final resolved = shape.getResolvedNodes();
+        final nRes = resolved.length;
+        final segCount = shape.isClosed ? nRes : nRes - 1;
 
         for (int i = 0; i < segCount; i++) {
-          final p0 = Offset(shape.nodes[i].point.x.value, shape.nodes[i].point.y.value);
-          final p3 = Offset(shape.nodes[(i + 1) % n].point.x.value, shape.nodes[(i + 1) % n].point.y.value);
-          final p1 = p0 + controls[i].$1;
-          final p2 = p3 + controls[(i + 1) % n].$2;
+          final r0 = resolved[i];
+          final r3 = resolved[(i + 1) % nRes];
+          final p0 = r0.point;
+          final p3 = r3.point;
+          final p1 = p0 + r0.hOut;
+          final p2 = p3 + r3.hIn;
 
           const samples = 16;
           double segMinDist = double.infinity;
+
           for (int s = 0; s <= samples; s++) {
             final pt = CanvasGeometry.cubicAt(p0, p1, p2, p3, s / samples); 
             final d = (pt - logical).distance;
-            if (d < segMinDist) segMinDist = d;
+            if (d < segMinDist) {
+              segMinDist = d;
+            }
           }
 
           if (segMinDist < bestDist && segMinDist <= scaledThreshold) {
             bestDist = segMinDist;
             bestSpline = shape;
-            bestSeg = i;
+            bestSeg = r0.rawIndex; 
             bestCenter = CanvasGeometry.cubicAt(p0, p1, p2, p3, 0.5); 
           }
         }

@@ -56,6 +56,7 @@ class ResolvedSplineNode {
   Offset hOut;
   final double widthLeft;
   final double widthRight;
+  final int rawIndex;
 
   ResolvedSplineNode({
     required this.point,
@@ -63,6 +64,7 @@ class ResolvedSplineNode {
     required this.hOut,
     required this.widthLeft,
     required this.widthRight,
+    required this.rawIndex,
   });
 }
 
@@ -171,17 +173,21 @@ class CompassXSpline extends CompassShape {
   }
 
   (int, double) getInsertDetailsForOffset(Offset tap) {
-    if (nodes.length < 2) return (nodes.length, 0.0);
+    final resolved = getResolvedNodes();
+    if (resolved.length < 2) return (nodes.length, 0.0);
     
     double minDist = double.infinity;
-    int bestIndex = 1; 
+    int bestRawIndex = 1; 
     double bestT = 0.5;
     
-    int loopCount = isClosed ? nodes.length : nodes.length - 1;
+    int loopCount = isClosed ? resolved.length : resolved.length - 1;
     
-    for (int i = 0; i < loopCount; i++) {
-      final p1 = Offset(nodes[i].point.x.value, nodes[i].point.y.value);
-      final p2 = Offset(nodes[(i + 1) % nodes.length].point.x.value, nodes[(i + 1) % nodes.length].point.y.value);
+    for (int j = 0; j < loopCount; j++) {
+      final r1 = resolved[j];
+      final r2 = resolved[(j + 1) % resolved.length];
+      
+      final p1 = r1.point;
+      final p2 = r2.point;
       
       final l2 = (p2.dx - p1.dx) * (p2.dx - p1.dx) + (p2.dy - p1.dy) * (p2.dy - p1.dy);
       double t = 0;
@@ -194,14 +200,14 @@ class CompassXSpline extends CompassShape {
       
       if (dist < minDist) {
         minDist = dist;
-        bestIndex = (i + 1) % nodes.length;
-        if (bestIndex == 0 && !isClosed) bestIndex = nodes.length; 
+        bestRawIndex = (r1.rawIndex + 1) % nodes.length;
+        if (bestRawIndex == 0 && !isClosed) bestRawIndex = nodes.length; 
         bestT = t;
       }
     }
     
-    if (bestIndex == 0 && isClosed) return (nodes.length, bestT);
-    return (bestIndex, bestT);
+    if (bestRawIndex == 0 && isClosed) return (nodes.length, bestT);
+    return (bestRawIndex, bestT);
   }
 
   List<(Offset, Offset)> getEvaluatedControls() {
@@ -267,6 +273,7 @@ class CompassXSpline extends CompassShape {
       hOut: controls[i].$1,
       widthLeft: nodes[i].widthLeft.value,
       widthRight: nodes[i].widthRight.value,
+      rawIndex: i,
     ));
 
     if (n < 2) return resolvedBase;
@@ -366,6 +373,7 @@ class CompassXSpline extends CompassShape {
             arcNodes.add(ResolvedSplineNode(
               point: pt, hIn: hIn, hOut: hOut,
               widthLeft: node.widthLeft.value, widthRight: node.widthRight.value,
+              rawIndex: i,
             ));
           }
 
@@ -480,6 +488,7 @@ class CompassXSpline extends CompassShape {
           result.add(ResolvedSplineNode(
             point: apex, hIn: Offset.zero, hOut: Offset.zero,
             widthLeft: node.widthLeft.value, widthRight: node.widthRight.value,
+            rawIndex: i,
           ));
           
        } else {

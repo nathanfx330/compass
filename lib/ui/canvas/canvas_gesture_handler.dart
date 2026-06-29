@@ -341,7 +341,8 @@ class CanvasGestureHandler {
       final spline = controller.addVertexSpline!;
       final segIndex = controller.addVertexSegmentIndex;
 
-      final created = engine.subdivideSplineSegment(spline, segIndex, t: 0.5);
+      // <--- NEW: Pass the exact positional offset down to bypass raw splits --->
+      final created = engine.subdivideSplineSegment(spline, segIndex, t: 0.5, exactPos: controller.addVertexPreviewPos);
       if (created != null) {
         engine.selectShape(spline);
         controller.selectedPoints = {created};
