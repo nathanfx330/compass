@@ -1,4 +1,4 @@
-// /lib/ui/panels/layer_tile.dart
+// lib/ui/panels/layer_tile.dart
 
 import 'package:flutter/material.dart';
 
@@ -223,11 +223,14 @@ class LayerTile extends StatelessWidget {
                     child: ReorderableDragStartListener(
                       index: dragIndex,
                       child: Padding(
-                        padding: const EdgeInsets.only(left: 4.0, right: 2.0),
-                        child: Icon(
-                          Icons.drag_indicator,
-                          size: 18,
-                          color: theme.iconTheme.color?.withOpacity(0.4),
+                        padding: const EdgeInsets.only(left: 8.0, right: 6.0),
+                        child: Container(
+                          width: 3,
+                          height: 14,
+                          decoration: BoxDecoration(
+                            color: theme.iconTheme.color?.withOpacity(0.25),
+                            borderRadius: BorderRadius.circular(1.5),
+                          ),
                         ),
                       ),
                     ),
@@ -402,23 +405,20 @@ class LayerTile extends StatelessWidget {
         if (isEmpty) {
           return Container(
             margin: const EdgeInsets.fromLTRB(32, 4, 16, 8),
-            height: 44,
+            height: 36,
             alignment: Alignment.center,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(8),
-              color: targeted ? theme.colorScheme.primary.withOpacity(0.06) : Colors.transparent,
-              border: Border.all(
-                color: targeted ? theme.colorScheme.primary : theme.dividerColor,
-                width: targeted ? 2 : 1,
-              ),
+              color: targeted ? theme.colorScheme.primary.withOpacity(0.08) : Colors.transparent,
             ),
             child: Text(
-              targeted ? 'Release to add to this layer' : 'Empty layer — drop a shape here',
+              targeted ? 'Release to add to this layer' : 'Empty layer',
               style: TextStyle(
                 fontSize: 11,
+                fontStyle: FontStyle.italic,
                 color: targeted
                     ? theme.colorScheme.primary
-                    : theme.textTheme.bodySmall?.color?.withOpacity(0.6),
+                    : theme.textTheme.bodySmall?.color?.withOpacity(0.5),
               ),
             ),
           );

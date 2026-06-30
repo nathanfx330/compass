@@ -1,4 +1,4 @@
-// /lib/ui/panels/shape_row.dart
+// lib/ui/panels/shape_row.dart
 
 import 'package:flutter/material.dart';
 
@@ -230,14 +230,21 @@ class _ShapeRowState extends State<ShapeRow> {
       color: dim ? theme.disabledColor : null,
     );
 
+    // REPLACED Icons.drag_indicator with a minimal vertical bar
     final Widget gripHandle = MouseRegion(
       cursor: SystemMouseCursors.grab,
       child: Tooltip(
         message: 'Drag to reorder',
-        child: Icon(
-          Icons.drag_indicator,
-          size: 16,
-          color: theme.iconTheme.color?.withOpacity(0.4),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4.0),
+          child: Container(
+            width: 3,
+            height: 14,
+            decoration: BoxDecoration(
+              color: theme.iconTheme.color?.withOpacity(0.25),
+              borderRadius: BorderRadius.circular(1.5),
+            ),
+          ),
         ),
       ),
     );
@@ -256,8 +263,8 @@ class _ShapeRowState extends State<ShapeRow> {
             child: gripHandle,
           )
         else
-          // Keep the icon column aligned with draggable rows (grip width ~16).
-          const SizedBox(width: 16),
+          // Keep the icon column aligned with draggable rows (grip width ~11).
+          const SizedBox(width: 11),
         const SizedBox(width: 4),
         shapeIconWidget,
       ],

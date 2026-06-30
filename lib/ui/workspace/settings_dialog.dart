@@ -61,10 +61,12 @@ class _AppearanceTab extends StatelessWidget {
           children: [
             Text('Color Mode', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-            SegmentedButton<ThemeMode>(
+            // <--- CHANGED: Updated to use CompassThemeMode and added Dim option --->
+            SegmentedButton<CompassThemeMode>(
               segments: const [
-                ButtonSegment(value: ThemeMode.light, icon: Icon(Icons.light_mode), label: Text('Light')),
-                ButtonSegment(value: ThemeMode.dark, icon: Icon(Icons.dark_mode), label: Text('Dark')),
+                ButtonSegment(value: CompassThemeMode.light, icon: Icon(Icons.light_mode), label: Text('Light')),
+                ButtonSegment(value: CompassThemeMode.dim, icon: Icon(Icons.nightlight), label: Text('Dim')),
+                ButtonSegment(value: CompassThemeMode.dark, icon: Icon(Icons.dark_mode), label: Text('Dark')),
               ],
               selected: {themeManager.themeMode},
               onSelectionChanged: (set) => themeManager.themeMode = set.first,
@@ -119,6 +121,8 @@ class _AppearanceTab extends StatelessWidget {
               child: Row(
                 children: [
                   Expanded(child: Container(color: t.lightBackground.withOpacity(0.9))),
+                  // <--- NEW: Display the Dim color in the middle of the card preview --->
+                  Expanded(child: Container(color: t.dimBackground.withOpacity(0.9))),
                   Expanded(child: Container(color: t.darkBackground.withOpacity(0.9))),
                 ],
               ),
@@ -181,6 +185,7 @@ class _EditThemeDialogState extends State<_EditThemeDialog> {
   late TextEditingController _nameCtrl;
   late Color _seedColor;
   late Color _lightBg;
+  late Color _dimBg; // <--- NEW
   late Color _darkBg;
 
   @override
@@ -189,6 +194,7 @@ class _EditThemeDialogState extends State<_EditThemeDialog> {
     _nameCtrl = TextEditingController(text: widget.theme?.name ?? 'My Custom Theme');
     _seedColor = widget.theme?.seedColor ?? Colors.teal;
     _lightBg = widget.theme?.lightBackground ?? const Color(0xFFF0F0F0);
+    _dimBg = widget.theme?.dimBackground ?? const Color(0xFF2D2F33); // <--- NEW
     _darkBg = widget.theme?.darkBackground ?? const Color(0xFF1E1E1E);
   }
 
@@ -247,6 +253,9 @@ class _EditThemeDialogState extends State<_EditThemeDialog> {
             const SizedBox(height: 12),
             _colorRow('Light Canvas Background', _lightBg, (c) => _lightBg = c),
             const SizedBox(height: 12),
+            // <--- NEW: Added color row for Dim mode --->
+            _colorRow('Dim Canvas Background', _dimBg, (c) => _dimBg = c),
+            const SizedBox(height: 12),
             _colorRow('Dark Canvas Background', _darkBg, (c) => _darkBg = c),
           ],
         ),
@@ -264,6 +273,7 @@ class _EditThemeDialogState extends State<_EditThemeDialog> {
                 name: _nameCtrl.text,
                 seedColor: _seedColor,
                 lightBackground: _lightBg,
+                dimBackground: _dimBg, // <--- NEW
                 darkBackground: _darkBg,
               ));
             } else {
@@ -271,6 +281,7 @@ class _EditThemeDialogState extends State<_EditThemeDialog> {
                 name: _nameCtrl.text,
                 seedColor: _seedColor,
                 lightBackground: _lightBg,
+                dimBackground: _dimBg, // <--- NEW
                 darkBackground: _darkBg,
               ));
             }

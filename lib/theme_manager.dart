@@ -1,13 +1,17 @@
-// /lib/theme_manager.dart
+// lib/theme_manager.dart
 
 import 'package:flutter/material.dart';
 
-/// Defines a single theme containing a seed color and specific light/dark backgrounds.
+/// Custom theme mode enum to support a "Dim" state between Light and Dark.
+enum CompassThemeMode { light, dim, dark }
+
+/// Defines a single theme containing a seed color and specific light/dim/dark backgrounds.
 class CompassTheme {
   final String id;
   final String name;
   final Color seedColor;
   final Color lightBackground;
+  final Color dimBackground; // <--- NEW
   final Color darkBackground;
   final bool isPrebuilt;
 
@@ -16,6 +20,7 @@ class CompassTheme {
     required this.name,
     required this.seedColor,
     required this.lightBackground,
+    required this.dimBackground, // <--- NEW
     required this.darkBackground,
     this.isPrebuilt = false,
   });
@@ -24,6 +29,7 @@ class CompassTheme {
     String? name,
     Color? seedColor,
     Color? lightBackground,
+    Color? dimBackground, // <--- NEW
     Color? darkBackground,
   }) {
     return CompassTheme(
@@ -31,6 +37,7 @@ class CompassTheme {
       name: name ?? this.name,
       seedColor: seedColor ?? this.seedColor,
       lightBackground: lightBackground ?? this.lightBackground,
+      dimBackground: dimBackground ?? this.dimBackground, // <--- NEW
       darkBackground: darkBackground ?? this.darkBackground,
       isPrebuilt: isPrebuilt,
     );
@@ -39,10 +46,11 @@ class CompassTheme {
 
 /// Manages the active Theme Mode and the active Color Theme across the app.
 class ThemeManager extends ChangeNotifier {
-  ThemeMode _themeMode = ThemeMode.dark;
-  ThemeMode get themeMode => _themeMode;
+  // <--- CHANGED: Now uses our custom enum
+  CompassThemeMode _themeMode = CompassThemeMode.dark;
+  CompassThemeMode get themeMode => _themeMode;
 
-  set themeMode(ThemeMode mode) {
+  set themeMode(CompassThemeMode mode) {
     if (_themeMode != mode) {
       _themeMode = mode;
       notifyListeners();
@@ -52,14 +60,15 @@ class ThemeManager extends ChangeNotifier {
   late CompassTheme _activeTheme;
   CompassTheme get activeTheme => _activeTheme;
 
-  // Our starting prebuilt themes
+  // Our starting prebuilt themes, now with a 'dimBackground' added to each
   final List<CompassTheme> _themes = [
     CompassTheme(
       id: 'default_bluegrey',
       name: 'Compass Default',
       seedColor: Colors.blueGrey,
-      lightBackground: const Color(0xFFF0F0F0), // Light IDE background
-      darkBackground: const Color(0xFF1E1E1E),  // Dark IDE background
+      lightBackground: const Color(0xFFF0F0F0),
+      dimBackground: const Color(0xFF2D2F33),   // <--- NEW: A mid-dark gray
+      darkBackground: const Color(0xFF1E1E1E),  
       isPrebuilt: true,
     ),
     CompassTheme(
@@ -67,23 +76,38 @@ class ThemeManager extends ChangeNotifier {
       name: 'Ocean Blue',
       seedColor: Colors.blue,
       lightBackground: const Color(0xFFF0F4F8),
+      dimBackground: const Color(0xFF1E293B),   // <--- NEW: Tailwind Slate 800
       darkBackground: const Color(0xFF0F172A),
       isPrebuilt: true,
     ),
     CompassTheme(
-      id: 'monokai',
-      name: 'Monokai',
-      seedColor: const Color(0xFFA6E22E),
-      lightBackground: const Color(0xFFFAFAFA),
-      darkBackground: const Color(0xFF272822),
+      id: 'engine',
+      name: 'Engine',
+      seedColor: const Color(0xFF4188D2),
+      lightBackground: const Color(0xFFE5E7EB),
+      dimBackground: const Color(0xFF2C2E3A),   // <--- NEW: Slightly lighter graphite
+      darkBackground: const Color(0xFF21232B),
       isPrebuilt: true,
     ),
+    // <--- REPLACED Rosé Pine with Nord --->
     CompassTheme(
-      id: 'rose_pine',
-      name: 'Rosé Pine',
-      seedColor: const Color(0xFFEB6F92),
-      lightBackground: const Color(0xFFFAF4ED),
-      darkBackground: const Color(0xFF191724),
+      id: 'nord',
+      name: 'Nord',
+      seedColor: const Color(0xFF88C0D0),       // Frost Cyan
+      lightBackground: const Color(0xFFECEFF4), // Snow Storm
+      dimBackground: const Color(0xFF3B4252),   // Polar Night (Lighter)
+      darkBackground: const Color(0xFF2E3440),  // Polar Night (Darker)
+      isPrebuilt: true,
+    ),
+    // <--- NEW: Added Gruvbox --->
+    CompassTheme(
+      id: 'gruvbox',
+      name: 'Gruvbox',
+      seedColor: const Color(0xFFFE8019),       // Orange Accent
+      // <--- CHANGED: Replaced the bright yellow with a muted, warm stone gray --->
+      lightBackground: const Color(0xFFE0DCD3), 
+      dimBackground: const Color(0xFF3C3836),   // Dark bg1 (Lighter)
+      darkBackground: const Color(0xFF282828),  // Dark bg0 (Darker)
       isPrebuilt: true,
     ),
   ];

@@ -140,14 +140,17 @@ class CompassMenuBar extends StatelessWidget {
                     SubmenuButton(
                       menuChildren: [
                         MenuItemButton(
-                          // <--- CHANGED: Use themeManager --->
-                          onPressed: () => themeManager.themeMode = ThemeMode.light, 
+                          onPressed: () => themeManager.themeMode = CompassThemeMode.light, 
                           leadingIcon: const Icon(Icons.light_mode),
                           child: const Text('Light Mode'),
                         ),
                         MenuItemButton(
-                          // <--- CHANGED: Use themeManager --->
-                          onPressed: () => themeManager.themeMode = ThemeMode.dark, 
+                          onPressed: () => themeManager.themeMode = CompassThemeMode.dim, 
+                          leadingIcon: const Icon(Icons.nightlight),
+                          child: const Text('Dim Mode'),
+                        ),
+                        MenuItemButton(
+                          onPressed: () => themeManager.themeMode = CompassThemeMode.dark, 
                           leadingIcon: const Icon(Icons.dark_mode),
                           child: const Text('Dark Mode'),
                         ),

@@ -1,4 +1,4 @@
-// ./lib/workspace.dart
+// lib/workspace.dart
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -29,6 +29,9 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
   late CompassEngine _engine;
   bool _showScaffolding = true;
   bool _showHandles = true; // <--- NEW: State for showing/hiding Bezier handles
+  
+  // NEW: State for the resizable right panel width
+  double _rightPanelWidth = 280.0;
 
   final List<Color> _swatchColors = [
     const Color(0xFF222222), 
@@ -115,6 +118,7 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
               Expanded(
                 child: Row(
                   children: [
+                    // === CANVAS (Expands to fill remaining space) ===
                     Expanded(
                       child: ClipRect(
                         child: CompassCanvas(
@@ -126,14 +130,37 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
                         ),
                       ),
                     ),
-                    
+
+                    // === HORIZONTAL SLIDER DRAG HANDLE ===
+                    MouseRegion(
+                      cursor: SystemMouseCursors.resizeColumn,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onPanUpdate: (details) {
+                          setState(() {
+                            // Invert delta because panel is anchored to the right
+                            _rightPanelWidth -= details.delta.dx;
+                            // Constrain the panel width so it doesn't break the layout or hide completely
+                            _rightPanelWidth = _rightPanelWidth.clamp(220.0, 600.0);
+                          });
+                        },
+                        child: Container(
+                          width: 4,
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.surface,
+                            border: Border(
+                              left: BorderSide(color: theme.dividerColor, width: 1),
+                            )
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // === RIGHT PANEL (Hierarchy & Properties) ===
                     Container(
-                      width: 280, 
+                      width: _rightPanelWidth, 
                       decoration: BoxDecoration(
                         color: theme.colorScheme.surface,
-                        border: Border(
-                          left: BorderSide(color: theme.dividerColor, width: 1),
-                        ),
                       ),
                       child: DefaultTabController(
                         length: 2,

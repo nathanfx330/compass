@@ -32,26 +32,40 @@ class _CompassAppState extends State<CompassApp> {
       builder: (context, _) {
         final activeTheme = _themeManager.activeTheme;
 
+        // Determine the actual scaffold background based on our custom 3-state enum.
+        // Both 'dim' and 'dark' use a dark brightness for text/icons, but they use
+        // different scaffold backgrounds.
+        Color backgroundColor;
+        Brightness brightness;
+
+        switch (_themeManager.themeMode) {
+          case CompassThemeMode.light:
+            backgroundColor = activeTheme.lightBackground;
+            brightness = Brightness.light;
+            break;
+          case CompassThemeMode.dim:
+            backgroundColor = activeTheme.dimBackground;
+            brightness = Brightness.dark;
+            break;
+          case CompassThemeMode.dark:
+            backgroundColor = activeTheme.darkBackground;
+            brightness = Brightness.dark;
+            break;
+        }
+
         return MaterialApp(
           title: 'Compass',
-          themeMode: _themeManager.themeMode,
-          darkTheme: ThemeData.dark(useMaterial3: true).copyWith(
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: activeTheme.seedColor,
-              brightness: Brightness.dark,
-            ),
-            scaffoldBackgroundColor: activeTheme.darkBackground,
-          ),
+          // We bypass Flutter's built in themeMode switching and just supply a
+          // single computed `theme` object based on our custom state.
           theme: ThemeData(
             useMaterial3: true,
             colorScheme: ColorScheme.fromSeed(
               seedColor: activeTheme.seedColor,
-              brightness: Brightness.light,
+              brightness: brightness,
             ),
-            scaffoldBackgroundColor: activeTheme.lightBackground,
+            scaffoldBackgroundColor: backgroundColor,
           ),
           debugShowCheckedModeBanner: false,
-          // Pass the manager down so the UI can trigger theme changes
           home: CompassWorkspace(themeManager: _themeManager),
         );
       },
