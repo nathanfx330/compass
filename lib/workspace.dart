@@ -92,6 +92,13 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    
+    // <--- FIX: Ensure panels and toolbars use the specific theme backgrounds 
+    // rather than defaulting to bright surface colors in Light Mode. --->
+    final bool isLightMode = widget.themeManager.themeMode == CompassThemeMode.light;
+    final Color panelBackgroundColor = isLightMode 
+        ? Colors.white // Force pure white for the side panel so the gray canvas pops
+        : theme.colorScheme.surface;
 
     return CallbackShortcuts(
       bindings: {
@@ -147,7 +154,7 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
                         child: Container(
                           width: 4,
                           decoration: BoxDecoration(
-                            color: theme.colorScheme.surface,
+                            color: panelBackgroundColor, // <--- FIXED
                             border: Border(
                               left: BorderSide(color: theme.dividerColor, width: 1),
                             )
@@ -160,7 +167,7 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
                     Container(
                       width: _rightPanelWidth, 
                       decoration: BoxDecoration(
-                        color: theme.colorScheme.surface,
+                        color: panelBackgroundColor, // <--- FIXED
                       ),
                       child: DefaultTabController(
                         length: 2,
