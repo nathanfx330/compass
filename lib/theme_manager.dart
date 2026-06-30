@@ -16,6 +16,7 @@ class CompassTheme {
   final Color dimBackground; 
   final Color darkBackground;
   final bool isPrebuilt;
+  final bool isMonochrome; // <--- NEW: Flag for zero-hue themes
 
   CompassTheme({
     required this.id,
@@ -25,6 +26,7 @@ class CompassTheme {
     required this.dimBackground, 
     required this.darkBackground,
     this.isPrebuilt = false,
+    this.isMonochrome = false, // <--- NEW: Default to false
   });
 
   CompassTheme copyWith({
@@ -33,6 +35,7 @@ class CompassTheme {
     Color? lightBackground,
     Color? dimBackground, 
     Color? darkBackground,
+    bool? isMonochrome,
   }) {
     return CompassTheme(
       id: id,
@@ -42,6 +45,7 @@ class CompassTheme {
       dimBackground: dimBackground ?? this.dimBackground, 
       darkBackground: darkBackground ?? this.darkBackground,
       isPrebuilt: isPrebuilt,
+      isMonochrome: isMonochrome ?? this.isMonochrome,
     );
   }
 
@@ -54,6 +58,7 @@ class CompassTheme {
       'lightBackground': lightBackground.value,
       'dimBackground': dimBackground.value,
       'darkBackground': darkBackground.value,
+      'isMonochrome': isMonochrome, // <--- NEW
     };
   }
 
@@ -66,6 +71,7 @@ class CompassTheme {
       dimBackground: Color(json['dimBackground']),
       darkBackground: Color(json['darkBackground']),
       isPrebuilt: false, // Themes loaded from JSON are custom
+      isMonochrome: json['isMonochrome'] ?? false, // <--- NEW
     );
   }
 }
@@ -141,6 +147,7 @@ class ThemeManager extends ChangeNotifier {
       dimBackground: const Color(0xFF333333),   
       darkBackground: const Color(0xFF111111),  
       isPrebuilt: true,
+      isMonochrome: true, // <--- NEW: Force pure grayscale rendering for this theme
     ),
   ];
 

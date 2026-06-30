@@ -62,6 +62,10 @@ class _CompassAppState extends State<CompassApp> {
             colorScheme: ColorScheme.fromSeed(
               seedColor: activeTheme.seedColor,
               brightness: brightness,
+              // <--- NEW: Force M3 to generate 0-chroma colors if isMonochrome is true
+              dynamicSchemeVariant: activeTheme.isMonochrome 
+                  ? DynamicSchemeVariant.monochrome 
+                  : DynamicSchemeVariant.tonalSpot,
             ),
             scaffoldBackgroundColor: backgroundColor,
           ),
