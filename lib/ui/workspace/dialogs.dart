@@ -18,7 +18,7 @@ class CompassDialogs {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: const [
               Text(
-                'Compass 0.3',
+                'Compass 0.4',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
               ),
               SizedBox(height: 12),
