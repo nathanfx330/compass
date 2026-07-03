@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:ui';
 
 import 'engine.dart';
+import 'constraints.dart'; // <--- NEW: converter must unbind constraints it orphans
 import 'models/geometry/point.dart';
 import 'models/geometry/shape.dart';
 import 'models/geometry/circle.dart';
@@ -14,6 +15,22 @@ import 'models/layer.dart';
 import 'path_baker.dart';
 
 class ShapeConverter {
+  /// The converters replace shapes IN-PLACE (layer.shapes[i] = newShape) to
+  /// preserve Z-order, which means they bypass engine.removeShape -- and with it
+  /// the engine's unbind-before-drop constraint cleanup. Any constraint hosted by
+  /// the replaced shape must therefore be unbound HERE, or it lives on as a
+  /// zombie: still bound to the surviving points' notifiers, still enforcing
+  /// against a shape that is no longer in any layer. The engine's own removal
+  /// chokepoint (_removeConstraintsWhere) is private, so this is the converter's
+  /// local equivalent with the same contract: unbind first, then drop.
+  static void _unbindAndRemoveWhere(
+      CompassEngine engine, bool Function(CompassConstraint) test) {
+    for (final c in engine.constraints) {
+      if (test(c)) c.unbind();
+    }
+    engine.constraints.removeWhere(test);
+  }
+
   static void convertCircleToSpline(CompassEngine engine, CompassCircle circle) {
     CompassLayer? targetLayer;
     int shapeIndex = -1;
@@ -26,6 +43,33 @@ class ShapeConverter {
     }
     
     if (targetLayer == null) return;
+
+    // Riders about to lose their host: collect BEFORE dropping the constraints,
+    // so we can offer each one to GC afterward. A rider that is structural
+    // elsewhere (spline start, line endpoint...) survives checkAndGCPoint;
+    // a bare rider whose only reason to exist was sitting on this circle goes.
+    final orphanedRiders = <CompassPoint>[];
+    for (final c in engine.constraints) {
+      if (c is PointOnCircleConstraint && c.circle == circle) {
+        orphanedRiders.add(c.point);
+      }
+    }
+
+    // Drop every constraint hosted by this circle:
+    //   * its DistanceRadiusConstraint (matched by radius-notifier identity --
+    //     the constraint carries no shape reference). Left alive, it keeps
+    //     recomputing the dead circle's radius on every center/radiusPoint move
+    //     whenever the radiusPoint survives as a shared point.
+    //   * any PointOnCircleConstraint riders -- left alive, they visibly snap
+    //     their points back onto the now-invisible circle on every drag.
+    // The spline replacing the circle has no equivalent constraint concept, so
+    // dropping (not migrating) is the correct semantic.
+    _unbindAndRemoveWhere(
+        engine,
+        (c) =>
+            (c is DistanceRadiusConstraint &&
+                identical(c.targetRadius, circle.radius)) ||
+            (c is PointOnCircleConstraint && c.circle == circle));
 
     final spline = CompassXSpline(isClosed: true, anchorPoint: circle.center)
       ..operation = circle.operation
@@ -66,6 +110,12 @@ class ShapeConverter {
       engine.checkAndGCPoint(circle.radiusPoint!);
     }
 
+    // Ex-riders: keep if structural anywhere else, GC if their only purpose
+    // was riding this circle.
+    for (final rider in orphanedRiders) {
+      engine.checkAndGCPoint(rider);
+    }
+
     engine.saveSnapshot();
     engine.notifyListeners();
   }
@@ -82,6 +132,14 @@ class ShapeConverter {
     }
     
     if (targetLayer == null) return;
+
+    // Drop the rect's SquareConstraint (present when isSquare was ever toggled
+    // on and registered at creation/load). In-place replacement bypasses
+    // removeShape, so without this the constraint survives whenever p1 or p2
+    // does -- and SquareConstraint actively moveBy()s its points, so a shared
+    // surviving corner gets yanked by a rectangle that no longer exists.
+    _unbindAndRemoveWhere(
+        engine, (c) => c is SquareConstraint && c.rect == rect);
 
     final cx = (rect.p1.x.value + rect.p2.x.value) / 2;
     final cy = (rect.p1.y.value + rect.p2.y.value) / 2;
@@ -182,6 +240,11 @@ class ShapeConverter {
     }
 
     if (targetLayer == null) return;
+
+    // Same reason as convertRectangleToSpline: in-place replacement bypasses
+    // removeShape, so the SquareConstraint must be unbound here.
+    _unbindAndRemoveWhere(
+        engine, (c) => c is SquareConstraint && c.rect == rect);
 
     // A mesh needs at least one patch in each axis.
     final int gridRows = rows < 2 ? 2 : rows;

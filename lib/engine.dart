@@ -40,17 +40,26 @@ class CompassEngine extends ChangeNotifier {
   final List<CompassPoint> points = [];
   final List<CompassLayer> layers = [];
 
-  // Live registry of host-rider constraints: PointOnLine / PointOnCircle /
-  // PointOnSpiral. Each binds a free "rider" point onto a host shape so it
-  // re-projects whenever the host's defining points move. These have NO other
-  // reconstruction path, so the engine must own them for serialization to persist
-  // them -- and because undo() round-trips through serialize/deserialize, owning
-  // them here is exactly what makes them survive Ctrl+Z too.
+  // Live registry of ALL live constraints.
   //
-  // Deliberately NOT tracked here: DistanceRadiusConstraint (rebuilt as the circle
-  // loader's bespoke radius closure) and SquareConstraint (rebuilt from the
-  // rectangle's isSquare flag). Both already survive a round-trip by other means;
-  // listing them here would double-bind them.
+  // Host-rider constraints (PointOnLine / PointOnCircle / PointOnSpiral) have NO
+  // other reconstruction path, so the engine must own them for serialization to
+  // persist them -- and because undo() round-trips through serialize/deserialize,
+  // owning them here is exactly what makes them survive Ctrl+Z too.
+  //
+  // DistanceRadiusConstraint and SquareConstraint are ALSO registered here now --
+  // not for serialization (the serializer type-checks and only ever WRITES
+  // PONLINE/PONCIRCLE/PONSPIRAL lines; these two are rebuilt on load from the
+  // circle's radius wiring and the rectangle's isSquare flag respectively) -- but
+  // for LIFECYCLE: a constraint the engine cannot find is a constraint the engine
+  // cannot unbind, and an un-unbound constraint keeps enforcing against deleted
+  // geometry forever (its bind() listeners hold it alive and firing). Every
+  // constraint construction site must therefore register here.
+  //
+  // REMOVAL RULE: never bare-remove from this list. Route through
+  // _removeConstraintsWhere (or unbindAllConstraints), which unbind()s first --
+  // otherwise the removed constraint lives on as a zombie inside the point
+  // notifiers' listener lists.
   final List<CompassConstraint> constraints = [];
 
   CompassLayer? activeLayer;
@@ -74,6 +83,75 @@ class CompassEngine extends ChangeNotifier {
   }
 
   CompassShape? get selectedShape => _selectedShape;
+
+  @override
+  void dispose() {
+    // New Project swaps the whole engine out; unbind everything so the discarded
+    // constraint graph is fully inert (no listener can fire during teardown).
+    unbindAllConstraints();
+    super.dispose();
+  }
+
+  // ===========================================================================
+  // CONSTRAINT LIFECYCLE
+  // ===========================================================================
+
+  /// The ONLY sanctioned way to drop constraints: unbind (detach every listener
+  /// bind() registered) and then remove from the registry. A bare removeWhere
+  /// leaves the constraint alive inside the point notifiers' listener lists,
+  /// still enforcing against whatever geometry it referenced -- the "zombie
+  /// constraint" bug that snapped surviving points onto deleted shapes.
+  void _removeConstraintsWhere(bool Function(CompassConstraint) test) {
+    for (final c in constraints) {
+      if (test(c)) c.unbind();
+    }
+    constraints.removeWhere(test);
+  }
+
+  /// Unbinds and drops every constraint. Used on engine dispose, and intended
+  /// for the deserializer's clear-before-load (the old graph must be silenced
+  /// before the new one is built on fresh points).
+  void unbindAllConstraints() {
+    for (final c in constraints) {
+      c.unbind();
+    }
+    constraints.clear();
+  }
+
+  /// Drops any selected points that no longer exist in the live pool. Deletion
+  /// paths and full reloads (open / undo) both replace or remove points, and a
+  /// selection holding dead objects keeps ghost highlights on screen AND lets a
+  /// drag fire listeners on geometry the engine has already forgotten.
+  void _pruneSelection() {
+    selectedPoints.removeWhere((p) => !points.contains(p));
+  }
+
+  /// The structural points of a shape, one place instead of three hand-rolled
+  /// copies (removeShape / removePoints / removeLayer).
+  List<CompassPoint> _pointsOfShape(CompassShape shape) {
+    if (shape is CompassLine) {
+      return [shape.start, shape.end];
+    } else if (shape is CompassCircle) {
+      return [shape.center, if (shape.radiusPoint != null) shape.radiusPoint!];
+    } else if (shape is CompassSpiral) {
+      return [shape.center, shape.startPoint];
+    } else if (shape is CompassRectangle) {
+      return [shape.p1, shape.p2];
+    } else if (shape is CompassRhombus) {
+      return [shape.p1, shape.p2, shape.p3, shape.p4];
+    } else if (shape is CompassXSpline) {
+      return [
+        ...shape.nodes.map((n) => n.point),
+        if (shape.anchorPoint != null) shape.anchorPoint!,
+      ];
+    } else if (shape is CompassMesh) {
+      return [
+        ...shape.nodes.map((n) => n.point),
+        if (shape.anchorPoint != null) shape.anchorPoint!,
+      ];
+    }
+    return [];
+  }
 
   void toggleNodeIndices(bool show) {
     showNodeIndices = show;
@@ -253,13 +331,40 @@ class CompassEngine extends ChangeNotifier {
   }
 
   void removeLayer(CompassLayer layer) {
+    if (!layers.contains(layer)) return;
+
+    // FULL GC on layer deletion. Previously this was a bare layers.remove():
+    // every point of every shape in the layer stayed in the pool (and RENDERED,
+    // since an unused point counts as unlocked), and every constraint hosted by
+    // the layer's shapes stayed live -- so deleting a layer left a floating
+    // point cloud with zombie rules attached. Same recipe as removeShape, over
+    // the whole shape list at once, in one batch so intra-layer attachment
+    // edges (anchor -> nodes, center -> satellites) can't block each other.
+    final shapePoints = <CompassPoint>[];
+    for (var shape in layer.shapes) {
+      shapePoints.addAll(_pointsOfShape(shape));
+    }
+
+    // Riders of constraints hosted by any shape in this layer are GC candidates
+    // too, exactly as in removeShape.
+    for (var c in constraints) {
+      for (var shape in layer.shapes) {
+        if (_constraintHasShape(c, shape)) {
+          final rider = _constraintRider(c);
+          if (rider != null) shapePoints.add(rider);
+          break;
+        }
+      }
+    }
+
+    final deadShapes = List<CompassShape>.from(layer.shapes);
     layers.remove(layer);
     
     if (activeLayer == layer) {
       activeLayer = layers.isNotEmpty ? layers.first : null;
     }
 
-    if (_selectedShape != null && layer.shapes.contains(_selectedShape)) {
+    if (_selectedShape != null && deadShapes.contains(_selectedShape)) {
       _selectedShape = null;
     }
 
@@ -268,6 +373,19 @@ class CompassEngine extends ChangeNotifier {
       layers.add(newLayer);
       activeLayer = newLayer;
     }
+
+    // Unbind + drop every constraint hosted by a deleted shape (must happen
+    // BEFORE the point GC, mirroring removeShape's order; constraints matched
+    // only by a deleted POINT are handled inside checkAndGCPoint per point).
+    _removeConstraintsWhere(
+        (c) => deadShapes.any((s) => _constraintHasShape(c, s)));
+
+    final batch = shapePoints.toSet();
+    for (var p in shapePoints) {
+      checkAndGCPoint(p, batch: batch);
+    }
+
+    _pruneSelection();
 
     saveSnapshot();
     notifyListeners();
@@ -325,26 +443,7 @@ class CompassEngine extends ChangeNotifier {
   }
 
   void removeShape(CompassShape shape) {
-    List<CompassPoint> shapePoints = [];
-    if (shape is CompassLine) {
-      shapePoints = [shape.start, shape.end];
-    } else if (shape is CompassCircle) {
-      shapePoints = [shape.center];
-      if (shape.radiusPoint != null) shapePoints.add(shape.radiusPoint!);
-    } else if (shape is CompassSpiral) {
-      shapePoints = [shape.center, shape.startPoint];
-    } else if (shape is CompassRectangle) { 
-      shapePoints = [shape.p1, shape.p2];
-    } else if (shape is CompassRhombus) {
-      // <--- NEW: Rhombus GC Points
-      shapePoints = [shape.p1, shape.p2, shape.p3, shape.p4];
-    } else if (shape is CompassXSpline) {
-      shapePoints = shape.nodes.map((n) => n.point).toList();
-      if (shape.anchorPoint != null) shapePoints.add(shape.anchorPoint!);
-    } else if (shape is CompassMesh) {
-      shapePoints = shape.nodes.map((n) => n.point).toList();
-      if (shape.anchorPoint != null) shapePoints.add(shape.anchorPoint!);
-    }
+    List<CompassPoint> shapePoints = _pointsOfShape(shape);
 
     bool removed = false;
     for (var layer in layers) {
@@ -365,12 +464,17 @@ class CompassEngine extends ChangeNotifier {
         }
       }
 
-      constraints.removeWhere((c) => _constraintHasShape(c, shape));
+      // Unbind BEFORE dropping: a bare removeWhere here was the root of the
+      // zombie-constraint bug -- the host shape vanished but its riders kept
+      // getting re-projected onto the frozen ghost geometry on every drag.
+      _removeConstraintsWhere((c) => _constraintHasShape(c, shape));
 
       final batch = shapePoints.toSet();
       for (var p in shapePoints) {
         checkAndGCPoint(p, batch: batch);
       }
+
+      _pruneSelection();
       
       saveSnapshot();
       notifyListeners();
@@ -425,8 +529,36 @@ class CompassEngine extends ChangeNotifier {
       for (var remainingPoint in points) {
         remainingPoint.attachedPoints.remove(p);
       }
-      constraints.removeWhere((c) => _constraintHasPoint(c, p));
+      // Unbind-aware: the constraint must stop listening, not just leave the list.
+      _removeConstraintsWhere((c) => _constraintHasPoint(c, p));
+      selectedPoints.remove(p);
     }
+  }
+
+  /// Hard-GC used by applyFilletToNode: the fillet REPLACES the corner node, so
+  /// the old corner point must go -- but if that corner was ever spliced in via
+  /// the Q tool, it carries an incoming spline-cohesion attach edge (first node
+  /// -> spliced point) that checkAndGCPoint's dependency check reads as "still
+  /// needed", stranding the point on the canvas. Here we verify the point is
+  /// structurally unused first (a SHARED corner survives untouched), then strip
+  /// its attachment edges in both directions and delete it. Edge-stripping is
+  /// safe precisely because structural non-use was just proven: the only edges
+  /// a non-structural point carries are stale cohesion links to the shape that
+  /// is discarding it.
+  void _gcPointHardIfUnused(CompassPoint p) {
+    for (var layer in layers) {
+      for (var s in layer.shapes) {
+        if (_pointsOfShape(s).contains(p)) return; // structurally used: keep
+      }
+    }
+
+    points.remove(p);
+    for (var remainingPoint in points) {
+      remainingPoint.attachedPoints.remove(p);
+    }
+    p.attachedPoints.clear();
+    _removeConstraintsWhere((c) => _constraintHasPoint(c, p));
+    selectedPoints.remove(p);
   }
 
   // ===========================================================================
@@ -939,7 +1071,12 @@ class CompassEngine extends ChangeNotifier {
     spline.nodes.insert(index + 1, newNode2);
     spline.nodes.remove(node);
 
-    checkAndGCPoint(node.point);
+    // Hard GC: the fillet REPLACED this corner, so the point must go even if a
+    // past Q-splice left a cohesion attach edge on it (which the soft
+    // checkAndGCPoint reads as a reason to keep it, stranding the old corner
+    // on the canvas). Shared/structural points still survive -- see the guard
+    // inside _gcPointHardIfUnused.
+    _gcPointHardIfUnused(node.point);
 
     saveSnapshot();
     notifyListeners();
@@ -1119,59 +1256,135 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Single-point deletion: a thin delegate onto the batch primitive so the two
+  /// paths can never drift. All semantics live in removePoints.
   void removePoint(CompassPoint p) {
-    for (var layer in layers) {
-      for (var s in layer.shapes) {
-        if (s is CompassMesh && (s.containsNode(p) || s.anchorPoint == p)) {
-          removeShape(s);
-          return;
-        }
-      }
-    }
+    removePoints([p]);
+  }
+
+  /// Batch point deletion -- THE deletion primitive. One shape sweep against the
+  /// whole target set, one constraint sweep, one combined GC batch, one selection
+  /// prune, ONE undo snapshot, one notify.
+  ///
+  /// Exists because the Delete-key handler used to loop removePoint over the
+  /// selection: N points deleted minted N undo states (Ctrl+Z resurrected them
+  /// one at a time and large deletes flushed the 50-deep stack), and cascade
+  /// deletions (a shape destroyed by point A dragging its other SELECTED points
+  /// down with it) made later iterations run full no-op removals -- shape scan,
+  /// constraint sweep, another snapshot -- against already-dead points.
+  ///
+  /// Shape-death rules, matching the old removePoint exactly, applied per shape
+  /// against the whole set:
+  ///   * line / circle / spiral / rectangle / rhombus: dies if ANY defining
+  ///     point is a target.
+  ///   * mesh: dies if ANY grid node or its anchor is a target (whole-mesh
+  ///     death, as before).
+  ///   * xspline: target nodes are removed from the spline; the spline dies if
+  ///     fewer than 2 nodes remain. NEW (deliberate fix): the spline also dies
+  ///     if its ANCHOR is a target -- previously the anchor fell through this
+  ///     sweep entirely, so the point was force-removed from the pool while the
+  ///     spline kept referencing it: a dangling rotation pivot carrying ghost
+  ///     attach edges on a dead object, self-healing only on save/reload. This
+  ///     mirrors what the mesh case has always done with its anchor.
+  void removePoints(Iterable<CompassPoint> targetsIn) {
+    // Ignore points already gone (double-delete, cascade leftovers, stale UI).
+    final targets = targetsIn.where(points.contains).toSet();
+    if (targets.isEmpty) return;
+
+    // Points of shapes destroyed as a SIDE EFFECT (a dead line's other endpoint,
+    // a collapsed spline's surviving nodes + anchor) -- collected and batch-GC'd
+    // below instead of left floating in the pool.
+    final orphanCandidates = <CompassPoint>{};
+    final deadShapes = <CompassShape>[];
 
     for (var layer in layers) {
       layer.shapes.removeWhere((shape) {
+        bool remove = false;
         if (shape is CompassLine) {
-          return shape.start == p || shape.end == p;
+          remove = targets.contains(shape.start) || targets.contains(shape.end);
         } else if (shape is CompassCircle) {
-          return shape.center == p || shape.radiusPoint == p;
+          remove = targets.contains(shape.center) ||
+              (shape.radiusPoint != null && targets.contains(shape.radiusPoint));
         } else if (shape is CompassSpiral) {
-          return shape.center == p || shape.startPoint == p;
+          remove = targets.contains(shape.center) || targets.contains(shape.startPoint);
         } else if (shape is CompassRectangle) {
-          return shape.p1 == p || shape.p2 == p;
+          remove = targets.contains(shape.p1) || targets.contains(shape.p2);
         } else if (shape is CompassRhombus) {
           // <--- NEW: Rhombus GC
-          return shape.p1 == p || shape.p2 == p || shape.p3 == p || shape.p4 == p;
+          remove = targets.contains(shape.p1) || targets.contains(shape.p2) ||
+              targets.contains(shape.p3) || targets.contains(shape.p4);
+        } else if (shape is CompassMesh) {
+          // Whole-mesh death on any node/anchor hit (was a removeShape delegate
+          // in the old removePoint; now handled uniformly in this sweep).
+          remove = (shape.anchorPoint != null && targets.contains(shape.anchorPoint)) ||
+              shape.nodes.any((n) => targets.contains(n.point));
         } else if (shape is CompassXSpline) {
-          shape.nodes.removeWhere((n) => n.point == p);
-          if (shape.nodes.length < 2) {
-             if (shape.anchorPoint != null) {
+          if (shape.anchorPoint != null && targets.contains(shape.anchorPoint)) {
+            // Anchor death is fatal (see doc comment above).
+            remove = true;
+          } else {
+            shape.nodes.removeWhere((n) => targets.contains(n.point));
+            if (shape.nodes.length < 2) {
+              if (shape.anchorPoint != null) {
                 for (var n in shape.nodes) shape.anchorPoint!.detach(n.point);
-             }
-             return true; 
+              }
+              remove = true;
+            }
           }
-          return false; 
         }
-        return false;
+
+        if (remove) {
+          deadShapes.add(shape);
+          orphanCandidates.addAll(_pointsOfShape(shape));
+        }
+        return remove;
       });
     }
-    
-    if (_selectedShape != null) {
-      bool stillExists = false;
-      for (var layer in layers) {
-        if (layer.shapes.contains(_selectedShape)) {
-          stillExists = true;
+
+    // Riders of constraints hosted by dead shapes are GC candidates too,
+    // exactly as in removeShape.
+    for (var c in constraints) {
+      for (var s in deadShapes) {
+        if (_constraintHasShape(c, s)) {
+          final rider = _constraintRider(c);
+          if (rider != null) orphanCandidates.add(rider);
           break;
         }
       }
-      if (!stillExists) _selectedShape = null;
     }
 
-    points.remove(p);
-    for (var remainingPoint in points) {
-      remainingPoint.attachedPoints.remove(p);
+    if (_selectedShape != null && deadShapes.contains(_selectedShape)) {
+      _selectedShape = null;
     }
-    constraints.removeWhere((c) => _constraintHasPoint(c, p));
+
+    // Force-remove every target from the pool and strip attach edges pointing
+    // at them from every survivor.
+    for (final p in targets) {
+      points.remove(p);
+    }
+    for (var remainingPoint in points) {
+      remainingPoint.attachedPoints.removeWhere(targets.contains);
+    }
+
+    // ONE unbind-aware constraint sweep for the whole batch: anything hosted by
+    // a dead shape OR touching a deleted point must stop listening, not just
+    // leave the list.
+    _removeConstraintsWhere((c) =>
+        deadShapes.any((s) => _constraintHasShape(c, s)) ||
+        targets.any((p) => _constraintHasPoint(c, p)));
+
+    // Batch-GC the side-effect orphans. The targets are already force-removed
+    // and included in the batch so edges among the dead group can't block each
+    // other (anchor -> nodes, center -> satellites, spliced cohesion links).
+    orphanCandidates.removeWhere(targets.contains);
+    if (orphanCandidates.isNotEmpty) {
+      final batch = {...orphanCandidates, ...targets};
+      for (var candidate in orphanCandidates) {
+        checkAndGCPoint(candidate, batch: batch);
+      }
+    }
+
+    _pruneSelection();
 
     saveSnapshot();
     notifyListeners();
@@ -1209,6 +1422,19 @@ class CompassEngine extends ChangeNotifier {
     if (c is PointOnLineConstraint) return c.line == shape;
     if (c is PointOnCircleConstraint) return c.circle == shape;
     if (c is PointOnSpiralConstraint) return c.spiral == shape;
+    // DistanceRadius carries no shape reference -- match by the radius notifier's
+    // identity, which is unique per circle. Without this, deleting a circle whose
+    // center survives (shared point) left the constraint alive, forever updating
+    // a dead notifier.
+    if (c is DistanceRadiusConstraint) {
+      return shape is CompassCircle && identical(c.targetRadius, shape.radius);
+    }
+    if (c is SquareConstraint) return c.rect == shape;
+    if (c is ParallelogramConstraint) {
+      return shape is CompassRhombus &&
+          c.p1 == shape.p1 && c.p2 == shape.p2 &&
+          c.p3 == shape.p3 && c.p4 == shape.p4;
+    }
     return false;
   }
 
@@ -1229,6 +1455,15 @@ class CompassEngine extends ChangeNotifier {
     if (c is PointOnSpiralConstraint) {
       return c.point == p || c.spiral.center == p || c.spiral.startPoint == p;
     }
+    if (c is DistanceRadiusConstraint) {
+      return c.p1 == p || c.p2 == p;
+    }
+    if (c is SquareConstraint) {
+      return c.rect.p1 == p || c.rect.p2 == p;
+    }
+    if (c is ParallelogramConstraint) {
+      return c.p1 == p || c.p2 == p || c.p3 == p || c.p4 == p;
+    }
     return false;
   }
 
@@ -1241,7 +1476,13 @@ class CompassEngine extends ChangeNotifier {
   }
 
   void loadProjectData(String data) {
+    // A load (file open OR undo) replaces the entire point pool; anything still
+    // selected is a dead object from the previous world. Clear before load so no
+    // interaction can touch stale points mid-rebuild, and prune after in case a
+    // listener repopulated anything.
+    selectedPoints.clear();
     ProjectSerializer.deserialize(this, data, notifyListeners);
+    _pruneSelection();
   }
 
   String toSVG() {

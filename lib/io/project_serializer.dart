@@ -1,6 +1,5 @@
 // /lib/io/project_serializer.dart
 
-import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
@@ -190,17 +189,23 @@ class ProjectSerializer {
     }
 
     // Persist host-rider constraints: PointOnLine / PointOnCircle / PointOnSpiral.
-    // These three have NO other reconstruction path (unlike DistanceRadius, rebuilt
-    // by the circle loader's radius closure, and Square, rebuilt from isSquare), so
-    // without this they vanish on every save/load -- and because undo() round-trips
-    // through serialize/deserialize, they vanish on Ctrl+Z too. We record the rider
-    // id plus the ids of the host shape's DEFINING points rather than inventing a
-    // shape id: that keeps every SHAPE line byte-identical and the rebuild pass
-    // matches those ids back to the freshly-built shape. Emitted last, after all
-    // SHAPE lines, since a constraint references a shape that must already exist;
-    // the load side also uses a dedicated pass so ordering is not actually relied on.
-    // Legacy files carry no CONSTRAINT lines (clean no-op on load); older code
-    // opening a new file simply ignores the unknown lines -- compatible both ways.
+    // These three have NO other reconstruction path, so without this they vanish on
+    // every save/load -- and because undo() round-trips through serialize/
+    // deserialize, they vanish on Ctrl+Z too. We record the rider id plus the ids
+    // of the host shape's DEFINING points rather than inventing a shape id: that
+    // keeps every SHAPE line byte-identical and the rebuild pass matches those ids
+    // back to the freshly-built shape. Emitted last, after all SHAPE lines, since a
+    // constraint references a shape that must already exist; the load side also
+    // uses a dedicated pass so ordering is not actually relied on.
+    //
+    // The type checks below are also the FILTER: DistanceRadiusConstraint and
+    // SquareConstraint now live in engine.constraints too (registered for
+    // lifecycle/unbind reasons), but they are deliberately NOT written -- the load
+    // side reconstructs and registers them from the circle's center/radiusPoint
+    // wiring and the rectangle's isSquare flag respectively, so writing them would
+    // only produce duplicates. Legacy files carry no CONSTRAINT lines (clean no-op
+    // on load); older code opening a new file simply ignores the unknown lines --
+    // compatible both ways.
     for (var c in engine.constraints) {
       if (c is PointOnLineConstraint) {
         buffer.writeln('CONSTRAINT,PONLINE,${c.point.id},${c.line.start.id},${c.line.end.id}');
@@ -217,7 +222,13 @@ class ProjectSerializer {
   static void deserialize(CompassEngine engine, String data, VoidCallback onUpdate) {
     engine.points.clear();
     engine.layers.clear();
-    engine.constraints.clear(); // <--- Rebuilt from CONSTRAINT lines in the third pass
+    // Unbind, don't just clear: the old constraints' bind() listeners live on the
+    // OLD points' notifiers, and those points can outlive this load (the canvas
+    // controller, a mid-flight drag, or any stale reference can still poke them).
+    // A bare clear() left every old constraint alive and enforcing against the
+    // discarded world -- the same zombie-listener debt as bare removeWhere.
+    // Rebuilt from CONSTRAINT lines (and the circle/rectangle loaders) below.
+    engine.unbindAllConstraints();
     engine.referenceLayer = null;
     engine.activeLayer = null;
     engine.selectShape(null);
@@ -351,16 +362,24 @@ class ProjectSerializer {
                 ..isVisible = isVisible;
                
                center.attach(radiusPoint);
-               void enforceRadius() {
-                 final dx = radiusPoint.x.value - center.x.value;
-                 final dy = radiusPoint.y.value - center.y.value;
-                 circle.radius.value = sqrt(dx * dx + dy * dy);
-               }
-               enforceRadius(); 
-               center.x.addListener(enforceRadius);
-               center.y.addListener(enforceRadius);
-               radiusPoint.x.addListener(enforceRadius);
-               radiusPoint.y.addListener(enforceRadius);
+
+               // REGISTERED DistanceRadiusConstraint instead of the old bespoke
+               // enforceRadius closure. The closure was four permanently-anonymous
+               // listeners per circle -- the exact unremovable-listener debt behind
+               // the zombie bug, just wearing a different coat: deleting the circle
+               // could never detach them, so they kept recomputing a dead radius
+               // notifier forever. The constraint's constructor binds and runs
+               // enforce() once, which reproduces the closure's initial snap
+               // byte-for-byte (same sqrt over the same two points). Registering it
+               // lets removeShape/removePoint find it via _constraintHasShape's
+               // radius-notifier identity match and unbind it. NOT routed through
+               // engine.addPointOnCircle-style helpers: those snapshot the undo
+               // stack and notify, which is wrong mid-load.
+               engine.constraints.add(DistanceRadiusConstraint(
+                 p1: center,
+                 p2: radiusPoint,
+                 targetRadius: circle.radius,
+               ));
 
                layer.shapes.add(circle);
             }
@@ -401,7 +420,9 @@ class ProjectSerializer {
                 ..isVisible = isVisible;
                 
               if (isSquare) {
-                SquareConstraint(rect: rect);
+                // Registered (was constructed loose): a constraint the engine
+                // cannot find is one it can never unbind on delete.
+                engine.constraints.add(SquareConstraint(rect: rect));
               }
                 
               layer.shapes.add(rect);
@@ -564,10 +585,10 @@ class ProjectSerializer {
     // defining points, then construct the constraint and register it DIRECTLY in
     // engine.constraints. We deliberately do NOT route through engine.addPointOn*:
     // those snapshot the undo stack and notify listeners, which is wrong mid-load
-    // (this mirrors how SquareConstraint is reconstructed inline above, just with
-    // the extra list registration the engine now needs). The constraint constructor
-    // runs enforce() once, but every rider was saved exactly on its host, so that is
-    // a zero-delta no-op -- nothing jumps, no listener storm.
+    // (this mirrors how DistanceRadius/Square are reconstructed inline above, just
+    // matched to hosts by id instead). The constraint constructor runs enforce()
+    // once, but every rider was saved exactly on its host, so that is a zero-delta
+    // no-op -- nothing jumps, no listener storm.
 
     CompassLine? findLine(String startId, String endId) {
       for (var layer in engine.layers) {

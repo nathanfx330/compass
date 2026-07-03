@@ -1,4 +1,4 @@
-// lib/constraints.dart
+// /lib/constraints.dart
 
 import 'dart:math';
 import 'package:flutter/foundation.dart';
@@ -11,12 +11,27 @@ import 'models/geometry/spiral.dart';
 import 'models/geometry/rectangle.dart';
 
 /// The base class for all rules in the system.
+///
+/// LIFECYCLE CONTRACT: every concrete constraint calls bind() + enforce() in its
+/// constructor, and MUST be unbind()-ed before it is dropped. bind() registers a
+/// single listener closure on every ValueNotifier the rule watches; until
+/// unbind() removes that closure, the notifiers hold the constraint alive and it
+/// KEEPS ENFORCING -- a "zombie" that re-projects surviving points onto deleted
+/// host geometry (the notifier's listener list is a strong reference, so Dart GC
+/// never collects it either). This is why nothing may ever bare-remove a
+/// constraint from a list: unbind first, then drop the reference.
 abstract class CompassConstraint {
   /// Calculates and applies the mathematical rule
   void enforce();
   
   /// Sets up the listeners so the rule is enforced automatically when points move
   void bind();
+
+  /// Removes every listener bind() registered. After this the constraint is
+  /// inert: nothing fires it, and nothing holds it alive. Idempotent -- a second
+  /// call is a no-op, so overlapping cleanup paths (shape delete + point GC)
+  /// can both call it safely.
+  void unbind();
 }
 
 /// A rule that forces a target radius to always equal the exact distance 
@@ -25,6 +40,8 @@ class DistanceRadiusConstraint extends CompassConstraint {
   final CompassPoint p1;
   final CompassPoint p2;
   final ValueNotifier<double> targetRadius;
+
+  VoidCallback? _boundListener;
 
   DistanceRadiusConstraint({
     required this.p1,
@@ -45,13 +62,30 @@ class DistanceRadiusConstraint extends CompassConstraint {
 
   @override
   void bind() {
-    // Whenever any of these coordinates change, enforce the rule again
+    // Whenever any of these coordinates change, enforce the rule again.
+    // The closure is captured in _boundListener so unbind() can remove the
+    // EXACT same object addListener registered -- removeListener matches by
+    // identity, so a freshly-created identical closure would remove nothing.
     void listener() => enforce();
+    _boundListener = listener;
     
     p1.x.addListener(listener);
     p1.y.addListener(listener);
     p2.x.addListener(listener);
     p2.y.addListener(listener);
+  }
+
+  @override
+  void unbind() {
+    final listener = _boundListener;
+    if (listener == null) return;
+
+    p1.x.removeListener(listener);
+    p1.y.removeListener(listener);
+    p2.x.removeListener(listener);
+    p2.y.removeListener(listener);
+
+    _boundListener = null;
   }
 }
 
@@ -60,6 +94,8 @@ class PointOnLineConstraint extends CompassConstraint {
   final CompassPoint point;
   final CompassLine line;
   bool _isEnforcing = false; 
+
+  VoidCallback? _boundListener;
 
   PointOnLineConstraint({
     required this.point,
@@ -127,6 +163,7 @@ class PointOnLineConstraint extends CompassConstraint {
   @override
   void bind() {
     void listener() => enforce();
+    _boundListener = listener;
     
     line.start.x.addListener(listener);
     line.start.y.addListener(listener);
@@ -135,6 +172,22 @@ class PointOnLineConstraint extends CompassConstraint {
     
     point.x.addListener(listener);
     point.y.addListener(listener);
+  }
+
+  @override
+  void unbind() {
+    final listener = _boundListener;
+    if (listener == null) return;
+
+    line.start.x.removeListener(listener);
+    line.start.y.removeListener(listener);
+    line.end.x.removeListener(listener);
+    line.end.y.removeListener(listener);
+
+    point.x.removeListener(listener);
+    point.y.removeListener(listener);
+
+    _boundListener = null;
   }
 }
 
@@ -145,6 +198,8 @@ class PointOnCircleConstraint extends CompassConstraint {
   bool _isEnforcing = false;
   
   double _lockedAngle = 0.0; 
+
+  VoidCallback? _boundListener;
 
   PointOnCircleConstraint({
     required this.point,
@@ -215,6 +270,7 @@ class PointOnCircleConstraint extends CompassConstraint {
   @override
   void bind() {
     void listener() => enforce();
+    _boundListener = listener;
     
     circle.center.x.addListener(listener);
     circle.center.y.addListener(listener);
@@ -222,6 +278,21 @@ class PointOnCircleConstraint extends CompassConstraint {
     
     point.x.addListener(listener);
     point.y.addListener(listener);
+  }
+
+  @override
+  void unbind() {
+    final listener = _boundListener;
+    if (listener == null) return;
+
+    circle.center.x.removeListener(listener);
+    circle.center.y.removeListener(listener);
+    circle.radius.removeListener(listener);
+
+    point.x.removeListener(listener);
+    point.y.removeListener(listener);
+
+    _boundListener = null;
   }
 }
 
@@ -233,6 +304,8 @@ class PointOnSpiralConstraint extends CompassConstraint {
   
   // Tracks the absolute mathematical angle (including 2*Pi wraps) along the infinite spiral curve
   double _lockedTheta = 0.0;
+
+  VoidCallback? _boundListener;
 
   PointOnSpiralConstraint({
     required this.point,
@@ -350,6 +423,7 @@ class PointOnSpiralConstraint extends CompassConstraint {
   @override
   void bind() {
     void listener() => enforce();
+    _boundListener = listener;
     
     spiral.center.x.addListener(listener);
     spiral.center.y.addListener(listener);
@@ -359,6 +433,22 @@ class PointOnSpiralConstraint extends CompassConstraint {
     point.x.addListener(listener);
     point.y.addListener(listener);
   }
+
+  @override
+  void unbind() {
+    final listener = _boundListener;
+    if (listener == null) return;
+
+    spiral.center.x.removeListener(listener);
+    spiral.center.y.removeListener(listener);
+    spiral.startPoint.x.removeListener(listener);
+    spiral.startPoint.y.removeListener(listener);
+
+    point.x.removeListener(listener);
+    point.y.removeListener(listener);
+
+    _boundListener = null;
+  }
 }
 
 /// A rule that forces the diagonal of a rectangle to always be a perfect 45 degrees,
@@ -366,6 +456,8 @@ class PointOnSpiralConstraint extends CompassConstraint {
 class SquareConstraint extends CompassConstraint {
   final CompassRectangle rect;
   bool _isEnforcing = false;
+
+  VoidCallback? _boundListener;
 
   SquareConstraint({required this.rect}) {
     bind();
@@ -430,15 +522,29 @@ class SquareConstraint extends CompassConstraint {
   @override
   void bind() {
     void listener() => enforce();
+    _boundListener = listener;
     
     rect.p1.x.addListener(listener);
     rect.p1.y.addListener(listener);
     rect.p2.x.addListener(listener);
     rect.p2.y.addListener(listener);
   }
+
+  @override
+  void unbind() {
+    final listener = _boundListener;
+    if (listener == null) return;
+
+    rect.p1.x.removeListener(listener);
+    rect.p1.y.removeListener(listener);
+    rect.p2.x.removeListener(listener);
+    rect.p2.y.removeListener(listener);
+
+    _boundListener = null;
+  }
 }
 
-// --- NEW: Parallelogram Constraint ---
+// --- Parallelogram Constraint ---
 /// A rule that forces four points to always form a parallelogram/skewed square.
 /// If you drag one corner to skew the shape, the corresponding points
 /// move automatically to keep opposite sides perfectly parallel.
@@ -448,6 +554,8 @@ class ParallelogramConstraint extends CompassConstraint {
   final CompassPoint p3; // Top-Right
   final CompassPoint p4; // Top-Left
   bool _isEnforcing = false;
+
+  VoidCallback? _boundListener;
 
   ParallelogramConstraint({
     required this.p1,
@@ -526,6 +634,8 @@ class ParallelogramConstraint extends CompassConstraint {
   @override
   void bind() {
     void listener() => enforce();
+    _boundListener = listener;
+
     p1.x.addListener(listener);
     p1.y.addListener(listener);
     p2.x.addListener(listener);
@@ -534,5 +644,22 @@ class ParallelogramConstraint extends CompassConstraint {
     p3.y.addListener(listener);
     p4.x.addListener(listener);
     p4.y.addListener(listener);
+  }
+
+  @override
+  void unbind() {
+    final listener = _boundListener;
+    if (listener == null) return;
+
+    p1.x.removeListener(listener);
+    p1.y.removeListener(listener);
+    p2.x.removeListener(listener);
+    p2.y.removeListener(listener);
+    p3.x.removeListener(listener);
+    p3.y.removeListener(listener);
+    p4.x.removeListener(listener);
+    p4.y.removeListener(listener);
+
+    _boundListener = null;
   }
 }

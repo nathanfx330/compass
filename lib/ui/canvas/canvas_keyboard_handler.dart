@@ -1,4 +1,4 @@
-// lib/ui/canvas/canvas_keyboard_handler.dart
+// /lib/ui/canvas/canvas_keyboard_handler.dart
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -42,10 +42,19 @@ class CanvasKeyboardHandler {
     final isDelete = keys.contains(LogicalKeyboardKey.delete) || keys.contains(LogicalKeyboardKey.backspace);
 
     // Immediate Action: Delete
+    //
+    // ONE batch call, not a removePoint-per-point loop. The loop had two defects
+    // with multi-selections: every removePoint ended in saveSnapshot(), so
+    // deleting N points minted N undo states (Ctrl+Z resurrected them one at a
+    // time and large deletes flushed the 50-deep stack); and cascade deletions
+    // (a shape destroyed by point A dragging its OTHER selected points down with
+    // it) made later iterations run a full no-op removal -- shape scan,
+    // constraint sweep, and yet another snapshot -- against already-dead points.
+    // engine.removePoints() does one combined GC batch, one constraint sweep,
+    // one snapshot, one notify. The engine also prunes its own selection set,
+    // but the explicit clear() keeps this handler's contract self-evident.
     if (isDelete && controller.selectedPoints.isNotEmpty && event is KeyDownEvent) {
-       for (var p in controller.selectedPoints.toList()) {
-         engine.removePoint(p);
-       }
+       engine.removePoints(controller.selectedPoints.toList());
        controller.selectedPoints.clear();
        // Note: the controller's notifyListeners() is accessible because it extends ChangeNotifier
        controller.notifyListeners();

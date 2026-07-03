@@ -602,7 +602,11 @@ class CanvasGestureHandler {
           engine.addPoint(center); engine.addPoint(radiusPoint);
           center.attach(radiusPoint); 
           final circle = CompassCircle(center: center, radiusPoint: radiusPoint, radius: 0);
-          DistanceRadiusConstraint(p1: center, p2: radiusPoint, targetRadius: circle.radius);
+          // REGISTERED (was constructed loose): a constraint the engine can't
+          // find in its list is one it can never unbind on delete -- the dead
+          // rule kept enforcing against the deleted circle's radius forever.
+          engine.constraints.add(DistanceRadiusConstraint(
+              p1: center, p2: radiusPoint, targetRadius: circle.radius));
           engine.addShape(circle);
         } else if (controller.currentTool == CompassTool.addSpiral) {
           final center = CompassPoint(x: logicalPosition.dx, y: logicalPosition.dy);
@@ -616,7 +620,8 @@ class CanvasGestureHandler {
           final p2 = CompassPoint(x: logicalPosition.dx + quickOffset, y: logicalPosition.dy + quickOffset);
           engine.addPoint(p1); engine.addPoint(p2);
           final rect = CompassRectangle(p1: p1, p2: p2, isSquare: true);
-          SquareConstraint(rect: rect);
+          // REGISTERED (was constructed loose) -- same reason as the circle above.
+          engine.constraints.add(SquareConstraint(rect: rect));
           engine.addShape(rect);
         }
         controller.shapeStartPoint = null;
@@ -646,7 +651,14 @@ class CanvasGestureHandler {
           } else if (controller.currentTool == CompassTool.addCircle) {
             final circle = CompassCircle(center: controller.shapeStartPoint!, radiusPoint: tappedPoint!, radius: 0);
             controller.shapeStartPoint!.attach(tappedPoint!);
-            DistanceRadiusConstraint(p1: controller.shapeStartPoint!, p2: tappedPoint!, targetRadius: circle.radius);
+            // REGISTERED (was constructed loose). This is the two-click path,
+            // which can bind onto SHARED hit-tested points -- exactly the case
+            // where an unfindable constraint outlives its circle and yanks the
+            // surviving shared point around.
+            engine.constraints.add(DistanceRadiusConstraint(
+                p1: controller.shapeStartPoint!,
+                p2: tappedPoint!,
+                targetRadius: circle.radius));
             engine.addShape(circle);
           } else if (controller.currentTool == CompassTool.addSpiral) {
             final spiral = CompassSpiral(center: controller.shapeStartPoint!, startPoint: tappedPoint!);
@@ -654,7 +666,9 @@ class CanvasGestureHandler {
             engine.addShape(spiral);
           } else if (controller.currentTool == CompassTool.addRect) { 
             final rect = CompassRectangle(p1: controller.shapeStartPoint!, p2: tappedPoint!);
-            SquareConstraint(rect: rect); 
+            // REGISTERED (was constructed loose) -- two-click path, same shared-
+            // point exposure as the circle above.
+            engine.constraints.add(SquareConstraint(rect: rect));
             engine.addShape(rect);
           }
         }
