@@ -27,6 +27,7 @@ import 'io/project_serializer.dart';
 import 'io/svg_exporter.dart';
 import 'io/png_exporter.dart';
 import 'io/obj_exporter.dart';
+import 'io/ascii_exporter.dart'; // <--- NEW: ascii exporter
 
 // --- GEOMETRY HELPERS ---
 import 'path_baker.dart';
@@ -1505,5 +1506,9 @@ class CompassEngine extends ChangeNotifier {
       gridMode: gridMode,
       gridCount: gridCount,
     );
+  }
+  
+  Future<String?> toASCII({int columns = 100, bool invert = false}) {
+    return ASCIIExporter.toASCII(this, columns: columns, invert: invert);
   }
 }

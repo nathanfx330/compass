@@ -375,6 +375,109 @@ class CompassDialogs {
     );
   }
 
+  // --- NEW: ASCII Exporter Dialog ---
+  static void showExportASCII(BuildContext context, CompassEngine engine) {
+    final TextEditingController filenameController = TextEditingController(text: 'compass_art.txt');
+    double columnWidth = 100.0;
+    bool invertColors = false;
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setLocalState) {
+            return AlertDialog(
+              title: const Text('Export as ASCII Art'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Renders the geometry into text characters.'),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: filenameController,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Filename',
+                      suffixText: '.txt',
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Row(
+                    children: [
+                      const Text('Resolution (Columns): '),
+                      Text('${columnWidth.round()} chars', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  Slider(
+                    value: columnWidth,
+                    min: 40,
+                    max: 300,
+                    divisions: 260,
+                    onChanged: (val) => setLocalState(() => columnWidth = val),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Invert Light/Dark'),
+                    subtitle: const Text('Check this if you plan to view the text on a dark background.'),
+                    value: invertColors,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    onChanged: (val) => setLocalState(() => invertColors = val ?? false),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton.icon(
+                  icon: const Icon(Icons.text_snippet),
+                  label: const Text('Save Text File'),
+                  onPressed: () async {
+                    String filename = filenameController.text;
+                    if (!filename.endsWith('.txt')) filename += '.txt';
+                    
+                    try {
+                      final String? asciiData = await engine.toASCII(
+                        columns: columnWidth.round(),
+                        invert: invertColors,
+                      );
+                      
+                      if (asciiData == null || asciiData.isEmpty) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Nothing to export — the canvas is empty.')),
+                          );
+                        }
+                        return;
+                      }
+
+                      final file = File(filename);
+                      await file.writeAsString(asciiData);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('ASCII Art saved to $filename!')),
+                        );
+                        Navigator.of(context).pop();
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Error saving file: $e')),
+                        );
+                      }
+                    }
+                  },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   static void showSaveProject(BuildContext context, CompassEngine engine) {
     final projectData = engine.toProjectData();
     final TextEditingController filenameController = TextEditingController(text: 'my_design.compass');

@@ -1,4 +1,4 @@
-// ./lib/ui/workspace/menu_bar.dart
+// /lib/ui/workspace/menu_bar.dart
 
 import 'package:flutter/material.dart';
 import '../../engine.dart';
@@ -104,6 +104,11 @@ class CompassMenuBar extends StatelessWidget {
                       onPressed: () => CompassDialogs.showExportPNG(context, engine),
                       leadingIcon: const Icon(Icons.photo_camera),
                       child: const Text('Export as PNG...'),
+                    ),
+                    MenuItemButton(
+                      onPressed: () => CompassDialogs.showExportASCII(context, engine),
+                      leadingIcon: const Icon(Icons.text_snippet),
+                      child: const Text('Export as ASCII Art (.txt)...'),
                     ),
                   ],
                   child: const Text('File'),
