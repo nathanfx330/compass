@@ -6,6 +6,8 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart'; // debugPrint (diagnostics; harmless to keep)
 
 import '../models/layer.dart';
+import 'medial_axis.dart';
+import 'delaunay.dart';
 
 /// Exports a SINGLE layer's resolved boolean fill to a Wavefront .obj mesh,
 /// flat on the Z=0 plane. This is the "layer -> object" export: it takes what
@@ -20,13 +22,14 @@ import '../models/layer.dart';
 ///     fill on SVG import. OBJ carries them.
 ///   * A triangle mesh is universal (Godot, any engine); SVG->curve is Blender-only.
 ///
-/// TWO TESSELLATION MODES (chosen by the caller):
+/// FOUR EXPORT MODES (chosen by the caller):
 ///
-///   SCANLINE (default, gridMode=false) -- a trapezoidal decomposition of the
-///     filled region under the EVEN-ODD rule. Robust and follows the curve
-///     smoothly, but produces many thin horizontal bands: correct, ugly topology.
-///     This was the design that finally cut holes cleanly after a hand-rolled
-///     ear-clipper (with zero-width hole bridges) kept choking into sliver fans.
+///   SCANLINE (default; all mode flags false) -- a trapezoidal decomposition of
+///     the filled region under the EVEN-ODD rule. Robust and follows the curve
+///     smoothly, but produces many thin horizontal bands: correct, ugly
+///     topology. This was the design that finally cut holes cleanly after a
+///     hand-rolled ear-clipper (with zero-width hole bridges) kept choking into
+///     sliver fans.
 ///
 ///   GRID (gridMode=true) -- a uniform quad lattice over the fill's bounding box.
 ///     Interior cells (all four corners inside) emit as clean quads; boundary cells
@@ -35,18 +38,61 @@ import '../models/layer.dart';
 ///     are simply not emitted. This is the workable topology for a game/iso
 ///     pipeline -- uniform quads subdivide and displace predictably. The tradeoff is
 ///     a stair-stepped silhouette at the cell resolution (raise gridCount to smooth
-///     it). Both modes share flatten + even-odd test + recenter + Y-flip + weld;
-///     only the cell/band walking differs.
+///     it).
+///
+///   DELAUNAY (delaunayMode=true) -- ORGANIC TRIANGLES: the same math as the
+///     in-app "Bake to Triangulated Spline" (Sci-Fi veins), emitted as real `f`
+///     faces instead of a DFS spline walk. Boundary samples (at the export's
+///     Curve Resolution, so the silhouette is exact -- every boundary sample is
+///     a mesh vertex, no stair-stepping) plus a seeded, spacing-enforced
+///     interior scatter, run through Bowyer-Watson; triangles whose centroid
+///     falls outside the even-odd region (concave bays, holes) are culled. The
+///     result is roughly-equilateral, roughly-uniform tris -- the natural
+///     topology for organic deformation, wireframe render styles, and anything
+///     downstream that dislikes the scanline's slivers and the grid's blocky
+///     rim. delaunaySpacing sets the interior point spacing (~ triangle edge
+///     length); the kernel lives in delaunay.dart.
+///
+///   SKELETON (skeletonMode=true; wins over the other mode flags if several are
+///     set) -- exports the region's MEDIAL AXIS instead of its area: the
+///     internal topological frame, as loose OBJ `l` (line) elements rather than
+///     `f` faces. Blender imports these as edge-only mesh geometry -- exactly
+///     the input the Skin modifier and edge->armature scripts want, which is
+///     the auto-rigging / retopology use case this mode exists for. The
+///     extraction itself (discrete Voronoi sweep + lambda pruning) lives in
+///     medial_axis.dart; this file only hands it the flattened contours and
+///     serializes the result. gridCount here sets the SKELETON's sweep
+///     resolution (same "cells across the longest side" meaning), and
+///     skeletonLambda is the branch-pruning strength in logical px -- see
+///     MedialAxisExtractor.extract for the full semantics, including the floor
+///     lambda must keep above the sampling spacing.
+///
+///     In Skeleton mode, the outline and the internal medial axis are now emitted
+///     as a single unified object. Bridge edges connect every boundary point to
+///     the nearest skeleton point, guaranteeing a watertight contiguous mesh.
+///
+/// MODE PRECEDENCE when several flags are set: skeleton > delaunay > grid.
+/// (Callers set exactly one; the ordering just makes the API total.)
+///
+/// All modes share flatten + even-odd inside test + recenter + Y-flip; the
+/// scanline/grid modes additionally share the weld map (Delaunay's kernel does
+/// its own lattice weld, exactly as the medial kernel does). Only the walking
+/// differs.
 ///
 /// Source path: layer.getLayerFillPath() -- the fill silhouette, which already
 /// drops construction/stroke geometry and folds a closed width-spline's centerline
 /// into the fill, so "what gets exported" matches "what you see filled on canvas."
+/// The skeleton is extracted from this SAME silhouette, so holes shape the
+/// skeleton exactly as they shape the fill (a ring yields a circular spine).
 ///
 /// The mesh is RECENTERED on its bounding-box center so it lands at the world
 /// origin (0,0,0) regardless of where the layer sat on Compass's infinite canvas,
-/// and Y is flipped (Compass is Y-down; OBJ/Blender are Y-up).
+/// and Y is flipped (Compass is Y-down; OBJ/Blender are Y-up). Every mode uses
+/// the same bbox center, so a skeleton export lands in perfect registration
+/// with a fill export (any fill mode) of the same layer in Blender.
 ///
-/// Pure: depends only on dart:ui geometry + math.
+/// Pure: depends only on dart:ui geometry + math (+ the equally pure
+/// medial_axis.dart and delaunay.dart kernels).
 class OBJExporter {
   // Weld tolerance (logical px) for collapsing coincident emitted vertices into a
   // single OBJ index. Design geometry spans hundreds-to-thousands of units, so
@@ -59,17 +105,33 @@ class OBJExporter {
   static const double _minBand = 1e-4;
   static const double _minSpan = 1e-4;
 
-  /// Serializes [layer]'s fill to OBJ text. Returns an EMPTY string when the
-  /// layer has no fillable area, so the caller can report "nothing to export"
-  /// rather than writing a junk file.
+  /// Serializes [layer]'s fill (or its skeleton + outline) to OBJ text. Returns
+  /// an EMPTY string when the layer has no fillable area -- or, in skeleton
+  /// mode, when pruning leaves no skeleton at all (e.g. lambda larger than every
+  /// feature) -- so the caller can report "nothing to export" rather than
+  /// writing a junk file.
   ///
   /// [samplingSpacing] -- arc-length gap (logical px) between samples along each
-  ///   contour when flattening curves to polygons. Smaller = truer outline.
+  ///   contour when flattening curves to polygons. Smaller = truer outline. In
+  ///   skeleton mode this also sets the boundary-sample density the medial test
+  ///   runs against (and the density of the emitted outline loops); in Delaunay
+  ///   mode it sets the boundary vertex density of the triangulation itself --
+  ///   so finer sampling = a truer silhouette in every mode.
   /// [minSamplesPerContour] / [maxSamplesPerContour] -- floor/cap on samples.
-  /// [gridMode] -- false: scanline trapezoids (default). true: uniform quad grid.
-  /// [gridCount] -- grid mode only: number of cells across the LONGEST bbox side.
-  ///   Higher = finer grid = smoother silhouette + more quads. The shorter side
-  ///   gets however many same-size cells fit, so cells stay square.
+  /// [gridMode] -- true: uniform quad grid (default false: scanline trapezoids).
+  /// [gridCount] -- grid AND skeleton modes: number of cells across the LONGEST
+  ///   bbox side. Higher = finer grid / finer skeleton. The shorter side gets
+  ///   however many same-size cells fit, so cells stay square.
+  /// [delaunayMode] -- true: organic Delaunay triangles (see class comment).
+  /// [delaunaySpacing] -- Delaunay mode only: minimum interior point spacing in
+  ///   logical px, i.e. the approximate edge length of interior triangles.
+  ///   Smaller = denser, finer mesh.
+  /// [skeletonMode] -- true: export the medial-axis skeleton as `l` line
+  ///   elements, plus the resampled boundary outline, unified with bridge
+  ///   spokes. Takes precedence over delaunayMode and gridMode.
+  /// [skeletonLambda] -- skeleton mode only: lambda-pruning strength in logical
+  ///   px (minimum wall-to-wall separation for a point to count as skeleton).
+  ///   Larger = only the primary frame survives; smaller = finer twigs kept.
   static String toOBJ(
     CompassLayer layer, {
     double samplingSpacing = 2.0,
@@ -77,11 +139,15 @@ class OBJExporter {
     int maxSamplesPerContour = 4000,
     bool gridMode = false,
     int gridCount = 48,
+    bool delaunayMode = false,
+    double delaunaySpacing = 25.0,
+    bool skeletonMode = false,
+    double skeletonLambda = 20.0,
   }) {
     // Combine the standard fill with the variable-width ribbons
     Path path = layer.getLayerFillPath();
     final areaPath = layer.getLayerStrokeAreaPath();
-    
+
     if (areaPath.computeMetrics().isNotEmpty) {
       if (path.computeMetrics().isEmpty) {
         path = areaPath;
@@ -100,14 +166,16 @@ class OBJExporter {
     }
     if (contours.isEmpty) return '';
 
-    debugPrint('[OBJ] mode: ${gridMode ? "grid" : "scanline"}, '
-        'contours found: ${contours.length}');
+    final modeLabel = skeletonMode
+        ? 'skeleton'
+        : (delaunayMode ? 'delaunay' : (gridMode ? 'grid' : 'scanline'));
+    debugPrint('[OBJ] mode: $modeLabel, contours found: ${contours.length}');
     for (int i = 0; i < contours.length; i++) {
       debugPrint('[OBJ]   contour $i: ${contours[i].length} pts, '
           'signedArea=${_signedArea(contours[i]).toStringAsFixed(2)}');
     }
 
-    // ---- 2. Bounding box across all contours (shared by both modes). ----
+    // ---- 2. Bounding box across all contours (shared by all modes). ----
     double minX = double.infinity, minY = double.infinity;
     double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
     for (final poly in contours) {
@@ -117,6 +185,165 @@ class OBJExporter {
         if (p.dx > maxX) maxX = p.dx;
         if (p.dy > maxY) maxY = p.dy;
       }
+    }
+
+    // Recenter offset -- the SAME bbox center in every mode, so a skeleton
+    // export registers exactly with a fill export of the same layer.
+    final cx = (minX + maxX) / 2.0;
+    final cy = (minY + maxY) / 2.0;
+
+    // ---- SKELETON MODE: extract + emit skeleton and outline, then return. ----
+    // The medial kernel does its own lattice welding (vertices live on cell
+    // centers), so the string-keyed weld map below is fill-mode machinery the
+    // skeleton never touches.
+    if (skeletonMode) {
+      final skel = MedialAxisExtractor.extract(
+        contours,
+        gridCount: gridCount,
+        lambda: skeletonLambda,
+      );
+
+      debugPrint('[OBJ] skeleton verts: ${skel.verts.length}, '
+          'edges: ${skel.edges.length} '
+          '(gridCount=$gridCount, lambda=$skeletonLambda)');
+
+      if (skel.isEmpty) return '';
+
+      debugPrint('[OBJ] recenter offset: ($cx, $cy) -> origin');
+
+      int outlineVerts = 0;
+      for (final poly in contours) {
+        outlineVerts += poly.length;
+      }
+
+      final name = _sanitizeName(layer.name);
+      final buffer = StringBuffer();
+      buffer.writeln('# Exported from Compass');
+      buffer.writeln('# Layer: ${layer.name}');
+      buffer.writeln(
+          '# skeleton: ${skel.verts.length} vertices, ${skel.edges.length} line segments');
+      buffer.writeln(
+          '# outline: $outlineVerts vertices, ${contours.length} closed loop(s)');
+      buffer.writeln('# medial-axis skeleton ($gridCount across, '
+          'lambda=$skeletonLambda) + resampled boundary outline, '
+          'even-odd region; recentered, flat on Z=0');
+
+      // =================================================================
+      // 1. WRITE ALL VERTICES FIRST (Skeleton, then Outline)
+      // =================================================================
+      // By writing all vertices before any edges, we can freely draw lines 
+      // connecting the skeleton to the outline.
+      
+      // Skeleton vertices (Global Indices: 1 to skel.verts.length)
+      for (final v in skel.verts) {
+        final ex = v.dx - cx;
+        final ey = -(v.dy - cy); // Y-up for OBJ/Blender
+        buffer.writeln('v $ex $ey 0');
+      }
+
+      // Outline vertices (Global Indices: skel.verts.length + 1 ...)
+      int base = skel.verts.length; 
+      final outlinePts = <(Offset, int)>[]; // Flat lookup for bridging
+      
+      for (final poly in contours) {
+        for (final p in poly) {
+          final ex = p.dx - cx;
+          final ey = -(p.dy - cy); 
+          buffer.writeln('v $ex $ey 0');
+          outlinePts.add((p, base + 1));
+          base++;
+        }
+      }
+
+      // =================================================================
+      // 2. WRITE EDGES (Skeleton + Outline + Bridges)
+      // =================================================================
+      // Emitting this all under ONE object name so Blender imports it as a 
+      // single contiguous mesh, making the outline the true "outside edge".
+      buffer.writeln('o ${name}_skeleton_mesh');
+      
+      // A. Write the core medial axis edges
+      for (final e in skel.edges) {
+        buffer.writeln('l ${e.$1 + 1} ${e.$2 + 1}');
+      }
+
+      // B. Write Outline Edges (closed loops)
+      base = skel.verts.length; 
+      for (final poly in contours) {
+        final m = poly.length;
+        for (int i = 0; i < m; i++) {
+          final a = base + i + 1; 
+          final b = base + ((i + 1) % m) + 1;
+          buffer.writeln('l $a $b');
+        }
+        base += m;
+      }
+
+      // C. Bridge Edges: Connect EVERY outline vertex to the nearest skeleton node.
+      // This seals the gap between the discrete grid/skeleton and the smooth boundary,
+      // forming the "spokes" of the Voronoi cells.
+      if (skel.verts.isNotEmpty) {
+        for (final opt in outlinePts) {
+          final outPt = opt.$1;
+          final outIdx = opt.$2;
+          
+          double minDistSq = double.infinity;
+          int bestSkelIndex = -1;
+          
+          for (int i = 0; i < skel.verts.length; i++) {
+            final distSq = (skel.verts[i] - outPt).distanceSquared;
+            if (distSq < minDistSq) {
+              minDistSq = distSq;
+              bestSkelIndex = i + 1; // 1-based global index
+            }
+          }
+          
+          if (bestSkelIndex != -1) {
+            buffer.writeln('l $outIdx $bestSkelIndex');
+          }
+        }
+      }
+
+      return buffer.toString();
+    }
+
+    // ---- DELAUNAY MODE: kernel triangulation, emitted directly. -------------
+    // Like the skeleton mode, the kernel owns its own welding (0.01 px lattice)
+    // and hands back 0-based indices, so the fill modes' string-keyed weld map
+    // below is never touched. Winding is pre-normalized by the kernel so the
+    // Y-flip here yields uniform CCW (+Z-facing) faces in Blender.
+    if (delaunayMode) {
+      final tri = DelaunayTriangulator.triangulate(
+        contours,
+        interiorSpacing: delaunaySpacing,
+      );
+
+      debugPrint('[OBJ] delaunay verts: ${tri.verts.length}, '
+          'triangles: ${tri.tris.length} '
+          '(spacing=$delaunaySpacing)');
+
+      if (tri.isEmpty) return '';
+
+      debugPrint('[OBJ] recenter offset: ($cx, $cy) -> origin');
+
+      final name = _sanitizeName(layer.name);
+      final buffer = StringBuffer();
+      buffer.writeln('# Exported from Compass');
+      buffer.writeln('# Layer: ${layer.name}');
+      buffer.writeln('# ${tri.verts.length} vertices, ${tri.tris.length} triangles');
+      buffer.writeln('# delaunay tessellation (interior spacing '
+          '$delaunaySpacing px), even-odd fill; recentered, flat on Z=0');
+      buffer.writeln('o $name');
+      for (final v in tri.verts) {
+        final ex = v.dx - cx;
+        final ey = -(v.dy - cy); // Y-up for OBJ/Blender
+        buffer.writeln('v $ex $ey 0');
+      }
+      for (final t in tri.tris) {
+        // Kernel indices are 0-based; OBJ is 1-based.
+        buffer.writeln('f ${t.$1 + 1} ${t.$2 + 1} ${t.$3 + 1}');
+      }
+      return buffer.toString();
     }
 
     // ---- 3. Tessellate (mode-specific) into raw-coordinate verts + faces. ----
@@ -145,8 +372,6 @@ class OBJExporter {
     if (faces.isEmpty) return '';
 
     // ---- 4. Recenter on bbox center, Y-flip, emit. ----
-    final cx = (minX + maxX) / 2.0;
-    final cy = (minY + maxY) / 2.0;
     debugPrint('[OBJ] recenter offset: ($cx, $cy) -> origin');
 
     final name = _sanitizeName(layer.name);

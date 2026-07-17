@@ -2,27 +2,20 @@
 
 import 'dart:math';
 import 'dart:ui';
+import 'package:flutter/material.dart';
 
 import 'engine.dart';
-import 'constraints.dart'; // <--- NEW: converter must unbind constraints it orphans
+import 'constraints.dart'; 
 import 'models/geometry/point.dart';
 import 'models/geometry/shape.dart';
 import 'models/geometry/circle.dart';
 import 'models/geometry/rectangle.dart';
 import 'models/geometry/spline.dart';
-import 'models/geometry/mesh.dart'; // <--- NEW: gradient mesh conversion target
+import 'models/geometry/mesh.dart'; 
 import 'models/layer.dart';
 import 'path_baker.dart';
 
 class ShapeConverter {
-  /// The converters replace shapes IN-PLACE (layer.shapes[i] = newShape) to
-  /// preserve Z-order, which means they bypass engine.removeShape -- and with it
-  /// the engine's unbind-before-drop constraint cleanup. Any constraint hosted by
-  /// the replaced shape must therefore be unbound HERE, or it lives on as a
-  /// zombie: still bound to the surviving points' notifiers, still enforcing
-  /// against a shape that is no longer in any layer. The engine's own removal
-  /// chokepoint (_removeConstraintsWhere) is private, so this is the converter's
-  /// local equivalent with the same contract: unbind first, then drop.
   static void _unbindAndRemoveWhere(
       CompassEngine engine, bool Function(CompassConstraint) test) {
     for (final c in engine.constraints) {
@@ -41,13 +34,8 @@ class ShapeConverter {
         break;
       }
     }
-    
     if (targetLayer == null) return;
 
-    // Riders about to lose their host: collect BEFORE dropping the constraints,
-    // so we can offer each one to GC afterward. A rider that is structural
-    // elsewhere (spline start, line endpoint...) survives checkAndGCPoint;
-    // a bare rider whose only reason to exist was sitting on this circle goes.
     final orphanedRiders = <CompassPoint>[];
     for (final c in engine.constraints) {
       if (c is PointOnCircleConstraint && c.circle == circle) {
@@ -55,15 +43,6 @@ class ShapeConverter {
       }
     }
 
-    // Drop every constraint hosted by this circle:
-    //   * its DistanceRadiusConstraint (matched by radius-notifier identity --
-    //     the constraint carries no shape reference). Left alive, it keeps
-    //     recomputing the dead circle's radius on every center/radiusPoint move
-    //     whenever the radiusPoint survives as a shared point.
-    //   * any PointOnCircleConstraint riders -- left alive, they visibly snap
-    //     their points back onto the now-invisible circle on every drag.
-    // The spline replacing the circle has no equivalent constraint concept, so
-    // dropping (not migrating) is the correct semantic.
     _unbindAndRemoveWhere(
         engine,
         (c) =>
@@ -110,8 +89,6 @@ class ShapeConverter {
       engine.checkAndGCPoint(circle.radiusPoint!);
     }
 
-    // Ex-riders: keep if structural anywhere else, GC if their only purpose
-    // was riding this circle.
     for (final rider in orphanedRiders) {
       engine.checkAndGCPoint(rider);
     }
@@ -130,14 +107,8 @@ class ShapeConverter {
         break;
       }
     }
-    
     if (targetLayer == null) return;
 
-    // Drop the rect's SquareConstraint (present when isSquare was ever toggled
-    // on and registered at creation/load). In-place replacement bypasses
-    // removeShape, so without this the constraint survives whenever p1 or p2
-    // does -- and SquareConstraint actively moveBy()s its points, so a shared
-    // surviving corner gets yanked by a rectangle that no longer exists.
     _unbindAndRemoveWhere(
         engine, (c) => c is SquareConstraint && c.rect == rect);
 
@@ -176,17 +147,14 @@ class ShapeConverter {
 
     if (r <= 0.1) {
       final corners = [
-        Offset(left, top),
-        Offset(right, top),
-        Offset(right, bottom),
-        Offset(left, bottom),
+        Offset(left, top), Offset(right, top),
+        Offset(right, bottom), Offset(left, bottom),
       ];
       for (final c in corners) {
         addNodeAt(c, tension: 0.0);
       }
     } else {
       final k = 0.5522847498307936 * r; 
-
       final spec = <(Offset, Offset)>[
         (Offset(left + r, top),     Offset(k, 0)),   
         (Offset(right - r, top),    Offset(k, 0)),   
@@ -197,17 +165,13 @@ class ShapeConverter {
         (Offset(left, bottom - r),  Offset(0, -k)),  
         (Offset(left, top + r),     Offset(0, -k)),  
       ];
-
       for (final (pos, hOut) in spec) {
         addNodeAt(pos, tension: 1.0, handleOut: hOut, handleIn: Offset(-hOut.dx, -hOut.dy));
       }
     }
 
     targetLayer.shapes[shapeIndex] = spline;
-    
-    if (engine.selectedShape == rect) {
-      engine.selectShape(spline);
-    }
+    if (engine.selectedShape == rect) engine.selectShape(spline);
 
     engine.checkAndGCPoint(rect.p1);
     engine.checkAndGCPoint(rect.p2);
@@ -216,13 +180,6 @@ class ShapeConverter {
     engine.notifyListeners();
   }
 
-  /// Converts a rectangle into a [rows] x [cols] GRADIENT MESH. Same entry shape
-  /// as convertRectangleToSpline -- in-place replacement preserving Z-order, a
-  /// fresh centroid anchor, all-new grid nodes attached to that anchor, and GC of
-  /// the rectangle's two defining corners afterward.
-  ///
-  /// UPGRADE: Instead of raw CompassPoints, it now generates CompassSplineNodes
-  /// with a default tension of 1.0, allowing them to be targeted by the A key.
   static void convertRectangleToMesh(
     CompassEngine engine,
     CompassRectangle rect, {
@@ -238,15 +195,11 @@ class ShapeConverter {
         break;
       }
     }
-
     if (targetLayer == null) return;
 
-    // Same reason as convertRectangleToSpline: in-place replacement bypasses
-    // removeShape, so the SquareConstraint must be unbound here.
     _unbindAndRemoveWhere(
         engine, (c) => c is SquareConstraint && c.rect == rect);
 
-    // A mesh needs at least one patch in each axis.
     final int gridRows = rows < 2 ? 2 : rows;
     final int gridCols = cols < 2 ? 2 : cols;
 
@@ -262,8 +215,6 @@ class ShapeConverter {
     anchor.x.addListener(engine.notifyListeners);
     anchor.y.addListener(engine.notifyListeners);
 
-    // Inherit the layer's fill as the uniform seed; neutral grey if there is none
-    // (alpha 0 == transparent / "None"), so the mesh starts visible.
     final Color seed =
         targetLayer.color.alpha == 0 ? const Color(0xFFCCCCCC) : targetLayer.color;
 
@@ -283,7 +234,6 @@ class ShapeConverter {
         p.y.addListener(engine.notifyListeners);
         anchor.attach(p);
 
-        // --- UPGRADE: Wrap in a CompassSplineNode for tension ---
         final node = CompassSplineNode(point: p, tension: 1.0);
         node.tension.addListener(engine.notifyListeners);
 
@@ -303,10 +253,7 @@ class ShapeConverter {
       ..isVisible = rect.isVisible;
 
     targetLayer.shapes[shapeIndex] = mesh;
-
-    if (engine.selectedShape == rect) {
-      engine.selectShape(mesh);
-    }
+    if (engine.selectedShape == rect) engine.selectShape(mesh);
 
     engine.checkAndGCPoint(rect.p1);
     engine.checkAndGCPoint(rect.p2);
@@ -383,9 +330,319 @@ class ShapeConverter {
     layer.isVisible = false;
     engine.activeLayer = baked;
     baked.isExpanded = true;
-    engine.selectShape(null); // Clear selected shape
+    engine.selectShape(null); 
 
     engine.saveSnapshot();
     engine.notifyListeners();
   }
+
+  // ===========================================================================
+  // SCI-FI SKELETON (Organic Delaunay Triangulation Graph Walk)
+  // ===========================================================================
+
+  static void bakeLayerToSciFiSkeleton(CompassEngine engine, CompassLayer layer) {
+    final int srcIndex = engine.layers.indexOf(layer);
+    if (srcIndex == -1) return;
+
+    Path masterPath = layer.getLayerFillPath();
+    final areaPath = layer.getLayerStrokeAreaPath();
+    
+    if (areaPath.computeMetrics().isNotEmpty) {
+      if (masterPath.computeMetrics().isEmpty) {
+        masterPath = areaPath;
+      } else {
+        masterPath = Path.combine(PathOperation.union, masterPath, areaPath);
+      }
+    }
+
+    if (masterPath.computeMetrics().isEmpty) return;
+
+    // 1. Gather points: Sparse Perimeter
+    final pointCloud = <Offset>[];
+    const double perimeterSpacing = 30.0; 
+    
+    for (final metric in masterPath.computeMetrics()) {
+      if (metric.length < 1e-3) continue;
+      int count = (metric.length / perimeterSpacing).floor();
+      if (count < 6) count = 6; 
+      
+      final step = metric.length / count;
+      for (int i = 0; i < count; i++) {
+        final t = metric.getTangentForOffset(i * step);
+        if (t != null) pointCloud.add(t.position);
+      }
+    }
+    
+    if (pointCloud.isEmpty) return;
+
+    // 2. Gather points: Random internal scatter (Poisson-disc approximation)
+    final bounds = masterPath.getBounds();
+    final random = Random(42); // Seeded for deterministic beautiful results
+    final targetInternalPoints = (bounds.width * bounds.height / 2500).clamp(10, 200).toInt();
+    
+    int added = 0;
+    int attempt = 0;
+    while (added < targetInternalPoints && attempt < targetInternalPoints * 15) {
+      final rx = bounds.left + random.nextDouble() * bounds.width;
+      final ry = bounds.top + random.nextDouble() * bounds.height;
+      final pt = Offset(rx, ry);
+      
+      if (masterPath.contains(pt)) {
+        bool tooClose = false;
+        for (var p in pointCloud) {
+          if ((p - pt).distanceSquared < 600.0) { // Keep them spaced out
+            tooClose = true;
+            break;
+          }
+        }
+        if (!tooClose) {
+          pointCloud.add(pt);
+          added++;
+        }
+      }
+      attempt++;
+    }
+
+    // 3. Compute pure Delaunay Triangulation
+    final triangles = _computeDelaunay(pointCloud);
+
+    // 4. Build Graph from edges
+    final ptsList = <CompassPoint>[];
+    final ptMap = <Offset, CompassPoint>{};
+
+    CompassPoint getPoint(Offset o) {
+      final rx = (o.dx * 100).round() / 100;
+      final ry = (o.dy * 100).round() / 100;
+      final key = Offset(rx, ry);
+      
+      if (ptMap.containsKey(key)) return ptMap[key]!;
+      
+      final p = CompassPoint(x: o.dx, y: o.dy);
+      engine.points.add(p);
+      p.x.addListener(engine.notifyListeners);
+      p.y.addListener(engine.notifyListeners);
+      
+      ptsList.add(p);
+      ptMap[key] = p;
+      return p;
+    }
+
+    final adj = <CompassPoint, Set<CompassPoint>>{};
+    
+    void addEdge(CompassPoint a, CompassPoint b) {
+      if (a == b) return;
+      adj.putIfAbsent(a, () => {}).add(b);
+      adj.putIfAbsent(b, () => {}).add(a);
+    }
+
+    // A. Always preserve the exact perimeter loops to hold the true shape
+    for (final metric in masterPath.computeMetrics()) {
+      if (metric.length < 1e-3) continue;
+      int count = (metric.length / perimeterSpacing).floor();
+      if (count < 6) count = 6;
+      final step = metric.length / count;
+      final loop = <CompassPoint>[];
+      for (int i = 0; i < count; i++) {
+        final t = metric.getTangentForOffset(i * step);
+        if (t != null) loop.add(getPoint(t.position));
+      }
+      for (int i = 0; i < loop.length; i++) {
+        addEdge(loop[i], loop[(i + 1) % loop.length]);
+      }
+    }
+
+    // B. Add Internal Triangulation edges (discarding triangles outside the concave bays)
+    for (final t in triangles) {
+      if (masterPath.contains(t.centroid)) {
+        for (final e in t.edges) {
+          addEdge(getPoint(e.p1), getPoint(e.p2));
+        }
+      }
+    }
+
+    // 5. Traverse graph via DFS to emit ONE continuous spline
+    double cx = 0, cy = 0;
+    for (final p in ptsList) {
+      cx += p.x.value;
+      cy += p.y.value;
+    }
+    final anchor = CompassPoint(x: cx / ptsList.length, y: cy / ptsList.length);
+    engine.points.add(anchor);
+    anchor.x.addListener(engine.notifyListeners);
+    anchor.y.addListener(engine.notifyListeners);
+    for (final p in ptsList) anchor.attach(p);
+
+    final spline = CompassXSpline(isClosed: false, anchorPoint: anchor)
+      ..operation = CompassBooleanOp.add
+      ..isVisible = true;
+
+    final visitedEdges = <String>{};
+    String edgeId(CompassPoint a, CompassPoint b) {
+      return a.id.compareTo(b.id) < 0 ? '${a.id}_${b.id}' : '${b.id}_${a.id}';
+    }
+
+    void dfs(CompassPoint curr) {
+      final node = CompassSplineNode(point: curr, tension: 0.0);
+      node.tension.addListener(engine.notifyListeners);
+      spline.addNode(node);
+
+      for (final n in adj[curr] ?? <CompassPoint>{}) {
+        final eid = edgeId(curr, n);
+        if (!visitedEdges.contains(eid)) {
+          visitedEdges.add(eid);
+          dfs(n);
+          // Backtrack to keep the single continuous line
+          final backNode = CompassSplineNode(point: curr, tension: 0.0);
+          backNode.tension.addListener(engine.notifyListeners);
+          spline.addNode(backNode);
+        }
+      }
+    }
+
+    final visitedNodes = <CompassPoint>{};
+    void markVisited(CompassPoint p) {
+      if (visitedNodes.contains(p)) return;
+      visitedNodes.add(p);
+      for (final n in adj[p] ?? <CompassPoint>{}) {
+        markVisited(n);
+      }
+    }
+
+    for (final startNode in adj.keys) {
+      if (!visitedNodes.contains(startNode)) {
+        markVisited(startNode);
+        dfs(startNode);
+      }
+    }
+
+    // 6. Inject the layer
+    final bakedLayer = CompassLayer(
+      name: '${layer.name} (Sci-Fi Veins)',
+      color: Colors.transparent, // No Fill
+      strokeColor: const Color(0xFF00E5FF), // Cyan Stroke
+      strokeWidth: 1.5,
+    );
+
+    bakedLayer.shapes.add(spline);
+
+    engine.layers.insert(srcIndex + 1, bakedLayer);
+    layer.isVisible = false;
+    engine.activeLayer = bakedLayer;
+    bakedLayer.isExpanded = true;
+    engine.selectShape(spline);
+
+    engine.saveSnapshot();
+    engine.notifyListeners();
+  }
+
+  // --- Lightweight Bowyer-Watson Delaunay Triangulation ---
+  static List<_SciFiTriangle> _computeDelaunay(List<Offset> points) {
+    if (points.length < 3) return [];
+    
+    double minX = double.infinity, minY = double.infinity;
+    double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+    for (var p in points) {
+      if (p.dx < minX) minX = p.dx;
+      if (p.dy < minY) minY = p.dy;
+      if (p.dx > maxX) maxX = p.dx;
+      if (p.dy > maxY) maxY = p.dy;
+    }
+    
+    final dx = maxX - minX;
+    final dy = maxY - minY;
+    final deltaMax = max(dx, dy);
+    final midX = (minX + maxX) / 2;
+    final midY = (minY + maxY) / 2;
+    
+    // Super-triangle enveloping all points
+    final p1 = Offset(midX - 20 * deltaMax, midY - deltaMax);
+    final p2 = Offset(midX, midY + 20 * deltaMax);
+    final p3 = Offset(midX + 20 * deltaMax, midY - deltaMax);
+    
+    final superTri = _SciFiTriangle(p1, p2, p3);
+    final triangles = <_SciFiTriangle>[superTri];
+    
+    for (var pt in points) {
+      final badTriangles = <_SciFiTriangle>[];
+      for (var t in triangles) {
+        if (t.circumcircleContains(pt)) {
+          badTriangles.add(t);
+        }
+      }
+      
+      final polygon = <_SciFiEdge>[];
+      for (var t in badTriangles) {
+        for (var e1 in t.edges) {
+          bool isShared = false;
+          for (var otherT in badTriangles) {
+            if (t == otherT) continue;
+            for (var e2 in otherT.edges) {
+              if (e1.equals(e2)) {
+                isShared = true;
+                break;
+              }
+            }
+            if (isShared) break;
+          }
+          if (!isShared) polygon.add(e1);
+        }
+      }
+      
+      triangles.removeWhere((t) => badTriangles.contains(t));
+      
+      for (var edge in polygon) {
+        triangles.add(_SciFiTriangle(edge.p1, edge.p2, pt));
+      }
+    }
+    
+    triangles.removeWhere((t) => 
+      t.a == p1 || t.a == p2 || t.a == p3 ||
+      t.b == p1 || t.b == p2 || t.b == p3 ||
+      t.c == p1 || t.c == p2 || t.c == p3
+    );
+    
+    return triangles;
+  }
+}
+
+class _SciFiEdge {
+  final Offset p1, p2;
+  _SciFiEdge(this.p1, this.p2);
+
+  bool equals(_SciFiEdge other) {
+    return ((p1.dx - other.p1.dx).abs() < 1e-4 && (p1.dy - other.p1.dy).abs() < 1e-4 &&
+            (p2.dx - other.p2.dx).abs() < 1e-4 && (p2.dy - other.p2.dy).abs() < 1e-4) ||
+           ((p1.dx - other.p2.dx).abs() < 1e-4 && (p1.dy - other.p2.dy).abs() < 1e-4 &&
+            (p2.dx - other.p1.dx).abs() < 1e-4 && (p2.dy - other.p1.dy).abs() < 1e-4);
+  }
+}
+
+class _SciFiTriangle {
+  final Offset a, b, c;
+  _SciFiTriangle(this.a, this.b, this.c);
+
+  bool circumcircleContains(Offset pt) {
+    final double ax = a.dx, ay = a.dy;
+    final double bx = b.dx, by = b.dy;
+    final double cx = c.dx, cy = c.dy;
+
+    final double d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    if (d.abs() < 1e-9) return false;
+
+    final double ux = ((ax * ax + ay * ay) * (by - cy) +
+            (bx * bx + by * by) * (cy - ay) +
+            (cx * cx + cy * cy) * (ay - by)) / d;
+    final double uy = ((ax * ax + ay * ay) * (cx - bx) +
+            (bx * bx + by * by) * (ax - cx) +
+            (cx * cx + cy * cy) * (bx - ax)) / d;
+
+    final double rSq = (ax - ux) * (ax - ux) + (ay - uy) * (ay - uy);
+    final double distSq = (pt.dx - ux) * (pt.dx - ux) + (pt.dy - uy) * (pt.dy - uy);
+    
+    return distSq <= rSq + 1e-5; 
+  }
+
+  List<_SciFiEdge> get edges => [_SciFiEdge(a, b), _SciFiEdge(b, c), _SciFiEdge(c, a)];
+  
+  Offset get centroid => Offset((a.dx + b.dx + c.dx) / 3, (a.dy + b.dy + c.dy) / 3);
 }

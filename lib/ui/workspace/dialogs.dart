@@ -6,6 +6,12 @@ import '../../engine.dart';
 import '../../models/layer.dart';
 import '../../models/geometry/spline.dart';
 
+// The OBJ exporter's four output modes as the dialog presents them. Local to
+// this file: the engine/exporter API stays booleans (gridMode, delaunayMode,
+// skeletonMode) for backward compatibility, and _ObjExportMode maps onto them
+// at save time.
+enum _ObjExportMode { scanline, grid, delaunay, skeleton }
+
 class CompassDialogs {
   static void showAboutDialog(BuildContext context) {
     showDialog(
@@ -202,15 +208,33 @@ class CompassDialogs {
   //   1. "Curve Resolution" is SAMPLING SPACING (logical px between polyline
   //      samples along each contour), sense INVERTED from PNG's scale: a SMALLER
   //      number = DENSER polygon = smoother result. So "Fine" is the small value.
-  //      It matters in BOTH modes -- in scanline it sets the band density; in grid
-  //      it sets how finely the boundary contour is sampled for cell clipping.
-  //   2. "Grid mesh" checkbox switches tessellation: off = scanline (robust,
-  //      follows the curve, many thin bands); on = uniform quad grid (clean
-  //      workable topology, blocky silhouette). When on, a cell-count slider sets
-  //      how many cells span the longest side (higher = finer + smoother edge).
-  //   3. toOBJ returns an EMPTY STRING when the layer has no fillable area; we
-  //      treat that like the PNG exporter's null and surface a snackbar instead of
-  //      writing a junk file.
+  //      It matters in ALL modes -- scanline: band density; grid: how finely the
+  //      boundary is sampled for cell clipping; delaunay: the boundary vertex
+  //      density of the triangulation itself; skeleton: the boundary-sample
+  //      density the medial-axis test runs against.
+  //   2. "Mode" is a four-way SegmentedButton:
+  //        Scanline -- robust curve-following bands (the proven default);
+  //        Grid     -- uniform quad mesh, workable topology, blocky silhouette,
+  //                    with a cells-across slider;
+  //        Organic  -- Delaunay triangulation (the same math as the in-app
+  //                    "Bake to Triangulated Spline"), roughly-equilateral tris
+  //                    hugging the exact silhouette, with a Triangle Size slider
+  //                    (interior point spacing in logical px);
+  //        Skeleton -- the region's MEDIAL AXIS as loose OBJ `l` edges (for
+  //                    Blender's Skin modifier / rigging workflows), sharing the
+  //                    cells-across slider (sweep resolution) plus a Branch
+  //                    Pruning (lambda) slider. Lambda's slider FLOOR is tied to
+  //                    the sampling spacing (see the kernel's caveat: lambda must
+  //                    stay well above the boundary sample gap or every wall cell
+  //                    self-qualifies against its own neighbors) -- switching
+  //                    Curve Resolution re-clamps the current lambda if needed.
+  //      The dialog enum maps onto the engine's booleans at save time, so the
+  //      exporter API stays backward compatible.
+  //   3. toOBJ returns an EMPTY STRING when the layer has no fillable area -- or,
+  //      in skeleton mode, when pruning leaves nothing -- treated like the PNG
+  //      exporter's null: a snackbar instead of a junk file. The skeleton-mode
+  //      empty message hints at lowering lambda, since over-pruning is the usual
+  //      cause there rather than a truly empty layer.
   static void showExportOBJ(BuildContext context, CompassEngine engine, CompassLayer layer) {
     // Seed the filename from the layer name so the default is meaningful.
     final safeName = layer.name.replaceAll(RegExp(r'\s+'), '_').replaceAll(RegExp(r'[^A-Za-z0-9_\-.]'), '');
@@ -219,107 +243,223 @@ class CompassDialogs {
 
     // Sampling spacing in logical px. Smaller = denser polygon = smoother.
     double samplingSpacing = 2.0;
-    // Grid mode + density. gridCount = cells across the longest bbox side.
-    bool gridMode = false;
+    // Output mode + shared density. gridCount = cells across the longest bbox
+    // side (grid: quad density; skeleton: sweep resolution).
+    _ObjExportMode mode = _ObjExportMode.scanline;
     double gridCount = 48;
+    // Delaunay interior point spacing (~ triangle edge length), logical px.
+    double delaunaySpacing = 25.0;
+    // Skeleton branch pruning (lambda), logical px. Re-clamped against the floor
+    // whenever samplingSpacing changes.
+    double skeletonLambda = 20.0;
+
+    // Lambda floor: 5x the boundary sample gap, never under 5 px. Below this the
+    // medial test degenerates (adjacent samples on ONE wall read as "two walls").
+    double lambdaFloor() {
+      final f = samplingSpacing * 5.0;
+      return f < 5.0 ? 5.0 : f;
+    }
 
     showDialog(
       context: context,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setLocalState) {
+            final double lamMin = lambdaFloor();
+            const double lamMax = 200.0;
+            final double lamValue = skeletonLambda.clamp(lamMin, lamMax);
+
+            String headerText;
+            switch (mode) {
+              case _ObjExportMode.skeleton:
+                headerText = 'Exports this layer\'s medial-axis skeleton as loose '
+                    'edge geometry on the Z=0 plane (for Skin modifier / '
+                    'rigging workflows).';
+                break;
+              case _ObjExportMode.delaunay:
+                headerText = 'Exports this layer\'s resolved boolean fill as '
+                    'organic, roughly-uniform triangles on the Z=0 plane '
+                    '(holes preserved) — the same triangulation as the '
+                    'in-app Triangulated Spline bake.';
+                break;
+              default:
+                headerText = 'Exports this layer\'s resolved boolean fill as a flat '
+                    'triangle mesh on the Z=0 plane (holes preserved).';
+            }
+
             return AlertDialog(
               title: Text('Export "${layer.name}" as OBJ'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Exports this layer\'s resolved boolean fill as a flat '
-                      'triangle mesh on the Z=0 plane (holes preserved).'),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: filenameController,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Filename',
-                      suffixText: '.obj',
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(headerText),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: filenameController,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: 'Filename',
+                        suffixText: '.obj',
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 20),
-                  const Text('Curve Resolution'),
-                  const SizedBox(height: 8),
-                  SegmentedButton<double>(
-                    segments: const [
-                      ButtonSegment(value: 1.0, label: Text('Fine')),
-                      ButtonSegment(value: 2.0, label: Text('Medium')),
-                      ButtonSegment(value: 4.0, label: Text('Coarse')),
-                    ],
-                    selected: {samplingSpacing},
-                    onSelectionChanged: (newSelection) {
-                      setLocalState(() {
-                        samplingSpacing = newSelection.first;
-                      });
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  const Divider(height: 1),
-                  const SizedBox(height: 8),
-
-                  // --- Grid mesh toggle ---
-                  CheckboxListTile(
-                    value: gridMode,
-                    onChanged: (v) {
-                      setLocalState(() {
-                        gridMode = v ?? false;
-                      });
-                    },
-                    title: const Text('Grid mesh (clean quads)'),
-                    subtitle: const Text(
-                      'Uniform quad grid instead of scanline bands. Workable topology; '
-                      'edges step at the cell size.',
-                    ),
-                    contentPadding: EdgeInsets.zero,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    dense: true,
-                  ),
-
-                  // --- Cell-count slider, only shown when grid mode is on ---
-                  if (gridMode) ...[
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        const Text('Cells across'),
-                        const Spacer(),
-                        Text(
-                          '${gridCount.round()}',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
+                    const SizedBox(height: 20),
+                    const Text('Curve Resolution'),
+                    const SizedBox(height: 8),
+                    SegmentedButton<double>(
+                      segments: const [
+                        ButtonSegment(value: 1.0, label: Text('Fine')),
+                        ButtonSegment(value: 2.0, label: Text('Medium')),
+                        ButtonSegment(value: 4.0, label: Text('Coarse')),
                       ],
-                    ),
-                    Slider(
-                      value: gridCount,
-                      min: 16,
-                      max: 96,
-                      divisions: 10, // steps of 8
-                      label: '${gridCount.round()}',
-                      onChanged: (v) {
+                      selected: {samplingSpacing},
+                      onSelectionChanged: (newSelection) {
                         setLocalState(() {
-                          gridCount = v;
+                          samplingSpacing = newSelection.first;
+                          // Keep lambda legal against the new floor.
+                          final f = lambdaFloor();
+                          if (skeletonLambda < f) skeletonLambda = f;
                         });
                       },
                     ),
-                    Text(
-                      'More cells = smoother silhouette, more quads.',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ] else ...[
+                    const SizedBox(height: 16),
+                    const Divider(height: 1),
+                    const SizedBox(height: 12),
+
+                    // --- Output mode (four-way) ---
+                    const Text('Mode'),
                     const SizedBox(height: 8),
-                    Text(
-                      'Finer = smoother curves, more triangles.',
-                      style: Theme.of(context).textTheme.bodySmall,
+                    SegmentedButton<_ObjExportMode>(
+                      segments: const [
+                        ButtonSegment(
+                          value: _ObjExportMode.scanline,
+                          label: Text('Scanline'),
+                        ),
+                        ButtonSegment(
+                          value: _ObjExportMode.grid,
+                          label: Text('Grid'),
+                        ),
+                        ButtonSegment(
+                          value: _ObjExportMode.delaunay,
+                          label: Text('Organic'),
+                        ),
+                        ButtonSegment(
+                          value: _ObjExportMode.skeleton,
+                          label: Text('Skeleton'),
+                        ),
+                      ],
+                      selected: {mode},
+                      onSelectionChanged: (newSelection) {
+                        setLocalState(() {
+                          mode = newSelection.first;
+                        });
+                      },
                     ),
+                    const SizedBox(height: 12),
+
+                    // --- Per-mode controls + hints ---
+                    if (mode == _ObjExportMode.scanline) ...[
+                      Text(
+                        'Robust curve-following bands. Finer resolution = smoother '
+                        'curves, more triangles.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ] else if (mode == _ObjExportMode.delaunay) ...[
+                      Row(
+                        children: [
+                          const Text('Triangle size'),
+                          const Spacer(),
+                          Text(
+                            delaunaySpacing.toStringAsFixed(0),
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: delaunaySpacing,
+                        min: 5,
+                        max: 100,
+                        divisions: 19, // steps of 5
+                        label: delaunaySpacing.toStringAsFixed(0),
+                        onChanged: (v) {
+                          setLocalState(() {
+                            delaunaySpacing = v;
+                          });
+                        },
+                      ),
+                      Text(
+                        'Organic, roughly-equilateral triangles; the silhouette is '
+                        'exact (boundary samples are mesh vertices). Smaller size = '
+                        'denser, finer mesh.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ] else ...[
+                      // Grid and Skeleton share the cells-across slider; only the
+                      // label wording differs.
+                      Row(
+                        children: [
+                          Text(mode == _ObjExportMode.grid
+                              ? 'Cells across'
+                              : 'Skeleton resolution'),
+                          const Spacer(),
+                          Text(
+                            '${gridCount.round()}',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: gridCount,
+                        min: 16,
+                        max: 96,
+                        divisions: 10, // steps of 8
+                        label: '${gridCount.round()}',
+                        onChanged: (v) {
+                          setLocalState(() {
+                            gridCount = v;
+                          });
+                        },
+                      ),
+                      if (mode == _ObjExportMode.grid) ...[
+                        Text(
+                          'Uniform quad mesh: workable topology, edges step at the '
+                          'cell size. More cells = smoother silhouette, more quads.',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ] else ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            const Text('Branch pruning (λ)'),
+                            const Spacer(),
+                            Text(
+                              lamValue.toStringAsFixed(0),
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                        Slider(
+                          value: lamValue,
+                          min: lamMin,
+                          max: lamMax,
+                          label: lamValue.toStringAsFixed(0),
+                          onChanged: (v) {
+                            setLocalState(() {
+                              skeletonLambda = v;
+                            });
+                          },
+                        ),
+                        Text(
+                          'Higher pruning keeps only the primary frame; lower keeps '
+                          'finer branches. Higher resolution = smoother skeleton, '
+                          'more edges.',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ],
                   ],
-                ],
+                ),
               ),
               actions: [
                 TextButton(
@@ -338,13 +478,21 @@ class CompassDialogs {
                       final objData = engine.toOBJ(
                         layer,
                         samplingSpacing: samplingSpacing,
-                        gridMode: gridMode,
+                        gridMode: mode == _ObjExportMode.grid,
                         gridCount: gridCount.round(),
+                        delaunayMode: mode == _ObjExportMode.delaunay,
+                        delaunaySpacing: delaunaySpacing,
+                        skeletonMode: mode == _ObjExportMode.skeleton,
+                        skeletonLambda: lamValue,
                       );
                       if (objData.isEmpty) {
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Nothing to export — this layer has no filled area.')),
+                            SnackBar(
+                              content: Text(mode == _ObjExportMode.skeleton
+                                  ? 'Nothing to export — no skeleton survived. Try lowering branch pruning or check the layer has filled area.'
+                                  : 'Nothing to export — this layer has no filled area.'),
+                            ),
                           );
                         }
                         return;

@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 
 import '../../engine.dart';
+import '../../shape_converter.dart'; // <--- NEW: Import ShapeConverter for Sci-Fi bake
 import '../../models/layer.dart';
 import '../../models/geometry/shape.dart';
 import '../../models/geometry/point.dart';
@@ -149,6 +150,17 @@ class LayerTile extends StatelessWidget {
             ],
           ),
         ),
+        // === UPDATED: Triangulated Spline Bake Option ===
+        PopupMenuItem<String>(
+          value: 'bake_scifi',
+          child: Row(
+            children: [
+              Icon(Icons.hub_outlined, size: 18),
+              SizedBox(width: 12),
+              Text('Bake to Triangulated Spline'),
+            ],
+          ),
+        ),
         PopupMenuDivider(),
         PopupMenuItem<String>(
           value: 'export_obj',
@@ -181,6 +193,23 @@ class LayerTile extends StatelessWidget {
       }
 
       engine.bakeLayer(layer);
+    } else if (selected == 'bake_scifi') {
+      // === Handle Triangulated Bake ===
+      final fillEmpty = layer.getLayerFillPath().computeMetrics().isEmpty;
+      final areaEmpty = layer.getLayerStrokeAreaPath().computeMetrics().isEmpty;
+
+      if (fillEmpty && areaEmpty) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Nothing to bake — this layer has no filled area.'),
+            ),
+          );
+        }
+        return;
+      }
+
+      ShapeConverter.bakeLayerToSciFiSkeleton(engine, layer);
     } else if (selected == 'export_obj') {
       // No pre-guard here: the OBJ exporter reads getLayerFillPath, which differs
       // from the bake guard's path for closed width-splines. Let showExportOBJ

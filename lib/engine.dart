@@ -1499,12 +1499,20 @@ class CompassEngine extends ChangeNotifier {
     double samplingSpacing = 2.0,
     bool gridMode = false,
     int gridCount = 48,
+    bool delaunayMode = false,
+    double delaunaySpacing = 25.0,
+    bool skeletonMode = false,
+    double skeletonLambda = 20.0,
   }) {
     return OBJExporter.toOBJ(
       layer,
       samplingSpacing: samplingSpacing,
       gridMode: gridMode,
       gridCount: gridCount,
+      delaunayMode: delaunayMode,
+      delaunaySpacing: delaunaySpacing,
+      skeletonMode: skeletonMode,
+      skeletonLambda: skeletonLambda,
     );
   }
   
