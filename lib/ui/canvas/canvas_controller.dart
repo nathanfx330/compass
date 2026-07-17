@@ -149,6 +149,106 @@ class CanvasController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ===========================================================================
+  // DESELECT ALL (Escape key / Edit menu)
+  // ===========================================================================
+  //
+  // THE "LET GO OF EVERYTHING" ACTION. Several mechanisms could previously hold
+  // onto prior work with no keyboard escape hatch:
+  //
+  //   1. THE PEN TOOL NEVER RELEASED ITS SPLINE -- once activeSpline was set,
+  //      every subsequent click appended another vertex to the SAME spline
+  //      forever; the only exits were a right-click or clicking the first node
+  //      to close the loop. This is the "doesn't let go of the previous
+  //      vertexes" bug: the chain just kept growing.
+  //   2. shapeStartPoint lingered when a two-click shape (line/circle/rect/
+  //      spiral) was abandoned halfway, so the NEXT click completed a shape you
+  //      forgot you started.
+  //   3. isBeingDragged flags could be stranded ON if a drag ended through an
+  //      unusual path (focus loss, gesture-arena races). A stranded flag
+  //      silently disables the constraints' rigid-body guards, making geometry
+  //      behave as if still attached to a phantom drag.
+  //
+  // deselectAll() clears ALL of it in one shot and returns to the Select tool:
+  //
+  //   * Abandons the pen tool's active spline. If that spline has fewer than 2
+  //     nodes it is REMOVED outright (via engine.removeShape, which GCs its
+  //     point and any constraints): a sub-2-node spline can neither render nor
+  //     serialize (the loader requires >= 2), so leaving it was pure debris.
+  //     With 2+ nodes the spline is kept as-is -- it's real geometry -- and
+  //     merely released, exactly like the right-click abandon.
+  //   * Clears shapeStartPoint (kills any half-built two-click shape).
+  //   * Clears point selection AND the engine's selected shape.
+  //   * Clears every transient interaction slot: pending press, selection box,
+  //     rotation/fillet/width/tension/handle/corner-pulley/mirror-drag state,
+  //     Q-hover and X-slice previews, smoothing captures.
+  //   * FORCE-RESETS isBeingDragged on every point in the pool -- the stranded-
+  //     flag cure. Safe even mid-drag: the flag is only an advisory read by the
+  //     constraint guards, and a genuinely live drag re-latches nothing after
+  //     Escape anyway since the transient slots above are also cleared.
+  //
+  // Deliberately NO undo snapshot: deselecting mutates no geometry (except the
+  // degenerate-spline removal, and removeShape snapshots itself), so Escape
+  // never pollutes the undo stack.
+  void deselectAll() {
+    // 1. Release (or GC) the pen tool's in-progress spline.
+    if (activeSpline != null) {
+      if (activeSpline!.nodes.length < 2) {
+        engine.removeShape(activeSpline!);
+      }
+      activeSpline = null;
+    }
+
+    // 2. Kill any half-built two-click shape.
+    shapeStartPoint = null;
+
+    // 3. Clear selection: points AND shape.
+    selectedPoints.clear();
+    engine.selectShape(null);
+
+    // 4. Clear every transient interaction slot.
+    pendingSelectPress = null;
+    isDraggingSelectionBox = false;
+    selectionBoxStart = null;
+    selectionBoxCurrent = null;
+    initialSelectionBeforeBox = {};
+    isPanningSelectedPoints = false;
+    isStrictPanningSelection = false;
+    isPanningShape = false;
+    mirrorDragLayer = null;
+
+    clearRotationState();
+    clearFilletState();
+    clearWidthState();
+    activeHandleNode = null;
+    activeTensionNode = null;
+    targetTensionNode = null;
+    activeCornerCircleNode = null;
+
+    isSmoothing = false;
+    smoothOrigPositions.clear();
+    smoothOrigHandles.clear();
+    isWidthSmoothing = false;
+    smoothOrigWidths.clear();
+
+    clearAddVertexHover();
+    clearMeshSliceHover();
+
+    lastPanPosition = null;
+    dragStartLogicalPosition = null;
+
+    // 5. Stranded-flag cure: no point may claim to be mid-drag after Escape.
+    for (var p in engine.points) {
+      p.isBeingDragged = false;
+    }
+
+    // 6. Clean slate: back to the Select tool.
+    currentTool = CompassTool.select;
+
+    notifyListeners();
+    engine.notifyListeners();
+  }
+
   void removePointFromSelection(CompassPoint point) {
     if (selectedPoints.contains(point)) {
       selectedPoints.remove(point);

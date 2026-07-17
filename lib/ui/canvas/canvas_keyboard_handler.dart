@@ -41,6 +41,25 @@ class CanvasKeyboardHandler {
 
     final isDelete = keys.contains(LogicalKeyboardKey.delete) || keys.contains(LogicalKeyboardKey.backspace);
 
+    // Immediate Action: ESCAPE = DESELECT ALL
+    //
+    // The universal "let go" key. Fires once on the physical key-down
+    // (KeyDownEvent only, so a held Escape doesn't machine-gun; Flutter emits
+    // KeyRepeatEvent for holds). Deliberately checked BEFORE every other
+    // immediate action and modifier diff, and deliberately UNCONDITIONAL on
+    // tool/modifier state: Escape must work mid-pen-chain, mid-two-click-shape,
+    // with a selection, or with a stranded drag flag -- those are exactly the
+    // states it exists to break out of. deselectAll() handles all of it:
+    // abandons (or GCs a degenerate) pen spline, clears shapeStartPoint,
+    // clears point+shape selection, resets every transient interaction slot,
+    // force-clears isBeingDragged across the point pool, and returns to the
+    // Select tool. Returns false as always so the event still propagates
+    // (nothing else in the app binds Escape today; if a dialog is open, focus
+    // sits in the dialog and this handler path is moot anyway).
+    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.escape) {
+      controller.deselectAll();
+    }
+
     // Immediate Action: Delete
     //
     // ONE batch call, not a removePoint-per-point loop. The loop had two defects

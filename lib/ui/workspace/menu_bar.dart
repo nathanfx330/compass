@@ -130,6 +130,21 @@ class CompassMenuBar extends StatelessWidget {
                       child: const Text('Undo (Ctrl+Z)'),
                     ),
                     const CustomMenuItemDivider(),
+                    // --- NEW: Deselect All ---
+                    // Clears the point selection and the selected shape via the
+                    // engine. The Escape KEY (bound in the canvas keyboard
+                    // handler) is the FULL version of this action -- it also
+                    // abandons an in-progress pen spline, kills a half-built
+                    // two-click shape, and resets stranded drag flags, all of
+                    // which live on the CanvasController the menu bar doesn't
+                    // hold. This menu item is the discoverable surface for the
+                    // everyday case: "let go of what I have selected."
+                    MenuItemButton(
+                      onPressed: () => engine.deselectAll(),
+                      leadingIcon: const Icon(Icons.deselect),
+                      child: const Text('Deselect All (Esc)'),
+                    ),
+                    const CustomMenuItemDivider(),
                     MenuItemButton(
                       onPressed: onClearCanvas,
                       leadingIcon: const Icon(Icons.delete_outline),

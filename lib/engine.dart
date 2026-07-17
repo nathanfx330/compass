@@ -443,6 +443,31 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ===========================================================================
+  // DESELECT ALL (engine side)
+  // ===========================================================================
+
+  /// Clears the engine-owned selection state: the selected point set and the
+  /// selected shape. One notify for the batch.
+  ///
+  /// This exists so UI that has no CanvasController reference (the menu bar,
+  /// which only holds the engine) can offer "Deselect All". It is deliberately
+  /// the SMALL half of the story: the CanvasController's deselectAll() clears
+  /// this PLUS all controller-side interaction state (active pen spline,
+  /// shapeStartPoint, transient drag/rotate/width/fillet slots, stranded
+  /// isBeingDragged flags) and is what the Escape key binds to. The menu path
+  /// reaches the controller-side cleanup indirectly: clearing the engine
+  /// selection here prunes everything the controller's selection getters proxy
+  /// to, and the controller repaints via the engine notify.
+  ///
+  /// No undo snapshot: selection is not document state (it is never serialized),
+  /// so deselecting must never mint an undo step.
+  void deselectAll() {
+    selectedPoints.clear();
+    _selectedShape = null;
+    notifyListeners();
+  }
+
   void removeShape(CompassShape shape) {
     List<CompassPoint> shapePoints = _pointsOfShape(shape);
 
