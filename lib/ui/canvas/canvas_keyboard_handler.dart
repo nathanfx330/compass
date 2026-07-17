@@ -22,7 +22,7 @@ class CanvasKeyboardHandler {
     final isF = keys.contains(LogicalKeyboardKey.keyF); 
     final isQ = keys.contains(LogicalKeyboardKey.keyQ); 
     final isW = keys.contains(LogicalKeyboardKey.keyW); 
-    final isX = keys.contains(LogicalKeyboardKey.keyX); // <--- NEW: mesh slice modifier
+    final isX = keys.contains(LogicalKeyboardKey.keyX); // mesh slice modifier
 
     // Handle Ctrl/Cmd for the rotation mode
     final isCtrl = keys.contains(LogicalKeyboardKey.controlLeft) || keys.contains(LogicalKeyboardKey.controlRight);
@@ -58,6 +58,32 @@ class CanvasKeyboardHandler {
        controller.selectedPoints.clear();
        // Note: the controller's notifyListeners() is accessible because it extends ChangeNotifier
        controller.notifyListeners();
+    }
+
+    // Immediate Action: S = SHARP VERTEX TOGGLE
+    //
+    // Fires once on the physical key-down (not on repeats: KeyDownEvent only, and
+    // Flutter emits KeyRepeatEvent for holds, so a held S doesn't machine-gun the
+    // toggle). Plain S only -- Ctrl/Cmd+S stays free for a future save shortcut,
+    // and Shift+S is excluded so it can carry a variant later.
+    //
+    // Targets the SELECTED points; falls back to the HOVERED point when nothing is
+    // selected, so the flow "hover a corner, tap S" works without a click first.
+    // The engine method resolves which of those points are actually X-Spline
+    // vertices, flips them (fluid -> sharp: tension 0, handles wiped, pulleys
+    // cleared; sharp -> fluid: tension 1.0), snapshots once, and notifies. Points
+    // that belong to no spline (mesh nodes, circle centers...) are ignored there,
+    // so pressing S with a mixed selection is safe.
+    final bool isPlainS = keys.contains(LogicalKeyboardKey.keyS) && !isCtrlOrMeta && !isShift;
+    if (isPlainS && event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.keyS) {
+      final targets = <dynamic>{...controller.selectedPoints};
+      if (targets.isEmpty && controller.hoveredPoint != null) {
+        targets.add(controller.hoveredPoint!);
+      }
+      if (targets.isNotEmpty) {
+        engine.toggleSharpVertices(targets.cast());
+        controller.notifyListeners();
+      }
     }
 
     final bool shiftR = isR && isShift && !isCtrlOrMeta;

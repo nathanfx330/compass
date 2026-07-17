@@ -16,6 +16,7 @@ import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/mesh.dart';
+import '../../models/layer.dart'; // <--- NEW: mirror-axis drag (CompassLayer, MirrorAxis)
 
 import 'canvas_controller.dart';
 import 'canvas_geometry.dart';
@@ -23,6 +24,14 @@ import 'canvas_hit_tester.dart';
 import 'canvas_context_menus.dart';
 
 class CanvasGestureHandler {
+
+  // --- MIRROR MODIFIER drag state ---
+  // The layer whose mirror axis is currently being dragged, or null. Lives here
+  // as a static (all gesture methods are static and there is exactly one live
+  // drag at a time) instead of on the controller, so the controller's surface
+  // didn't need another rewrite for one transient slot. Cleared on pan
+  // end/cancel; harmless across engine swaps because both paths clear it.
+  static CompassLayer? _mirrorDragLayer;
   
   // ===========================================================================
   // HELPER METHODS (Moved from Controller)
@@ -207,7 +216,12 @@ class CanvasGestureHandler {
     bool showScaffolding, 
     VoidCallback onToggleScaffolding,
     bool showHandles,
-    VoidCallback onToggleHandles
+    VoidCallback onToggleHandles,
+    // --- NEW: Ghost Vertices state + toggle, forwarded to the context-menu
+    // builder so the right-click empty-canvas menu can flip the mode without a
+    // trip to the View menu (same pattern as scaffolding/handles).
+    bool ghostVertices,
+    VoidCallback onToggleGhostVertices
   ) async {
     final RenderBox renderBox = context.findRenderObject() as RenderBox;
     final localPosition = renderBox.globalToLocal(details.globalPosition);
@@ -308,6 +322,8 @@ class CanvasGestureHandler {
       onToggleScaffolding: onToggleScaffolding,
       showHandles: showHandles,
       onToggleHandles: onToggleHandles,
+      ghostVertices: ghostVertices, // <--- NEW
+      onToggleGhostVertices: onToggleGhostVertices, // <--- NEW
     );
   }
 
@@ -786,6 +802,38 @@ class CanvasGestureHandler {
       return;
     }
 
+    // --- MIRROR MODIFIER: axis line drag ---
+    // Grab the ACTIVE layer's mirror axis when pressing near it. Guards:
+    //   * only the active, unlocked, mirror-enabled layer -- dim axes of other
+    //     layers are display-only (activate the layer to move its plane);
+    //   * no tool-modifier keys held, so R/A/F/W/Z flows keep priority;
+    //   * NO POINT under the cursor -- the axis spans the whole viewport, so
+    //     without this guard it would steal drags from any vertex that happens
+    //     to sit near the symmetry plane (which is common: seam vertices live
+    //     ON it). Points win; the axis is grabbable everywhere else along its
+    //     length, including the square handle at the viewport center.
+    {
+      final mLayer = engine.activeLayer;
+      if (mLayer != null && mLayer.mirrorEnabled && !mLayer.isLocked && showScaffolding &&
+          !controller.isRPressed && !controller.isShiftRPressed && !controller.isCtrlRPressed &&
+          !controller.isAPressed && !controller.isFPressed && !controller.isWPressed &&
+          !controller.isZPressed && !controller.isShiftZPressed && !controller.isQPressed &&
+          !controller.isXPressed) {
+        final pointUnderCursor = CanvasHitTester.hitTestPoint(
+            engine, logicalPosition, controller.hitThreshold / controller.canvasScale);
+        if (pointUnderCursor == null) {
+          final double distToAxis = mLayer.mirrorAxis == MirrorAxis.vertical
+              ? (logicalPosition.dx - mLayer.mirrorPosition).abs()
+              : (logicalPosition.dy - mLayer.mirrorPosition).abs();
+          if (distToAxis <= controller.hitThreshold / controller.canvasScale) {
+            _mirrorDragLayer = mLayer;
+            controller.notifyListeners();
+            return;
+          }
+        }
+      }
+    }
+
     final selForHandles = engine.selectedShape;
 
     if (selForHandles is CompassXSpline && showScaffolding && 
@@ -1014,6 +1062,21 @@ class CanvasGestureHandler {
     final dx = logicalPosition.dx - controller.lastPanPosition!.dx;
     final dy = logicalPosition.dy - controller.lastPanPosition!.dy;
 
+    // --- MIRROR MODIFIER: live axis drag ---
+    // Absolute placement (cursor coordinate, not delta accumulation) so the
+    // axis tracks the pointer exactly with zero drift; the engine repaint rides
+    // the notifyListeners above + the layer getters re-resolving with the new
+    // position. Snapshot happens once, on release.
+    if (_mirrorDragLayer != null) {
+      final mLayer = _mirrorDragLayer!;
+      mLayer.mirrorPosition = mLayer.mirrorAxis == MirrorAxis.vertical
+          ? logicalPosition.dx
+          : logicalPosition.dy;
+      engine.notifyListeners();
+      controller.lastPanPosition = logicalPosition;
+      return;
+    }
+
     if (controller.activeCornerCircleNode != null) {
       final node = controller.activeCornerCircleNode!;
       final pt = Offset(node.point.x.value, node.point.y.value);
@@ -1196,6 +1259,19 @@ class CanvasGestureHandler {
   }
 
   static void onPanEnd(CanvasController controller, CompassEngine engine, DragEndDetails details) {
+    // --- MIRROR MODIFIER: commit the axis drag ---
+    // One snapshot per completed drag (finalizePointDrag == saveSnapshot), so
+    // the whole slide is a single undo step -- and since mirrorPosition rides
+    // the LAYER line through serialize/deserialize, Ctrl+Z restores it.
+    if (_mirrorDragLayer != null) {
+      _mirrorDragLayer = null;
+      engine.finalizePointDrag();
+      controller.notifyListeners();
+      controller.lastPanPosition = null;
+      controller.dragStartLogicalPosition = null;
+      return;
+    }
+
     if (controller.isRotating || controller.isPanningShape) {
       controller.isRotating = false;
       controller.isPanningShape = false;
@@ -1275,6 +1351,7 @@ class CanvasGestureHandler {
       for (var p in controller.transformingPoints) p.isBeingDragged = false;
     }
     controller.activeCornerCircleNode = null;
+    _mirrorDragLayer = null; // <--- NEW: abandon a mirror-axis drag cleanly
     controller.activeHandleNode = null;
     controller.activeWidthNode = null; 
     controller.isUnifiedWidthPull = false;

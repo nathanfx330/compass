@@ -28,7 +28,18 @@ class CompassWorkspace extends StatefulWidget {
 class _CompassWorkspaceState extends State<CompassWorkspace> {
   late CompassEngine _engine;
   bool _showScaffolding = true;
-  bool _showHandles = true; // <--- NEW: State for showing/hiding Bezier handles
+  bool _showHandles = true; // State for showing/hiding Bezier handles
+
+  // --- NEW: GHOST VERTICES ---
+  // When true, the vertex DOTS (and tension boxes) are not painted, but hit
+  // testing stays fully live: you can still click, drag, box-select, and hover
+  // the invisible points -- the hover ring and selection highlight still paint,
+  // so the moment your cursor finds a hidden vertex you get feedback. This is
+  // the "work on the pure shape, but keep sculpting it" mode: scaffolding
+  // stays on (wireframes, tools, interaction), only the dot clutter goes.
+  // Distinct from _showScaffolding=false, which hides everything AND disables
+  // interaction with points.
+  bool _ghostVertices = false;
   
   // NEW: State for the resizable right panel width
   double _rightPanelWidth = 280.0;
@@ -82,10 +93,17 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
     });
   }
 
-  // <--- NEW: Toggle method for handles
+  // Toggle method for handles
   void _toggleHandles() {
     setState(() {
       _showHandles = !_showHandles;
+    });
+  }
+
+  // <--- NEW: Toggle method for ghost vertices
+  void _toggleGhostVertices() {
+    setState(() {
+      _ghostVertices = !_ghostVertices;
     });
   }
 
@@ -116,8 +134,10 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
                 themeManager: widget.themeManager, // <--- CHANGED: Pass ThemeManager
                 showScaffolding: _showScaffolding,
                 onToggleScaffolding: _toggleScaffolding,
-                showHandles: _showHandles, // <--- NEW
-                onToggleHandles: _toggleHandles, // <--- NEW
+                showHandles: _showHandles,
+                onToggleHandles: _toggleHandles,
+                ghostVertices: _ghostVertices, // <--- NEW
+                onToggleGhostVertices: _toggleGhostVertices, // <--- NEW
                 onClearCanvas: _clearCanvas,
               ),
 
@@ -132,8 +152,10 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
                           engine: _engine,
                           showScaffolding: _showScaffolding,
                           onToggleScaffolding: _toggleScaffolding, 
-                          showHandles: _showHandles, // <--- NEW
-                          onToggleHandles: _toggleHandles, // <--- NEW
+                          showHandles: _showHandles,
+                          onToggleHandles: _toggleHandles,
+                          ghostVertices: _ghostVertices, // <--- NEW
+                          onToggleGhostVertices: _toggleGhostVertices, // <--- NEW
                         ),
                       ),
                     ),

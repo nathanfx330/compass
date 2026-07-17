@@ -11,6 +11,7 @@ import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/line.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/mesh.dart'; 
+import '../../models/layer.dart'; // <--- NEW: MirrorAxis for the mirror menu entries
 
 import '../widgets/compass_color_picker.dart'; 
 import '../workspace/dialogs.dart';
@@ -56,6 +57,10 @@ class CanvasContextMenus {
     required VoidCallback onToggleScaffolding,
     required bool showHandles,
     required VoidCallback onToggleHandles,
+    // --- NEW: Ghost Vertices (display-only dot suppression) toggle, surfaced
+    // in the empty-canvas menu below alongside scaffolding/handles.
+    required bool ghostVertices,
+    required VoidCallback onToggleGhostVertices,
   }) async {
     final RelativeRect position = RelativeRect.fromLTRB(
       globalPosition.dx,
@@ -312,25 +317,82 @@ class CanvasContextMenus {
     // 3. EMPTY CANVAS CONTEXT MENU
     // ==========================================
     else {
+      // Mirror controls act on the ACTIVE layer (the mirror is a per-layer
+      // modifier). Absent/locked active layer -> entries hidden rather than
+      // silently failing.
+      final mLayer = engine.activeLayer;
+      final canMirror = mLayer != null && !mLayer.isLocked;
+
+      final items = <PopupMenuEntry<String>>[
+        PopupMenuItem(
+          value: 'toggle_scaffolding', 
+          child: Text(showScaffolding ? 'Hide Scaffolding (Clean View)' : 'Show Scaffolding'),
+        ), 
+        PopupMenuItem(
+          value: 'toggle_handles', 
+          child: Text(showHandles ? 'Hide Handles' : 'Show Handles'),
+        ), 
+        PopupMenuItem(
+          value: 'toggle_ghost',
+          child: Text(ghostVertices ? 'Show Vertices' : 'Ghost Vertices (Hide Dots, Keep Editable)'),
+        ),
+      ];
+
+      if (canMirror) {
+        items.add(const PopupMenuDivider());
+        items.add(PopupMenuItem(
+          value: 'toggle_mirror',
+          child: Text(mLayer.mirrorEnabled
+              ? 'Disable Mirror (${mLayer.name})'
+              : 'Enable Mirror Here (${mLayer.name})'),
+        ));
+        if (mLayer.mirrorEnabled) {
+          items.add(PopupMenuItem(
+            value: 'flip_mirror_axis',
+            child: Text(mLayer.mirrorAxis == MirrorAxis.vertical
+                ? 'Mirror Axis: Vertical → Horizontal'
+                : 'Mirror Axis: Horizontal → Vertical'),
+          ));
+        }
+      }
+
       final selectedAction = await showMenu<String>(
         context: context,
         position: position,
-        items: [
-          PopupMenuItem(
-            value: 'toggle_scaffolding', 
-            child: Text(showScaffolding ? 'Hide Scaffolding (Clean View)' : 'Show Scaffolding'),
-          ), 
-          PopupMenuItem(
-            value: 'toggle_handles', 
-            child: Text(showHandles ? 'Hide Handles' : 'Show Handles'),
-          ), 
-        ],
+        items: items,
       );
 
       if (selectedAction == 'toggle_scaffolding') {
         onToggleScaffolding();
       } else if (selectedAction == 'toggle_handles') {
         onToggleHandles();
+      } else if (selectedAction == 'toggle_ghost') {
+        onToggleGhostVertices();
+      } else if (selectedAction == 'toggle_mirror' && canMirror) {
+        mLayer.mirrorEnabled = !mLayer.mirrorEnabled;
+        if (mLayer.mirrorEnabled) {
+          // "Enable Mirror HERE": plant the axis at the right-click position
+          // (not world-origin), so the symmetry plane appears exactly where you
+          // asked for it. The axis coordinate is X for a vertical line, Y for a
+          // horizontal one.
+          mLayer.mirrorPosition = mLayer.mirrorAxis == MirrorAxis.vertical
+              ? logicalPosition.dx
+              : logicalPosition.dy;
+        }
+        engine.saveSnapshot();
+        engine.notifyListeners();
+      } else if (selectedAction == 'flip_mirror_axis' && canMirror) {
+        // Flip orientation and carry the axis to the equivalent coordinate at
+        // the click position so the line doesn't teleport to a stale value on
+        // the other axis.
+        mLayer.mirrorAxis = mLayer.mirrorAxis == MirrorAxis.vertical
+            ? MirrorAxis.horizontal
+            : MirrorAxis.vertical;
+        mLayer.mirrorPosition = mLayer.mirrorAxis == MirrorAxis.vertical
+            ? logicalPosition.dx
+            : logicalPosition.dy;
+        engine.saveSnapshot();
+        engine.notifyListeners();
       }
     }
   }

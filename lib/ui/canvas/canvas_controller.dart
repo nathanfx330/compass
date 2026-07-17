@@ -11,6 +11,7 @@ import '../../models/geometry/point.dart';
 import '../../models/geometry/shape.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh slicing
+import '../../models/layer.dart'; // <--- NEW: CompassLayer for the mirror-axis drag slot
 
 // --- Imports ---
 import 'canvas_geometry.dart';       
@@ -129,6 +130,12 @@ class CanvasController extends ChangeNotifier {
 
   // --- NEW: State for tracking the live Corner Radius constraint drag ---
   CompassSplineNode? activeCornerCircleNode;
+
+  // --- NEW: MIRROR MODIFIER axis drag ---
+  // Set by the gesture handler when a pan grabs the active layer's mirror axis
+  // line; onPanUpdate then writes that layer's mirrorPosition until release
+  // (snapshot on onPanEnd, cleared on onPanCancel).
+  CompassLayer? mirrorDragLayer;
 
   // --- TOOL MANAGEMENT ---
   void setTool(CompassTool tool) {
@@ -473,8 +480,11 @@ class CanvasController extends ChangeNotifier {
   void onHover(PointerHoverEvent event, BuildContext context, bool showScaffolding) => CanvasGestureHandler.onHover(this, engine, event, context, showScaffolding);
   void clearHover() => CanvasGestureHandler.clearHover(this);
   
-  Future<void> onSecondaryTapDown(TapDownDetails details, BuildContext context, bool showScaffolding, VoidCallback onToggleScaffolding, bool showHandles, VoidCallback onToggleHandles) => 
-      CanvasGestureHandler.onSecondaryTapDown(this, engine, details, context, showScaffolding, onToggleScaffolding, showHandles, onToggleHandles);
+  // --- CHANGED: now carries the Ghost Vertices flag + toggle through to the
+  // gesture handler, which forwards them to the context-menu builder so the
+  // right-click empty-canvas menu can offer the toggle like scaffolding/handles.
+  Future<void> onSecondaryTapDown(TapDownDetails details, BuildContext context, bool showScaffolding, VoidCallback onToggleScaffolding, bool showHandles, VoidCallback onToggleHandles, bool ghostVertices, VoidCallback onToggleGhostVertices) => 
+      CanvasGestureHandler.onSecondaryTapDown(this, engine, details, context, showScaffolding, onToggleScaffolding, showHandles, onToggleHandles, ghostVertices, onToggleGhostVertices);
   
   void onTapDown(TapDownDetails details, BuildContext context, bool showScaffolding) => CanvasGestureHandler.onTapDown(this, engine, details, context, showScaffolding);
   void onTap() => CanvasGestureHandler.onTap(this, engine);

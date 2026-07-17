@@ -949,6 +949,100 @@ class CompassEngine extends ChangeNotifier {
     }
   }
 
+  // ===========================================================================
+  // SHARP VERTEX TOGGLE (S key)
+  // ===========================================================================
+
+  /// True when a spline node is already "sharp" in the S-key sense: zero
+  /// tension and no explicit Bézier handles. With tension 0 the Catmull-Rom
+  /// evaluated controls collapse to zero-length tangents, so the curve enters
+  /// and leaves the vertex as straight chords -- the sharpest a corner can be.
+  /// Exposed as a static so the renderer/panels can badge sharp nodes later
+  /// without re-deriving the rule.
+  static bool isNodeSharp(CompassSplineNode node) {
+    return node.tension.value < 0.01 &&
+        node.handleIn == null &&
+        node.handleOut == null;
+  }
+
+  /// S-key action: toggles the sharp state of every X-Spline vertex whose point
+  /// is in [targets]. One snapshot, one notify, for the whole batch.
+  ///
+  /// FLUID -> SHARP: tension = 0.0, explicit handles wiped, and any corner
+  /// pulley cleared (a round or miter pulley is a live constraint that REPLACES
+  /// the corner with a wrap -- contradictory with "as sharp as possible", so S
+  /// dissolves it; this also makes S a handy one-tap pulley remover). Width
+  /// profile and pins are untouched: sharpness is about the centerline's
+  /// tangent, not the ribbon.
+  ///
+  /// SHARP -> FLUID: tension restored to 1.0 (the standard fluid Catmull-Rom
+  /// state). Handles stay null so the vertex re-enters fluid mode cleanly
+  /// rather than resurrecting stale explicit geometry.
+  ///
+  /// MIXED BATCHES: if ANY targeted node is currently fluid, the whole batch is
+  /// sharpened; only when EVERY targeted node is already sharp does the batch
+  /// flip back to fluid. This matches how multi-select toggles usually behave
+  /// (Blender's own shade-smooth/flat included): "make these sharp" shouldn't
+  /// un-sharpen the ones that already were.
+  ///
+  /// Points that belong to no spline node (mesh nodes, circle centers, anchors,
+  /// loose points) are simply ignored, so a mixed selection is safe. Locked
+  /// layers are skipped, mirroring every other vertex-editing action.
+  void toggleSharpVertices(Iterable<CompassPoint> targets) {
+    final targetSet = targets.toSet();
+    if (targetSet.isEmpty) return;
+
+    // Pass 1: collect every targeted spline node (skipping locked layers) and
+    // decide the batch direction.
+    final hitNodes = <CompassSplineNode>[];
+    bool anyFluid = false;
+
+    for (var layer in layers) {
+      if (layer.isLocked) continue;
+      for (var shape in layer.shapes) {
+        if (shape is! CompassXSpline) continue;
+        for (var node in shape.nodes) {
+          if (!targetSet.contains(node.point)) continue;
+          hitNodes.add(node);
+          if (!isNodeSharp(node)) anyFluid = true;
+        }
+      }
+    }
+
+    if (hitNodes.isEmpty) return;
+
+    bool changed = false;
+
+    if (anyFluid) {
+      // Sharpen the whole batch.
+      for (var node in hitNodes) {
+        if (isNodeSharp(node) &&
+            node.cornerRadius.value < 0.01 &&
+            node.miterSize.value < 0.01) {
+          continue; // already fully sharp, nothing to do
+        }
+        node.tension.value = 0.0;
+        node.handleIn = null;
+        node.handleOut = null;
+        // A pulley wraps the corner -- the opposite of sharp. Clear both kinds.
+        if (node.cornerRadius.value > 0.0) node.cornerRadius.value = 0.0;
+        if (node.miterSize.value > 0.0) node.miterSize.value = 0.0;
+        changed = true;
+      }
+    } else {
+      // Every node already sharp: restore the batch to fluid.
+      for (var node in hitNodes) {
+        node.tension.value = 1.0;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      saveSnapshot();
+      notifyListeners();
+    }
+  }
+
   void convertPointToBezier(CompassPoint p) {
     bool changed = false;
     for (var layer in layers) {

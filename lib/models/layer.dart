@@ -5,6 +5,11 @@ import 'geometry/shape.dart';
 import 'geometry/spline.dart'; // <--- Needed to identify variable width splines
 import 'geometry/mesh.dart';   // <--- NEW: Needed to exclude/clip gradient meshes
 
+/// Which axis the mirror modifier reflects across.
+/// vertical   => a vertical LINE at x = mirrorPosition (left/right symmetry)
+/// horizontal => a horizontal LINE at y = mirrorPosition (top/bottom symmetry)
+enum MirrorAxis { vertical, horizontal }
+
 /// Represents a distinct Z-layer of geometry.
 class CompassLayer {
   final String id;
@@ -16,6 +21,26 @@ class CompassLayer {
   Color strokeColor;
   double strokeWidth;
 
+  // ==========================================================================
+  // MIRROR MODIFIER (Blender-style, non-destructive)
+  // ==========================================================================
+  // When enabled, the RESOLVED boolean result of this layer is unioned with its
+  // reflection across the axis line -- at path-getter level, so the canvas,
+  // PNG, SVG, area strokes, colored bands, and OBJ export all inherit symmetry
+  // for free, and "Bake to X-Spline" doubles as Blender's "apply modifier".
+  //
+  // The reflection is a RULE evaluated per frame, never baked points: no
+  // duplicate geometry to manage, and toggling off restores the original half
+  // untouched. The axis line itself is draggable on the canvas (scaffolding),
+  // which just writes mirrorPosition.
+  //
+  // Mirroring happens AFTER the full boolean walk (post-resolve), so a
+  // subtract on the master half carves the mirrored half symmetrically --
+  // exactly the Blender mental model of "model one half, get both".
+  bool mirrorEnabled = false;
+  MirrorAxis mirrorAxis = MirrorAxis.vertical;
+  double mirrorPosition = 0.0;
+
   final List<CompassShape> shapes = [];
 
   CompassLayer({
@@ -25,6 +50,41 @@ class CompassLayer {
     this.strokeWidth = 2.0,
     String? id,
   }) : id = id ?? UniqueKey().toString();
+
+  /// The affine reflection for the current axis, as a Matrix4.
+  /// Vertical axis at x=p:   x' = 2p - x  (translate(p) * scaleX(-1) * translate(-p))
+  /// Horizontal axis at y=p: y' = 2p - y
+  /// Exposed publicly so the RENDERER can replay gradient meshes through the
+  /// same transform (a mesh paints via drawVertices, not a Path, so its
+  /// mirrored copy is a second canvas-transformed draw pass rather than a path
+  /// union) and so exporters that work on raw geometry can reuse it.
+  Matrix4 get mirrorMatrix {
+    final m = Matrix4.identity();
+    if (mirrorAxis == MirrorAxis.vertical) {
+      m.translate(mirrorPosition, 0.0);
+      m.scale(-1.0, 1.0, 1.0);
+      m.translate(-mirrorPosition, 0.0);
+    } else {
+      m.translate(0.0, mirrorPosition);
+      m.scale(1.0, -1.0, 1.0);
+      m.translate(0.0, -mirrorPosition);
+    }
+    return m;
+  }
+
+  /// Applies the mirror modifier to a fully-resolved master path: returns the
+  /// union of the path with its reflection. Identity when disabled or empty.
+  ///
+  /// Plain union (not _combine) on purpose: the mirror replicates the RESULT,
+  /// so seeding rules don't apply -- if the master resolved to something, its
+  /// reflection exists by construction. Path.transform returns a new path and
+  /// never mutates its input.
+  Path applyMirror(Path master) {
+    if (!mirrorEnabled) return master;
+    if (master.computeMetrics().isEmpty) return master;
+    final reflected = master.transform(mirrorMatrix.storage);
+    return Path.combine(PathOperation.union, master, reflected);
+  }
 
   /// Applies one (path, op) to the running [master], preserving the ORIGINAL
   /// seeding rule the boolean walk has always used: an `add` against an empty
@@ -131,6 +191,7 @@ class CompassLayer {
 
   /// The master boolean path intended to be OUTLINED with the uniform stroke.
   /// Excludes Variable-Width Splines, which live in their own Stroke Area Path.
+  /// MIRRORED: post-resolve, so the outline traces both halves.
   Path getLayerPath() {
     Path master = Path();
     for (var shape in shapes) {
@@ -153,10 +214,11 @@ class CompassLayer {
         }
       }
     }
-    return master;
+    return applyMirror(master);
   }
 
   /// The master boolean path intended to be FILLED.
+  /// MIRRORED: post-resolve.
   Path getLayerFillPath() {
     Path master = Path();
     for (var shape in shapes) {
@@ -187,13 +249,21 @@ class CompassLayer {
         }
       }
     }
-    return master;
+    return applyMirror(master);
   }
 
   /// The colored ADD-band overpaints for this layer, in paint order (Z-order across
   /// shapes, then stack order -- innermost first -- within a shape), as (path,
   /// color) pairs. The renderer/PNG paint these on TOP of the flat layer fill so a
   /// custom-colored band shows in its own color instead of the layer fill color.
+  ///
+  /// MIRRORED per band: [fillMaster] arrives already mirrored (it comes from
+  /// getLayerFillPath), while the raw band geometry lives only on the master
+  /// half -- so we clip the band against the master first, then mirror the
+  /// CLIPPED result. Since reflect(fill ∩ band) = reflect(fill) ∩ reflect(band)
+  /// and the mirrored fillMaster contains reflect(fill), the mirrored band is
+  /// exactly the band's colored region on the far half: colors replicate in
+  /// perfect symmetry with the geometry.
   List<(Path, Color)> getStrokeAddBandOverpaints(Path fillMaster) {
     if (fillMaster.computeMetrics().isEmpty) return const [];
 
@@ -213,13 +283,14 @@ class CompassLayer {
         final clipped = Path.combine(PathOperation.intersect, fillMaster, band);
         if (clipped.computeMetrics().isEmpty) continue;
 
-        out.add((clipped, color));
+        out.add((applyMirror(clipped), color));
       }
     }
     return out;
   }
 
   /// The master boolean path for Variable-Width Area Strokes.
+  /// MIRRORED: post-resolve, same as the fill walk.
   Path getLayerStrokeAreaPath() {
     Path master = Path();
     for (var shape in shapes) {
@@ -258,12 +329,20 @@ class CompassLayer {
         }
       }
     }
-    return master;
+    return applyMirror(master);
   }
 
   /// The clip silhouette for a SINGLE gradient mesh on this layer: the mesh's own
   /// outer ring, carved by the layer's boolean stack. The renderer clips the
   /// mesh's drawVertices output to this path each frame.
+  ///
+  /// DELIBERATELY NOT MIRRORED. A mesh paints its color field via drawVertices,
+  /// not via this path -- mirroring only the clip would open a window on the far
+  /// half with no pixels behind it. Instead the RENDERER mirrors the whole mesh
+  /// pass: it draws the mesh once as normal, then (when mirrorEnabled) replays
+  /// the same clip + drawVertices inside canvas.transform(mirrorMatrix.storage),
+  /// which maps clip and vertices together. Exporters that rasterize meshes
+  /// follow the same recipe.
   Path getLayerMeshClipPath(CompassMesh mesh) {
     Path clip = mesh.getPath();
     if (clip.computeMetrics().isEmpty) return clip;

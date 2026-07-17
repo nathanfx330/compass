@@ -14,6 +14,15 @@ class CompassCanvas extends StatefulWidget {
   final bool showHandles; 
   final VoidCallback onToggleHandles; 
 
+  // --- NEW: Ghost Vertices ---
+  // Display-only: suppresses the vertex dots (and tension boxes) in the
+  // renderer while every interaction path stays untouched -- hit-testing,
+  // dragging, box-select, and all key modifiers keep working on the invisible
+  // points. The toggle callback is threaded to the right-click empty-canvas
+  // menu so the mode can be flipped without leaving the canvas.
+  final bool ghostVertices;
+  final VoidCallback onToggleGhostVertices;
+
   const CompassCanvas({
     super.key, 
     required this.engine,
@@ -21,6 +30,8 @@ class CompassCanvas extends StatefulWidget {
     required this.onToggleScaffolding,
     required this.showHandles, 
     required this.onToggleHandles, 
+    required this.ghostVertices, // <--- NEW
+    required this.onToggleGhostVertices, // <--- NEW
   });
 
   @override
@@ -97,6 +108,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
                   onSecondaryTapDown: (details) => _controller.onSecondaryTapDown(
                     details, context, widget.showScaffolding, widget.onToggleScaffolding,
                     widget.showHandles, widget.onToggleHandles, 
+                    widget.ghostVertices, widget.onToggleGhostVertices, // <--- NEW
                   ), 
                   onPanStart: (details) => _controller.onPanStart(details, context, widget.showScaffolding, widget.showHandles),
                   onPanUpdate: (details) => _controller.onPanUpdate(details, context, widget.showScaffolding),
@@ -136,6 +148,7 @@ class _CompassCanvasState extends State<CompassCanvas> {
                         currentTool: _controller.currentTool,
                         showScaffolding: widget.showScaffolding,
                         showHandles: widget.showHandles, 
+                        ghostVertices: widget.ghostVertices, // <--- NEW
                         panOffset: _controller.panOffset,
                         canvasScale: _controller.canvasScale,
                         pointBorderColor: theme.colorScheme.surface, 

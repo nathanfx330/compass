@@ -140,7 +140,12 @@ class ProjectSerializer {
     }
 
     for (var layer in engine.layers) {
-      buffer.writeln('LAYER,${layer.id},${layer.name},${layer.isVisible},${layer.isExpanded},${layer.color.value},${layer.strokeColor.value},${layer.strokeWidth},${layer.isLocked}');
+      // Trailing mirror-modifier fields (enabled, axis name, position) ride the
+      // end of the LAYER line, after isLocked -- same trailing-positional pattern
+      // isLocked itself used. Legacy files simply lack them (parsed with
+      // defaults = mirror off), and older code opening a new file ignores the
+      // extra fields since it only reads up to the indices it knows.
+      buffer.writeln('LAYER,${layer.id},${layer.name},${layer.isVisible},${layer.isExpanded},${layer.color.value},${layer.strokeColor.value},${layer.strokeWidth},${layer.isLocked},${layer.mirrorEnabled},${layer.mirrorAxis.name},${layer.mirrorPosition}');
       for (var shape in layer.shapes) {
         // Computed once per shape; '' unless this shape has a stroke stack.
         final strk = _strokeToken(shape);
@@ -280,6 +285,24 @@ class ProjectSerializer {
         
         if (parts.length >= 9) {
           layer.isLocked = parts[8] == 'true';
+        }
+
+        // --- Mirror modifier (trailing fields 9..11) ---
+        // Absent in legacy files -> defaults stay (mirror off, vertical, 0.0).
+        // Parsed defensively: an unrecognized axis name falls back to vertical,
+        // an unparseable position to 0.0 -- a half-corrupt line can only yield a
+        // sane mirror state, never a crash.
+        if (parts.length >= 10) {
+          layer.mirrorEnabled = parts[9].trim() == 'true';
+        }
+        if (parts.length >= 11) {
+          layer.mirrorAxis = MirrorAxis.values.firstWhere(
+            (e) => e.name == parts[10].trim(),
+            orElse: () => MirrorAxis.vertical,
+          );
+        }
+        if (parts.length >= 12) {
+          layer.mirrorPosition = double.tryParse(parts[11]) ?? 0.0;
         }
 
         layerMap[layer.id] = layer;

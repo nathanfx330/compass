@@ -11,6 +11,7 @@ import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/mesh.dart'; 
+import '../../models/layer.dart'; // <--- NEW: MirrorAxis for the mirror axis lines
 
 // Import CompassTool from the canvas controller
 import 'canvas_controller.dart';
@@ -54,6 +55,18 @@ class CompassRenderer extends CustomPainter {
   final CompassTool currentTool;
   final bool showScaffolding;
   final bool showHandles; 
+
+  // --- GHOST VERTICES ---
+  // Display-only suppression of the vertex DOTS: the point-dot pass, the
+  // per-node tension boxes, and the Bézier/width handle dots are skipped, but
+  // NOTHING interactive changes -- hit-testing lives in the controller and
+  // never reads this flag, so hidden points remain clickable, draggable, and
+  // box-selectable. The hover ring, selection highlight, and every live tool
+  // preview (fillet, tension line, slice line, rubber-banding) STILL paint,
+  // which is what makes the mode workable: sweep the cursor along a wireframe
+  // and the invisible vertices announce themselves the moment you find them.
+  final bool ghostVertices;
+
   final Offset panOffset;
   final double canvasScale;
   final Color pointBorderColor;
@@ -92,6 +105,7 @@ class CompassRenderer extends CustomPainter {
     required this.currentTool,
     required this.showScaffolding,
     required this.showHandles, 
+    this.ghostVertices = false, // <--- NEW
     required this.panOffset,
     required this.canvasScale,
     required this.pointBorderColor,
@@ -210,6 +224,25 @@ class CompassRenderer extends CustomPainter {
             meshPaint,
           );
           canvas.restore();
+
+          // --- MIRROR MODIFIER: second mesh pass ---
+          // A mesh can't ride the layer's path-union mirror (it paints via
+          // drawVertices, not a Path), so its reflection is a REPLAY: the same
+          // clip + drawVertices inside canvas.transform(mirrorMatrix), which
+          // maps clip and vertices together. This is exactly why
+          // getLayerMeshClipPath stays unmirrored. Save/restore-scoped so the
+          // reflection transform never leaks into the next mesh or layer.
+          if (layer.mirrorEnabled) {
+            canvas.save();
+            canvas.transform(layer.mirrorMatrix.storage);
+            canvas.clipPath(clip);
+            canvas.drawVertices(
+              shape.buildVertices(),
+              BlendMode.modulate,
+              meshPaint,
+            );
+            canvas.restore();
+          }
         }
       }
     }
@@ -219,6 +252,67 @@ class CompassRenderer extends CustomPainter {
     // ==========================================
     if (showScaffolding) {
       final invScale = 1.0 / canvasScale;
+
+      // --- MIRROR MODIFIER AXIS LINES ---
+      // One dashed line per visible layer with the mirror enabled, spanning the
+      // whole visible viewport (computed by unprojecting the screen rect through
+      // pan/scale, +margin so the ends never peek in while panning). The ACTIVE
+      // layer's axis is brighter and carries a square grab handle where the axis
+      // crosses the viewport center -- that handle (and the line itself) is the
+      // drag target the gesture handler hit-tests to move the symmetry plane.
+      // Locked layers still SHOW their axis (the mirror is part of their look)
+      // but dimmer; the gesture side refuses to drag those.
+      {
+        final viewLeft = (0 - panOffset.dx) / canvasScale;
+        final viewTop = (0 - panOffset.dy) / canvasScale;
+        final viewRight = (size.width - panOffset.dx) / canvasScale;
+        final viewBottom = (size.height - panOffset.dy) / canvasScale;
+        final margin = 50.0 * invScale;
+
+        for (var layer in engine.layers) {
+          if (!layer.isVisible || !layer.mirrorEnabled) continue;
+
+          final isActive = layer == engine.activeLayer && !layer.isLocked;
+          final axisPaint = Paint()
+            ..color = Colors.tealAccent.withOpacity(isActive ? 0.9 : 0.35)
+            ..strokeWidth = (isActive ? 2.0 : 1.5) * invScale
+            ..style = PaintingStyle.stroke;
+
+          final Offset a, b;
+          if (layer.mirrorAxis == MirrorAxis.vertical) {
+            a = Offset(layer.mirrorPosition, viewTop - margin);
+            b = Offset(layer.mirrorPosition, viewBottom + margin);
+          } else {
+            a = Offset(viewLeft - margin, layer.mirrorPosition);
+            b = Offset(viewRight + margin, layer.mirrorPosition);
+          }
+          RendererHelpers.drawDashedLine(canvas, a, b, axisPaint, invScale);
+
+          if (isActive) {
+            // Grab handle at the viewport-center crossing so it's always on
+            // screen and reachable regardless of where you've panned.
+            final Offset handleCenter = layer.mirrorAxis == MirrorAxis.vertical
+                ? Offset(layer.mirrorPosition, (viewTop + viewBottom) / 2)
+                : Offset((viewLeft + viewRight) / 2, layer.mirrorPosition);
+
+            final handleFill = Paint()
+              ..color = Colors.tealAccent
+              ..style = PaintingStyle.fill;
+            final handleBorder = Paint()
+              ..color = pointBorderColor
+              ..strokeWidth = 1.5 * invScale
+              ..style = PaintingStyle.stroke;
+
+            final handleRect = Rect.fromCenter(
+              center: handleCenter,
+              width: 10.0 * invScale,
+              height: 10.0 * invScale,
+            );
+            canvas.drawRect(handleRect, handleFill);
+            canvas.drawRect(handleRect, handleBorder);
+          }
+        }
+      }
 
       final wireframePaint = Paint()
         ..color = Colors.blue.withOpacity(0.3)
@@ -291,35 +385,51 @@ class CompassRenderer extends CustomPainter {
                 RendererHelpers.drawDashedLine(canvas, Offset(cx, cy), Offset(shape.nodes.first.point.x.value, shape.nodes.first.point.y.value), scaffoldPaint, invScale);
               }
 
-              // --- UPGRADE: Draw Tension Handles for selected Mesh nodes ---
-              for (var node in shape.nodes) {
-                final pt = Offset(node.point.x.value, node.point.y.value);
-                
-                final handlePt = pt + const Offset(20, -30);
-                
-                final scaffoldLinePaint = Paint()
-                  ..color = Colors.blue.withOpacity(0.5)
-                  ..strokeWidth = 1.5 * invScale
-                  ..style = PaintingStyle.stroke;
+              // --- Tension Handles for selected Mesh nodes ---
+              // Ghosted: these are per-node dot furniture, so they hide with the
+              // vertex dots. (The mesh LATTICE above still draws -- that's shape
+              // structure, not dot clutter.)
+              if (!ghostVertices) {
+                for (var node in shape.nodes) {
+                  final pt = Offset(node.point.x.value, node.point.y.value);
+                  
+                  final handlePt = pt + const Offset(20, -30);
+                  
+                  final scaffoldLinePaint = Paint()
+                    ..color = Colors.blue.withOpacity(0.5)
+                    ..strokeWidth = 1.5 * invScale
+                    ..style = PaintingStyle.stroke;
 
-                final boxStrokePaint = Paint()
-                  ..color = Colors.blue
-                  ..strokeWidth = 1.5 * invScale
-                  ..style = PaintingStyle.stroke;
+                  final boxStrokePaint = Paint()
+                    ..color = Colors.blue
+                    ..strokeWidth = 1.5 * invScale
+                    ..style = PaintingStyle.stroke;
 
-                canvas.drawLine(pt, handlePt, scaffoldLinePaint);
-                
-                final handleRect = Rect.fromCenter(center: handlePt, width: 10 * invScale, height: 10 * invScale);
-                canvas.drawRect(handleRect, boxStrokePaint);
-                
-                final tensionFillPaint = Paint()
-                  ..color = Colors.blue.withOpacity(node.tension.value.clamp(0.0, 1.0))
-                  ..style = PaintingStyle.fill;
-                canvas.drawRect(handleRect, tensionFillPaint);
+                  canvas.drawLine(pt, handlePt, scaffoldLinePaint);
+                  
+                  final handleRect = Rect.fromCenter(center: handlePt, width: 10 * invScale, height: 10 * invScale);
+                  canvas.drawRect(handleRect, boxStrokePaint);
+                  
+                  final tensionFillPaint = Paint()
+                    ..color = Colors.blue.withOpacity(node.tension.value.clamp(0.0, 1.0))
+                    ..style = PaintingStyle.fill;
+                  canvas.drawRect(handleRect, tensionFillPaint);
+                }
               }
             }
           } else if (shape is CompassXSpline) {
-             shape.paint(canvas, isSelected ? selectedWireframePaint : wireframePaint, showScaffolding: true, isSelected: isSelected);
+             // NOTE: shape.paint draws the spline body PLUS its per-node tension
+             // boxes when selected. In ghost mode we suppress those boxes by
+             // passing isSelected:false to paint (the body still draws; the
+             // brighter selected wireframe paint is kept so selection still
+             // reads) -- the centroid box, pulleys, and vertex numbers below are
+             // handled individually.
+             shape.paint(
+               canvas,
+               isSelected ? selectedWireframePaint : wireframePaint,
+               showScaffolding: true,
+               isSelected: isSelected && !ghostVertices,
+             );
              
              // --- Draw Centroid Box for selected X-Spline ---
              if (isSelected) {
@@ -352,6 +462,10 @@ class CompassRenderer extends CustomPainter {
                }
 
                // --- Live Corner Pulley Wireframes (round + miter) ---
+               // NOT ghosted: a pulley is a live CONSTRAINT visualization (like
+               // the wireframe itself), not vertex-dot furniture -- and its rim
+               // dot is the drag affordance for resizing it, which must stay
+               // discoverable.
                final cornerCirclePaint = Paint()
                  ..color = Colors.lightBlueAccent.withOpacity(0.8)
                  ..strokeWidth = 1.5 * invScale
@@ -456,6 +570,10 @@ class CompassRenderer extends CustomPainter {
                }
 
                // --- DRAW VERTEX NUMBERS IF TOGGLED ---
+               // NOT ghosted: showNodeIndices is its own explicit opt-in toggle,
+               // and with the dots hidden the numbers are the one way to still
+               // SEE where every vertex sits -- the two toggles compose into a
+               // clean "labels only" view.
                if (engine.showNodeIndices) {
                  for (int i = 0; i < shape.nodes.length; i++) {
                    final pt = Offset(shape.nodes[i].point.x.value, shape.nodes[i].point.y.value);
@@ -487,12 +605,19 @@ class CompassRenderer extends CustomPainter {
       final selForHandles = engine.selectedShape;
 
       // --- WIDTH HANDLES for the selected X-Spline (W KEY) ---
+      // NOT ghosted while W is held: holding W is an explicit "show me the
+      // width rig" request, and the diamonds are the drag targets for it.
+      // Without them the W tool would be unusable in ghost mode.
       if (selForHandles is CompassXSpline && showHandles && isWPressed) {
         RendererHelpers.drawWidthHandles(canvas, selForHandles, invScale, pointBorderColor, activeWidthNode, activeWidthIsLeft); 
       }
 
       // --- BEZIER HANDLES for the selected X-Spline ---
-      if (selForHandles is CompassXSpline && showHandles && !isWPressed) { 
+      // Ghosted: the purple handle dots are exactly the per-vertex furniture
+      // this mode exists to clear away. (Handle EDITING via drag needs the dots
+      // as targets, so in ghost mode that entry path is dormant -- by design;
+      // Ctrl+R handle rotation still works since it targets points, not dots.)
+      if (selForHandles is CompassXSpline && showHandles && !isWPressed && !ghostVertices) { 
         RendererHelpers.drawBezierHandles(canvas, selForHandles, invScale, pointBorderColor, activeHandleNode, activeHandleIsOut); 
       }
 
@@ -522,6 +647,8 @@ class CompassRenderer extends CustomPainter {
       }
 
       // --- EXPLICITLY SELECTED POINT(S) HIGHLIGHT ---
+      // NOT ghosted: with the dots hidden, this halo IS the visual for "you have
+      // this vertex" -- removing it would leave selection with no feedback.
       final highlightSet = <CompassPoint>{};
       if (selectedPoint != null) highlightSet.add(selectedPoint!);
       if (selectedPoints != null) highlightSet.addAll(selectedPoints!);
@@ -623,6 +750,8 @@ class CompassRenderer extends CustomPainter {
       }
 
       // Hover Ring
+      // NOT ghosted -- this is THE feedback that makes ghost mode navigable:
+      // sweep the cursor along the wireframe and hidden vertices light up.
       if (hoveredPoint != null && hoveredPoint != shapeStartPoint && !highlightSet.contains(hoveredPoint)) {
         final hoverPaint = Paint()
           ..color = Colors.orangeAccent.withOpacity(0.5)
@@ -647,20 +776,26 @@ class CompassRenderer extends CustomPainter {
       }
 
       // Points
-      final pointPaint = Paint()
-        ..color = Colors.blue
-        ..style = PaintingStyle.fill;
+      // GHOSTED: the core of the feature. The dot pass is skipped entirely --
+      // but ONLY the painting. engine.points is untouched, the hit-tester never
+      // reads this flag, and every ring/preview above still draws, so the
+      // vertices remain fully live as invisible drag targets.
+      if (!ghostVertices) {
+        final pointPaint = Paint()
+          ..color = Colors.blue
+          ..style = PaintingStyle.fill;
 
-      final pointBorderPaint = Paint()
-        ..color = pointBorderColor
-        ..strokeWidth = 1.5 * invScale
-        ..style = PaintingStyle.stroke;
+        final pointBorderPaint = Paint()
+          ..color = pointBorderColor
+          ..strokeWidth = 1.5 * invScale
+          ..style = PaintingStyle.stroke;
 
-      for (var point in engine.points) {
-        if (_isPointUnlocked(point)) {
-          final offset = Offset(point.x.value, point.y.value);
-          canvas.drawCircle(offset, 5.0 * invScale, pointPaint);
-          canvas.drawCircle(offset, 5.0 * invScale, pointBorderPaint);
+        for (var point in engine.points) {
+          if (_isPointUnlocked(point)) {
+            final offset = Offset(point.x.value, point.y.value);
+            canvas.drawCircle(offset, 5.0 * invScale, pointPaint);
+            canvas.drawCircle(offset, 5.0 * invScale, pointBorderPaint);
+          }
         }
       }
 

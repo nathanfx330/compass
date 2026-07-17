@@ -13,6 +13,13 @@ class CompassMenuBar extends StatelessWidget {
   final VoidCallback onToggleScaffolding;
   final bool showHandles; 
   final VoidCallback onToggleHandles; 
+
+  // --- NEW: Ghost Vertices toggle ---
+  // Display-only suppression of the vertex dots/tension boxes; interaction
+  // stays live. State lives in the workspace; this is just the menu surface.
+  final bool ghostVertices;
+  final VoidCallback onToggleGhostVertices;
+
   final VoidCallback onClearCanvas;
 
   const CompassMenuBar({
@@ -23,6 +30,8 @@ class CompassMenuBar extends StatelessWidget {
     required this.onToggleScaffolding,
     required this.showHandles, 
     required this.onToggleHandles, 
+    required this.ghostVertices, // <--- NEW
+    required this.onToggleGhostVertices, // <--- NEW
     required this.onClearCanvas,
   });
 
@@ -140,6 +149,16 @@ class CompassMenuBar extends StatelessWidget {
                       onPressed: onToggleHandles,
                       leadingIcon: Icon(showHandles ? Icons.gesture : Icons.timeline),
                       child: Text(showHandles ? 'Hide Handles' : 'Show Handles'),
+                    ),
+                    // --- NEW: Ghost Vertices ---
+                    // Hides the vertex dots/tension boxes while keeping every
+                    // point fully clickable and draggable (hover ring and
+                    // selection highlight still show). blur_on/blur_off reads
+                    // as "dots faded away" vs "dots solid".
+                    MenuItemButton(
+                      onPressed: onToggleGhostVertices,
+                      leadingIcon: Icon(ghostVertices ? Icons.blur_on : Icons.blur_off),
+                      child: Text(ghostVertices ? 'Show Vertices' : 'Ghost Vertices (Hide Dots, Keep Editable)'),
                     ),
                     const CustomMenuItemDivider(),
                     SubmenuButton(
