@@ -563,7 +563,7 @@ class CompassEngine extends ChangeNotifier {
 
   /// Hard-GC used by applyFilletToNode: the fillet REPLACES the corner node, so
   /// the old corner point must go -- but if that corner was ever spliced in via
-  /// the Q tool, it carries an incoming spline-cohesion attach edge (first node
+  /// the Q tool, it carries an incoming spline-cohesion attach edge (anchor
   /// -> spliced point) that checkAndGCPoint's dependency check reads as "still
   /// needed", stranding the point on the canvas. Here we verify the point is
   /// structurally unused first (a SHARED corner survives untouched), then strip
@@ -935,11 +935,41 @@ class CompassEngine extends ChangeNotifier {
       spline.nodes.insert(index, node);
     }
 
-    if (spline.nodes.isNotEmpty) {
-      final firstPoint = spline.nodes.first.point;
-      if (firstPoint != p) {
-        firstPoint.attach(p);
-      }
+    // COHESION EDGE: bind the spliced point to the spline's ANCHOR only -- never
+    // to another editable vertex.
+    //
+    // THE BUG THIS FIXES ("a vertex suddenly locks to 1 or 3 other vertices"):
+    // this used to be `spline.nodes.first.point.attach(p)`, which made the
+    // spline's FIRST NODE a PARENT of every point ever spliced in. CompassPoint
+    // .moveBy cascades down attachedPoints, and the ordinary single-vertex drag
+    // path (isPanningSelectedPoints) uses moveBy -- so grabbing that one first
+    // vertex silently dragged along every spliced point with it (one child if you
+    // added one point, three if you added three). It only surfaced when you
+    // happened to grab the ORIGINAL first vertex rather than a freshly-added leaf,
+    // which is why it felt random and "once per session." Pen-drawn nodes get no
+    // attach edge at all, so it was specifically a splicing artifact.
+    //
+    // WHY THE ANCHOR IS THE RIGHT PARENT: the anchor is a non-vertex move handle
+    // (centroid pivot), not a draggable curve point, so no ordinary vertex drag
+    // ever cascades through it. Anchored splines (circle/rect converts, baked
+    // layers) still move cohesively on Shift-drag and anchor-drag, and spliced
+    // points now ride the anchor exactly like the shape's original nodes -- which
+    // also means the fillet's _gcPointHardIfUnused detaches cleanly (the stale
+    // "first node -> spliced point" edge it used to fight no longer exists).
+    //
+    // WHY ANCHORLESS PEN SPLINES LOSE NOTHING: they simply get no cohesion edge,
+    // so each vertex drags independently (the correct behavior). Rigid-body
+    // Shift-drag / Shift+R still gather the whole spline via SHAPE MEMBERSHIP in
+    // CanvasGeometry.getRigidBody(hierarchy: true) -- that traversal walks shape
+    // node lists, and never needed this attach edge.
+    //
+    // NOTE ON OLD FILES: existing .compass saves already contain the old
+    // first-node ATTACH edges and will replay them on load, so re-saving an old
+    // file is the clean cure for pre-existing documents. New edits are correct
+    // immediately.
+    final anchor = spline.anchorPoint;
+    if (anchor != null && anchor != p) {
+      anchor.attach(p);
     }
   }
 
