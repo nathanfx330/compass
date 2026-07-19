@@ -331,6 +331,31 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Renames [layer]. Snapshots + notifies, so a rename is a single undo step
+  /// and repaints the hierarchy panel live.
+  ///
+  /// SERIALIZER-SAFE SANITIZATION: the project format is line-based and
+  /// comma-delimited -- the LAYER line writes the name at parts[2] and the
+  /// deserializer splits on ',' -- so a comma OR a newline in a name would
+  /// corrupt the parse (and thus every save/load AND every undo, since undo
+  /// round-trips through serialize/deserialize). Layer names were always
+  /// auto-generated ("Layer N") until now, so this never bit; a user-typed name
+  /// can contain anything, so we strip commas and CR/LF here (replaced with a
+  /// space) as the single chokepoint. A name that is empty after trimming, or
+  /// unchanged, is a no-op (no snapshot, no notify) so blanking the field and
+  /// hitting Enter cleanly reverts rather than minting junk state.
+  void renameLayer(CompassLayer layer, String newName) {
+    final cleaned = newName
+        .replaceAll(',', ' ')
+        .replaceAll(RegExp(r'[\r\n]'), ' ')
+        .trim();
+    if (cleaned.isEmpty) return;
+    if (layer.name == cleaned) return;
+    layer.name = cleaned;
+    saveSnapshot();
+    notifyListeners();
+  }
+
   void removeLayer(CompassLayer layer) {
     if (!layers.contains(layer)) return;
 

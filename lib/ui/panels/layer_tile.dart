@@ -1,9 +1,10 @@
 // lib/ui/panels/layer_tile.dart
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // <--- NEW: Escape-to-cancel on the rename field
 
 import '../../engine.dart';
-import '../../shape_converter.dart'; // <--- NEW: Import ShapeConverter for Sci-Fi bake
+import '../../shape_converter.dart'; // <--- Import ShapeConverter for Sci-Fi bake
 import '../../models/layer.dart';
 import '../../models/geometry/shape.dart';
 import '../../models/geometry/point.dart';
@@ -22,10 +23,15 @@ import 'shape_row.dart';
 /// each layer to a ReorderableListView as a single item -- dragging the grip
 /// moves the ENTIRE card (shapes and all) in the z-stack.
 ///
-/// Stateless: the layer's expanded flag lives on the engine (layer.isExpanded),
-/// each ShapeRow owns its own stroke-expand state, and drop-hover highlight is
-/// DragTarget candidate state -- so there is nothing local to hold. The panel
-/// wraps the list in a ListenableBuilder(engine), so this rebuilds on notify.
+/// STATEFUL now (was stateless) solely to host INLINE LAYER RENAMING: double-
+/// click the layer name (or pick "Rename Layer…" from the right-click menu) to
+/// swap the name Text for a TextField. Enter or click-away commits via
+/// engine.renameLayer (a single undo step); Escape cancels. Everything else --
+/// the layer's expanded flag (engine.layer.isExpanded), each ShapeRow's own
+/// stroke-expand state, drop-hover highlight (DragTarget candidate state) --
+/// still lives outside this widget, so the only local state is the transient
+/// rename editor. The panel wraps the list in a ListenableBuilder(engine), so
+/// this still rebuilds on notify.
 ///
 /// REORDER GRIP: a dedicated drag handle (ReorderableDragStartListener) carrying
 /// [dragIndex] -- the item's VISUAL index in the panel's reversed list, which is
@@ -35,7 +41,8 @@ import 'shape_row.dart';
 /// list) is what keeps the layer-reorder gesture from colliding with the per-shape
 /// LongPressDraggable inside ShapeRow -- different trigger widgets, no arena fight.
 /// Locked layers are still grip-draggable on purpose: locking freezes a layer's
-/// GEOMETRY/contents, not its z-position, and a restack edits neither.
+/// GEOMETRY/contents, not its z-position, and a restack edits neither. (Renaming a
+/// locked layer is likewise allowed -- a name is not geometry.)
 ///
 /// SHAPE DROP TARGETS (three, because shape rows leave gaps):
 ///   1. Each ShapeRow inserts a drop ABOVE itself -- covers every slot except the
@@ -47,7 +54,7 @@ import 'shape_row.dart';
 ///      precisely -- the back of the stack, which no ShapeRow can reach.
 ///   All three refuse a locked destination; the engine no-ops a same-layer move
 ///   that wouldn't change anything.
-class LayerTile extends StatelessWidget {
+class LayerTile extends StatefulWidget {
   final CompassEngine engine;
   final CompassLayer layer;
   final int dragIndex;
@@ -58,6 +65,76 @@ class LayerTile extends StatelessWidget {
     required this.layer,
     required this.dragIndex,
   });
+
+  @override
+  State<LayerTile> createState() => _LayerTileState();
+}
+
+class _LayerTileState extends State<LayerTile> {
+  // --- INLINE RENAME STATE ---
+  // _editing swaps the name Text for a TextField in the header. The controller
+  // seeds/reads the edited text; the focus node drives commit-on-blur and lets
+  // us programmatically focus the field the frame after it mounts.
+  bool _editing = false;
+  final TextEditingController _nameController = TextEditingController();
+  final FocusNode _focusNode = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    // Commit when focus leaves the field (clicking anywhere else). Guarded by
+    // _editing inside _commitRename so a cancel (which clears _editing first)
+    // can't be turned back into a commit by the ensuing blur.
+    _focusNode.addListener(_onFocusChange);
+  }
+
+  @override
+  void dispose() {
+    _focusNode.removeListener(_onFocusChange);
+    _focusNode.dispose();
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  void _onFocusChange() {
+    if (!_focusNode.hasFocus && _editing) {
+      _commitRename();
+    }
+  }
+
+  // Enter edit mode: seed the field with the current name, select it all so the
+  // user can type over it immediately, then focus the field on the next frame
+  // (requestFocus before the TextField is mounted is a no-op).
+  void _beginRename() {
+    _nameController.text = widget.layer.name;
+    _nameController.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _nameController.text.length,
+    );
+    setState(() => _editing = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+  }
+
+  // Commit: leave edit mode, then hand the raw text to engine.renameLayer, which
+  // trims + strips serializer-hostile chars (commas/newlines) and no-ops an
+  // empty or unchanged name -- so blanking the field and hitting Enter simply
+  // reverts. Ordered _editing=false FIRST so the blur that follows a programmatic
+  // unfocus can't re-enter this method.
+  void _commitRename() {
+    if (!_editing) return;
+    final text = _nameController.text;
+    setState(() => _editing = false);
+    widget.engine.renameLayer(widget.layer, text);
+  }
+
+  // Cancel: drop edit mode with no engine call. _editing=false first, so the
+  // unfocus-driven blur sees !_editing and does not commit the discarded text.
+  void _cancelRename() {
+    if (!_editing) return;
+    setState(() => _editing = false);
+  }
 
   // --- Per-shape derivations (lifted from LayersPanel) ---
 
@@ -104,7 +181,7 @@ class LayerTile extends StatelessWidget {
 
     for (var p in shapePts) {
       if (p.attachedPoints.isNotEmpty) return true;
-      for (var other in engine.points) {
+      for (var other in widget.engine.points) {
         if (other != p && other.attachedPoints.contains(p)) return true;
       }
     }
@@ -119,9 +196,10 @@ class LayerTile extends StatelessWidget {
   // from the move. moveShapeToLayer folds a same-layer move into a reorder and
   // no-ops if nothing actually changes.
   void _handleHeaderDrop(CompassShape dragged, CompassLayer fromLayer) {
+    final layer = widget.layer;
     if (layer.isLocked) return;
-    if (!layer.isExpanded) engine.toggleLayerExpanded(layer);
-    engine.moveShapeToLayer(dragged, fromLayer, layer, 0);
+    if (!layer.isExpanded) widget.engine.toggleLayerExpanded(layer);
+    widget.engine.moveShapeToLayer(dragged, fromLayer, layer, 0);
   }
 
   // Trailing-zone drop: send to the back of this layer (model index 0). Same
@@ -129,17 +207,32 @@ class LayerTile extends StatelessWidget {
   // row, so it reads as an insertion line at the bottom of the visual stack --
   // matching ShapeRow's "line above each row" language.
   void _handleBackDrop(CompassShape dragged, CompassLayer fromLayer) {
+    final layer = widget.layer;
     if (layer.isLocked) return;
-    engine.moveShapeToLayer(dragged, fromLayer, layer, 0);
+    widget.engine.moveShapeToLayer(dragged, fromLayer, layer, 0);
   }
 
-  // --- Right-click layer menu (faithful from LayersPanel) ---
+  // --- Right-click layer menu (faithful from LayersPanel, plus Rename) ---
 
   Future<void> _showLayerMenu(BuildContext context, Offset globalPos) async {
+    final engine = widget.engine;
+    final layer = widget.layer;
+
     final selected = await showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(globalPos.dx, globalPos.dy, globalPos.dx, globalPos.dy),
       items: const [
+        PopupMenuItem<String>(
+          value: 'rename',
+          child: Row(
+            children: [
+              Icon(Icons.edit_outlined, size: 18),
+              SizedBox(width: 12),
+              Text('Rename Layer…'),
+            ],
+          ),
+        ),
+        PopupMenuDivider(),
         PopupMenuItem<String>(
           value: 'bake',
           child: Row(
@@ -150,7 +243,7 @@ class LayerTile extends StatelessWidget {
             ],
           ),
         ),
-        // === UPDATED: Triangulated Spline Bake Option ===
+        // === Triangulated Spline Bake Option ===
         PopupMenuItem<String>(
           value: 'bake_scifi',
           child: Row(
@@ -175,7 +268,12 @@ class LayerTile extends StatelessWidget {
       ],
     );
 
-    if (selected == 'bake') {
+    if (selected == 'rename') {
+      // showMenu is async; guard the setState in _beginRename against a tile that
+      // was disposed while the menu was open.
+      if (!mounted) return;
+      _beginRename();
+    } else if (selected == 'bake') {
       // Guard the silent no-op: check BOTH the standard fill and the area stroke
       // path to ensure geometry exists.
       final fillEmpty = layer.getLayerFillPath().computeMetrics().isEmpty;
@@ -226,7 +324,71 @@ class LayerTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final engine = widget.engine;
+    final layer = widget.layer;
     final isActiveLayer = layer == engine.activeLayer;
+
+    // The name widget: an inline TextField while editing, otherwise the label
+    // wrapped in a double-tap-to-rename gesture. Kept as a local so the header
+    // Row stays readable.
+    final Widget nameWidget = _editing
+        ? Focus(
+            // Escape cancels without committing. TextField doesn't consume
+            // Escape, so it bubbles to this ancestor Focus. (The canvas's global
+            // HardwareKeyboard handler also sees Escape and may deselect canvas
+            // items -- harmless while renaming a layer.)
+            onKeyEvent: (node, event) {
+              if (event is KeyDownEvent &&
+                  event.logicalKey == LogicalKeyboardKey.escape) {
+                _cancelRename();
+                return KeyEventResult.handled;
+              }
+              return KeyEventResult.ignored;
+            },
+            child: TextField(
+              controller: _nameController,
+              focusNode: _focusNode,
+              style: TextStyle(
+                fontWeight: isActiveLayer ? FontWeight.bold : FontWeight.w500,
+                color: isActiveLayer ? theme.colorScheme.primary : null,
+                fontSize: 14,
+              ),
+              decoration: InputDecoration(
+                isDense: true,
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                filled: true,
+                fillColor: theme.scaffoldBackgroundColor,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(6),
+                  borderSide: BorderSide(color: theme.colorScheme.primary),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(6),
+                  borderSide: BorderSide(color: theme.colorScheme.primary),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(6),
+                  borderSide:
+                      BorderSide(color: theme.colorScheme.primary, width: 2),
+                ),
+              ),
+              onSubmitted: (_) => _commitRename(),
+            ),
+          )
+        : GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onDoubleTap: _beginRename,
+            child: Text(
+              layer.name,
+              style: TextStyle(
+                fontWeight: isActiveLayer ? FontWeight.bold : FontWeight.w500,
+                color: isActiveLayer
+                    ? theme.colorScheme.primary
+                    : (layer.isLocked ? theme.disabledColor : null),
+              ),
+            ),
+          );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -250,7 +412,7 @@ class LayerTile extends StatelessWidget {
                   MouseRegion(
                     cursor: SystemMouseCursors.grab,
                     child: ReorderableDragStartListener(
-                      index: dragIndex,
+                      index: widget.dragIndex,
                       child: Padding(
                         padding: const EdgeInsets.only(left: 8.0, right: 6.0),
                         child: Container(
@@ -266,13 +428,17 @@ class LayerTile extends StatelessWidget {
                   ),
                   Expanded(
                     child: InkWell(
-                      onTap: () {
-                        if (isActiveLayer) {
-                          engine.toggleLayerExpanded(layer);
-                        } else {
-                          engine.selectLayer(layer);
-                        }
-                      },
+                      // While editing, swallow the header tap so a click that
+                      // places the text cursor doesn't also re-select/expand.
+                      onTap: _editing
+                          ? null
+                          : () {
+                              if (isActiveLayer) {
+                                engine.toggleLayerExpanded(layer);
+                              } else {
+                                engine.selectLayer(layer);
+                              }
+                            },
                       onSecondaryTapDown: (details) =>
                           _showLayerMenu(context, details.globalPosition),
                       child: Padding(
@@ -319,18 +485,7 @@ class LayerTile extends StatelessWidget {
                                       child: Icon(Icons.close, size: 8, color: Colors.grey))
                                   : null,
                             ),
-                            Expanded(
-                              child: Text(
-                                layer.name,
-                                style: TextStyle(
-                                  fontWeight:
-                                      isActiveLayer ? FontWeight.bold : FontWeight.w500,
-                                  color: isActiveLayer
-                                      ? theme.colorScheme.primary
-                                      : (layer.isLocked ? theme.disabledColor : null),
-                                ),
-                              ),
-                            ),
+                            Expanded(child: nameWidget),
                             IconButton(
                               iconSize: 16,
                               padding: EdgeInsets.zero,
@@ -397,6 +552,7 @@ class LayerTile extends StatelessWidget {
   // model index 0 -- the one slot no ShapeRow can reach. Locked layers render an
   // inert placeholder (empty) or nothing (non-empty), accepting no drops.
   Widget _buildBackDropZone(ThemeData theme) {
+    final layer = widget.layer;
     final bool isEmpty = layer.shapes.isEmpty;
 
     if (layer.isLocked) {
