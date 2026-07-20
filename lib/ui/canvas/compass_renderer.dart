@@ -11,7 +11,8 @@ import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/mesh.dart'; 
-import '../../models/layer.dart'; // <--- NEW: MirrorAxis for the mirror axis lines
+import '../../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient (stop dots + axis)
+import '../../models/layer.dart'; // <--- NEW: MirrorAxis + hasLiftedGradientFill predicate
 
 // Import CompassTool from the canvas controller
 import 'canvas_controller.dart';
@@ -154,6 +155,67 @@ class CompassRenderer extends CustomPainter {
             ..color = layer.color
             ..style = PaintingStyle.fill;
           canvas.drawPath(fillPath, fillPaint);
+        }
+
+        // 1a'. Per-shape LINEAR FILL GRADIENTS (their own self-painted,
+        // boolean-clipped category -- the exact structure of the mesh pass at
+        // 1d, but a shader fill instead of drawVertices).
+        //
+        // Each such shape was SKIPPED in the flat fill union above
+        // (CompassLayer.hasLiftedGradientFill -> getLayerFillPath's continue),
+        // so its interior is currently unpainted; we fill it here with the
+        // linear shader (>=2 stops) or a solid of the single stop color (1 stop),
+        // masked to the shape's boolean-carved silhouette (getLayerGradientClipPath).
+        //
+        // WHY THE FILL SLOT, not the mesh slot (1d): unlike a mesh, a gradient
+        // shape STILL contributes its outline to layerPath, so it keeps the
+        // uniform hairline. Painting the fill BEFORE 1b lets that hairline land
+        // on top of the shader edge and stay full-width; painting it at 1d would
+        // bury the inner half of the hairline under the shader. Its stroke RINGS
+        // are already in the flat fill (the stroke stack ran in getLayerFillPath),
+        // so only the interior is (re)painted here.
+        //
+        // NOT gated on layer.color: the whole point is a fill the flat layer
+        // color can't express, so a gradient shows even on a transparent layer.
+        // No explicit clipPath needed (unlike the mesh, whose drawVertices spans
+        // a whole rect): filling the clip path directly bounds the shader to
+        // exactly that region. Save/restore only wraps the mirror transform.
+        for (var shape in layer.shapes) {
+          if (!shape.isVisible) continue;
+          if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
+
+          final g = shape.gradient!;
+          final clip = layer.getLayerGradientClipPath(shape);
+          if (clip.computeMetrics().isEmpty) continue;
+
+          final gradPaint = Paint()
+            ..isAntiAlias = true
+            ..style = PaintingStyle.fill;
+
+          final shader = g.buildShader();
+          if (shader != null) {
+            gradPaint.shader = shader; // >=2 stops: real linear ramp
+          } else {
+            final solid = g.solidColor; // <2 stops: solid of the seed color
+            if (solid == null) continue; // 0 stops -> not renderable (shouldn't occur)
+            gradPaint.color = solid;
+          }
+
+          canvas.drawPath(clip, gradPaint);
+
+          // --- MIRROR MODIFIER: second gradient pass ---
+          // A shader fill is a paint, not a Path, so (like a mesh) it can't ride
+          // the layer's path-union mirror. Its reflection is a REPLAY of the same
+          // clip + fill inside canvas.transform(mirrorMatrix): the transform maps
+          // the clip region AND the shader's world-space axis together, so the
+          // reflected gradient runs in the mirrored direction with no extra math.
+          // This is exactly why getLayerGradientClipPath stays unmirrored.
+          if (layer.mirrorEnabled) {
+            canvas.save();
+            canvas.transform(layer.mirrorMatrix.storage);
+            canvas.drawPath(clip, gradPaint);
+            canvas.restore();
+          }
         }
 
         // 1b. Stroke Standard Geometry
@@ -621,6 +683,64 @@ class CompassRenderer extends CustomPainter {
         RendererHelpers.drawBezierHandles(canvas, selForHandles, invScale, pointBorderColor, activeHandleNode, activeHandleIsOut); 
       }
 
+      // --- GRADIENT STOP DOTS + AXIS (selected shape's linear fill gradient) ---
+      // The gradient's stops are ordinary points in engine.points, SUPPRESSED
+      // from the generic blue-dot pass below; here they're drawn as COLORED dots
+      // (each showing its own stop color) with a dashed axis line from the first
+      // to the last stop -- the on-canvas gradient-editing UI the feature is
+      // built around.
+      //
+      // Only for the SELECTED shape, matching every other per-shape handle
+      // (pulley rim dots, tension boxes, bezier handles): the canvas stays clean,
+      // and you reveal a gradient's stops by selecting its shape. NOT ghosted --
+      // like the pulley rim dots, these dots ARE a live editing affordance, so
+      // hiding them would make gradients uneditable in Ghost Vertices mode. The
+      // selected/hovered halos from the generic passes still land on these points
+      // (they're real points), so a grabbed stop still reads as selected.
+      final gradSel = engine.selectedShape;
+      final grad = gradSel?.gradient;
+      if (grad != null && grad.stops.isNotEmpty) {
+        // Dashed axis (first -> last stop). Meaningful only with >=2 stops; a
+        // lone seed stop has no axis yet (it renders as a solid), so none drawn.
+        final axis = grad.axis;
+        if (axis != null) {
+          final axisPaint = Paint()
+            ..color = Colors.white.withOpacity(0.75)
+            ..strokeWidth = 1.5 * invScale
+            ..style = PaintingStyle.stroke;
+          RendererHelpers.drawDashedLine(canvas, axis.$1, axis.$2, axisPaint, invScale);
+        }
+
+        for (final stop in grad.stops) {
+          final c = Offset(stop.point.x.value, stop.point.y.value);
+          const r = 7.0;
+
+          // Dark outer ring first, so a white/pale stop stays visible on a pale
+          // fill; theme border ring last for a crisp edge on a dark fill. The
+          // color core between them is the stop's actual value.
+          canvas.drawCircle(
+            c, r * invScale,
+            Paint()
+              ..color = Colors.black.withOpacity(0.55)
+              ..strokeWidth = 3.0 * invScale
+              ..style = PaintingStyle.stroke,
+          );
+          canvas.drawCircle(
+            c, r * invScale,
+            Paint()
+              ..color = stop.color
+              ..style = PaintingStyle.fill,
+          );
+          canvas.drawCircle(
+            c, r * invScale,
+            Paint()
+              ..color = pointBorderColor
+              ..strokeWidth = 1.5 * invScale
+              ..style = PaintingStyle.stroke,
+          );
+        }
+      }
+
       // --- MULTI-SELECTION BOUNDING BOX ---
       if (selectionBounds != null) {
         RendererHelpers.drawSelectionBounds(canvas, selectionBounds!, invScale); 
@@ -781,6 +901,13 @@ class CompassRenderer extends CustomPainter {
       // reads this flag, and every ring/preview above still draws, so the
       // vertices remain fully live as invisible drag targets.
       if (!ghostVertices) {
+        // Gradient stop points are painted as colored stop dots (for the
+        // selected shape) in the gradient block above; skip them here so they
+        // don't ALSO render as generic blue vertex dots, and so an unselected
+        // shape's stops stay hidden -- matching how pulleys/handles only appear
+        // when their shape is selected.
+        final stopPoints = _gradientStopPoints();
+
         final pointPaint = Paint()
           ..color = Colors.blue
           ..style = PaintingStyle.fill;
@@ -791,6 +918,7 @@ class CompassRenderer extends CustomPainter {
           ..style = PaintingStyle.stroke;
 
         for (var point in engine.points) {
+          if (stopPoints.contains(point)) continue;
           if (_isPointUnlocked(point)) {
             final offset = Offset(point.x.value, point.y.value);
             canvas.drawCircle(offset, 5.0 * invScale, pointPaint);
@@ -855,6 +983,25 @@ class CompassRenderer extends CustomPainter {
     }
 
     canvas.restore();
+  }
+
+  /// Every gradient stop point across all shapes. Stops are ordinary points in
+  /// engine.points, so the generic blue-dot pass would otherwise draw them as
+  /// plain vertices; they're suppressed there and painted as colored stop dots
+  /// (for the selected shape) instead. Recomputed per paint -- shouldRepaint is
+  /// already unconditional and stop counts are tiny, so there's nothing to cache.
+  Set<CompassPoint> _gradientStopPoints() {
+    final s = <CompassPoint>{};
+    for (var layer in engine.layers) {
+      for (var shape in layer.shapes) {
+        final g = shape.gradient;
+        if (g == null) continue;
+        for (final stop in g.stops) {
+          s.add(stop.point);
+        }
+      }
+    }
+    return s;
   }
 
   bool _isPointUnlocked(CompassPoint p) {

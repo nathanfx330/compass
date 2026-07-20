@@ -2,6 +2,8 @@
 
 import 'package:flutter/material.dart';
 
+import 'gradient.dart'; // <--- NEW: per-shape linear fill gradient
+
 /// Defines how this shape interacts with the shapes below it
 enum CompassBooleanOp { add, subtract, intersect, none }
 
@@ -78,11 +80,34 @@ abstract class CompassShape {
   /// widthRight), both untouched.
   List<StrokeRegion> strokeRegions;
 
+  /// OPTIONAL per-shape LINEAR FILL GRADIENT. null (the default) => this shape
+  /// fills flat with the layer color, exactly as before: nothing is touched for
+  /// any pre-existing shape.
+  ///
+  /// When non-null AND renderable (>=2 stops -> a real shader; a lone seed stop
+  /// paints a solid of its own color), the shape leaves the layer's FLAT boolean
+  /// fill union entirely and is painted in its own pass, clipped to its own
+  /// boolean-carved silhouette -- the SAME render category the gradient MESH uses
+  /// (getLayerMeshClipPath / the renderer's separate mesh pass). This is what lets
+  /// one shape carry a fill the single layer-color union cannot express, and it
+  /// inherits the mesh's one caveat: a gradient `add` shape does NOT merge
+  /// silhouettes with a neighboring solid `add` shape -- each paints independently.
+  ///
+  /// This is UNRELATED to:
+  ///   * the layer fill color (a flat, whole-layer property);
+  ///   * the gradient MESH (a Coons color surface, a different shape type);
+  ///   * stroke-region ADD-band colors (those paint rings, not the fill).
+  /// The gradient's stops are POINTS in engine.points, attached to the shape's
+  /// primary structural point, so they drag / rotate / cohere / serialize / undo
+  /// through the ordinary point machinery -- see gradient.dart.
+  LinearGradientFill? gradient;
+
   bool isVisible;
 
   CompassShape({
     this.operation = CompassBooleanOp.add,
     List<StrokeRegion>? strokeRegions,
+    this.gradient,
     this.isVisible = true,
   }) : strokeRegions = strokeRegions ?? [];
 

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'geometry/shape.dart';
 import 'geometry/spline.dart'; // <--- Needed to identify variable width splines
 import 'geometry/mesh.dart';   // <--- NEW: Needed to exclude/clip gradient meshes
+import 'geometry/gradient.dart'; // <--- NEW: identify renderable gradient fills
 
 /// Which axis the mirror modifier reflects across.
 /// vertical   => a vertical LINE at x = mirrorPosition (left/right symmetry)
@@ -57,7 +58,9 @@ class CompassLayer {
   /// Exposed publicly so the RENDERER can replay gradient meshes through the
   /// same transform (a mesh paints via drawVertices, not a Path, so its
   /// mirrored copy is a second canvas-transformed draw pass rather than a path
-  /// union) and so exporters that work on raw geometry can reuse it.
+  /// union) and so exporters that work on raw geometry can reuse it. The
+  /// gradient-FILL pass replays through this exact transform too (a shader fill
+  /// is a paint, not a Path, so it mirrors the same way a mesh does).
   Matrix4 get mirrorMatrix {
     final m = Matrix4.identity();
     if (mirrorAxis == MirrorAxis.vertical) {
@@ -189,9 +192,36 @@ class CompassLayer {
     return false;
   }
 
+  /// Whether [shape]'s FILL is lifted out of the flat boolean union and painted
+  /// separately in the gradient pass (clipped to getLayerGradientClipPath),
+  /// EXACTLY the way a mesh is a separate self-painted category. True only for an
+  /// ADD shape carrying a renderable gradient (>=1 stop):
+  ///
+  ///   * ADD only -- a subtract/intersect shape's job is to CARVE, and a gradient
+  ///     on a cutter paints nothing, so those keep their normal boolean
+  ///     contribution and are never lifted.
+  ///   * renderable -- gradient != null AND at least one stop. A gradient with 0
+  ///     stops (never produced by "Make Gradient", which always seeds one) is
+  ///     inert and the shape flat-fills as before. A ONE-stop gradient IS lifted
+  ///     and paints a solid of that stop's color, so the fill is owned by the
+  ///     gradient the instant it's created rather than tracking the layer color.
+  ///
+  /// Public + static so the RENDERER (which shapes to paint in the gradient pass)
+  /// and this layer's flat walks (which fills to skip) agree on one predicate.
+  static bool hasLiftedGradientFill(CompassShape shape) =>
+      shape.operation == CompassBooleanOp.add &&
+      shape.gradient != null &&
+      shape.gradient!.isRenderable;
+
   /// The master boolean path intended to be OUTLINED with the uniform stroke.
   /// Excludes Variable-Width Splines, which live in their own Stroke Area Path.
   /// MIRRORED: post-resolve, so the outline traces both halves.
+  ///
+  /// A gradient-fill shape is DELIBERATELY NOT excluded here (unlike a mesh): its
+  /// fill lifts out of the FILL union, but the layer hairline should still wrap
+  /// it, so it keeps contributing its silhouette to the OUTLINE master. The
+  /// renderer paints the gradient fill BEFORE the uniform stroke, so the hairline
+  /// lands on top of the shader edge and stays full-width.
   Path getLayerPath() {
     Path master = Path();
     for (var shape in shapes) {
@@ -229,10 +259,17 @@ class CompassLayer {
       if (shape is CompassMesh) continue;
 
       // --- STROKE STACK (before fill) ---
+      // Runs even for a lifted-gradient shape, so a gradient circle keeps its
+      // outward stroke RINGS in the flat union -- only its FILL is lifted.
       master = _applyStrokeStack(master, shape, addsAllowed: true);
 
       // --- FILL CONTRIBUTION ---
-      if (shape.operation != CompassBooleanOp.none) {
+      // A renderable-gradient ADD shape lifts its FILL out of the flat union
+      // (painted separately in the gradient pass, clipped to
+      // getLayerGradientClipPath), EXACTLY as a mesh does. Subtract/intersect
+      // shapes are never lifted (hasLiftedGradientFill is add-only), so a cutter
+      // still carves here as always.
+      if (shape.operation != CompassBooleanOp.none && !hasLiftedGradientFill(shape)) {
         Path? fillPath;
         if (shape is CompassXSpline &&
             shape.hasWidthProfile &&
@@ -264,6 +301,11 @@ class CompassLayer {
   /// and the mirrored fillMaster contains reflect(fill), the mirrored band is
   /// exactly the band's colored region on the far half: colors replicate in
   /// perfect symmetry with the geometry.
+  ///
+  /// Gradient shapes need no special handling here: their stroke RINGS are still
+  /// in fillMaster (the stroke stack ran in getLayerFillPath), and rings stack
+  /// strictly OUTWARD from the boundary, so a ring band clips cleanly against
+  /// fillMaster even though the shape's own interior fill was lifted out.
   List<(Path, Color)> getStrokeAddBandOverpaints(Path fillMaster) {
     if (fillMaster.computeMetrics().isEmpty) return const [];
 
@@ -310,7 +352,12 @@ class CompassLayer {
 
       // Only Add if it is an explicitly defined Area Stroke
       if (shape.operation == CompassBooleanOp.add) {
-        if (shape is CompassXSpline && shape.hasWidthProfile) {
+        // A lifted-gradient width-spline paints its ribbon in the gradient pass
+        // instead, so keep it out of the area-stroke union (mirrors the flat-fill
+        // walk's skip). Its subtract/intersect siblings below are unaffected.
+        if (shape is CompassXSpline &&
+            shape.hasWidthProfile &&
+            !hasLiftedGradientFill(shape)) {
           if (master.computeMetrics().isEmpty) {
             master = shapePath;
           } else {
@@ -350,6 +397,50 @@ class CompassLayer {
     for (var shape in shapes) {
       if (!shape.isVisible) continue;
       if (shape is CompassMesh) continue; // self + siblings: meshes never carve
+
+      // --- STROKE STACK cut (before fill) --- carve-only: add regions do nothing.
+      clip = _applyStrokeStack(clip, shape, addsAllowed: false);
+
+      // --- FILL cut ---
+      if (shape.operation == CompassBooleanOp.subtract) {
+        final cutter = shape.getPath();
+        if (cutter.computeMetrics().isEmpty) continue;
+        clip = Path.combine(PathOperation.difference, clip, cutter);
+      } else if (shape.operation == CompassBooleanOp.intersect) {
+        final cutter = shape.getPath();
+        if (cutter.computeMetrics().isEmpty) continue;
+        clip = Path.combine(PathOperation.intersect, clip, cutter);
+      }
+    }
+    return clip;
+  }
+
+  /// The clip silhouette for a SINGLE gradient-FILL shape on this layer:
+  /// [target]'s own outline (getPath), carved by the layer's boolean stack. The
+  /// renderer clips the shader fill to this path each frame -- the exact analogue
+  /// of getLayerMeshClipPath, so a subtract shape carves a gradient circle just
+  /// as it carves a mesh.
+  ///
+  /// DIFFERENCES from the mesh clip, both deliberate:
+  ///   * The TARGET itself is skipped by identity (a shape never carves its own
+  ///     fill -- and a shape's own stroke stack carves LOWER geometry, never its
+  ///     fill, so skipping the target skips its stroke here too). Meshes are still
+  ///     skipped wholesale because meshes never carve.
+  ///   * Other GRADIENT shapes are NOT skipped -- only their OP matters. A
+  ///     subtract shape that happens to carry a gradient still carves; an add
+  ///     gradient sibling doesn't (add never carves), exactly like any add shape.
+  ///
+  /// DELIBERATELY NOT MIRRORED, for the same reason as the mesh clip: a shader
+  /// fill is a paint, so the renderer mirror-replays the whole gradient pass
+  /// (clip + shader) through mirrorMatrix rather than mirroring this path.
+  Path getLayerGradientClipPath(CompassShape target) {
+    Path clip = target.getPath();
+    if (clip.computeMetrics().isEmpty) return clip;
+
+    for (var shape in shapes) {
+      if (!shape.isVisible) continue;
+      if (identical(shape, target)) continue; // never carve a shape by itself
+      if (shape is CompassMesh) continue;      // meshes never carve
 
       // --- STROKE STACK cut (before fill) --- carve-only: add regions do nothing.
       clip = _applyStrokeStack(clip, shape, addsAllowed: false);

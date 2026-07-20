@@ -11,6 +11,7 @@ import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/line.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/mesh.dart'; 
+import '../../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient (stop actions)
 import '../../models/layer.dart'; // <--- NEW: MirrorAxis for the mirror menu entries
 
 import '../widgets/compass_color_picker.dart'; 
@@ -78,6 +79,11 @@ class CanvasContextMenus {
 
       CompassMesh? parentMesh;
 
+      // The shape whose linear-fill gradient owns clickedPoint as a STOP, if any.
+      // A stop is an ordinary point that is never also a spline/mesh node, so it
+      // is detected independently of the parentSpline/parentMesh search.
+      CompassShape? gradientStopShape;
+
       for (var layer in engine.layers) {
         if (layer.isLocked) continue; 
         for (var shape in layer.shapes) {
@@ -92,12 +98,40 @@ class CanvasContextMenus {
           } else if (shape is CompassMesh && shape.containsNode(clickedPoint)) {
             parentMesh = shape;
           }
+
+          // Gradient stop check runs for EVERY shape type (gradient is a base
+          // class prop) and BEFORE the break, so the current shape is always
+          // tested. A stop never matches a spline/mesh node, so the early break
+          // on those can never skip a real stop match.
+          final g = shape.gradient;
+          if (g != null && g.stops.any((s) => s.point == clickedPoint)) {
+            gradientStopShape = shape;
+          }
+
           if (parentSpline != null || parentMesh != null) break;
         }
         if (parentSpline != null || parentMesh != null) break;
       }
 
       final List<PopupMenuEntry<String>> pointMenuItems = [];
+
+      // A gradient stop is NOT a structural vertex, so it gets only the stop
+      // actions -- never the geometry-construction entries below. Starting a
+      // circle/spline from a stop, or "delete point and dependent shapes", would
+      // entangle the gradient's private point with new geometry; removing the
+      // stop is "Remove Gradient Stop", which routes through the engine's
+      // gradient-aware teardown (drops the point, nulls the gradient if it was
+      // the last stop).
+      if (gradientStopShape != null) {
+        pointMenuItems.add(const PopupMenuItem(
+          value: 'set_stop_color',
+          child: Text('Set Gradient Stop Color…'),
+        ));
+        pointMenuItems.add(const PopupMenuItem(
+          value: 'remove_stop',
+          child: Text('Remove Gradient Stop', style: TextStyle(color: Colors.red)),
+        ));
+      } else {
 
       // --- Mesh node: color action first, then a divider. ---
       if (parentMesh != null) {
@@ -160,6 +194,7 @@ class CanvasContextMenus {
         value: 'delete_point', 
         child: Text('Delete Point (and dependent shapes)', style: TextStyle(color: Colors.red)),
       ));
+      } // end else: generic (non gradient-stop) point menu
 
       final selectedAction = await showMenu<String>(
         context: context,
@@ -167,7 +202,26 @@ class CanvasContextMenus {
         items: pointMenuItems,
       );
 
-      if (selectedAction == 'set_mesh_color' && parentMesh != null) {
+      if (selectedAction == 'set_stop_color' && gradientStopShape != null) {
+        // Open the picker seeded with this stop's current color.
+        Color current = Colors.grey;
+        final g = gradientStopShape.gradient;
+        if (g != null) {
+          for (final s in g.stops) {
+            if (s.point == clickedPoint) {
+              current = s.color;
+              break;
+            }
+          }
+        }
+        final picked = await showCompassColorPicker(context, initialColor: current);
+        if (picked != null) {
+          engine.setGradientStopColor(gradientStopShape, clickedPoint, picked);
+        }
+      } else if (selectedAction == 'remove_stop' && gradientStopShape != null) {
+        engine.removeGradientStop(gradientStopShape, clickedPoint);
+        controller.removePointFromSelection(clickedPoint);
+      } else if (selectedAction == 'set_mesh_color' && parentMesh != null) {
         final current = parentMesh.colorForPoint(clickedPoint) ?? Colors.grey;
         final picked = await showCompassColorPicker(context, initialColor: current);
         if (picked != null) {
@@ -249,6 +303,30 @@ class CanvasContextMenus {
         ));
       }
 
+      // --- Per-shape LINEAR FILL GRADIENT ---
+      // Make Gradient seeds a one-stop gradient from the shape's current fill
+      // (the engine reads the layer color); once present, the shape offers adding
+      // a stop at the cursor and removing the whole gradient. Distinct from
+      // "Convert to Gradient Mesh" above -- that swaps the shape for a Coons color
+      // surface; this keeps the shape and gives it a shader fill edited via the
+      // on-canvas stop dots.
+      if (clickedShape.gradient == null) {
+        menuItems.add(const PopupMenuItem(
+          value: 'make_gradient',
+          child: Text('Make Gradient'),
+        ));
+      } else {
+        menuItems.add(const PopupMenuItem(
+          value: 'add_gradient_stop',
+          child: Text('Add Gradient Stop Here'),
+        ));
+        menuItems.add(const PopupMenuItem(
+          value: 'remove_gradient',
+          child: Text('Remove Gradient', style: TextStyle(color: Colors.orange)),
+        ));
+      }
+      menuItems.add(const PopupMenuDivider());
+
       menuItems.add(const PopupMenuItem(
         value: 'delete', 
         child: Text('Delete Shape', style: TextStyle(color: Colors.red)),
@@ -307,6 +385,18 @@ class CanvasContextMenus {
           } else if (clickedShape is CompassXSpline) {
             engine.insertPointIntoSpline(newPoint, clickedShape);
           }
+        } else if (selectedAction == 'make_gradient') {
+          // Seed a one-stop gradient at the cursor. The stop takes the shape's
+          // current effective fill (engine reads the layer color) and renders as
+          // a solid until a second stop is added, at which point the axis appears.
+          engine.makeShapeGradient(clickedShape, seedPos: logicalPosition);
+        } else if (selectedAction == 'add_gradient_stop') {
+          // Add a stop at the cursor; the engine gives it a contrasting default
+          // color so the ramp is immediately visible. Recolor it by right-clicking
+          // the new dot -> "Set Gradient Stop Color…".
+          engine.addGradientStop(clickedShape, logicalPosition);
+        } else if (selectedAction == 'remove_gradient') {
+          engine.removeGradient(clickedShape);
         } else {
           final op = CompassBooleanOp.values.firstWhere((e) => e.name == selectedAction);
           engine.changeShapeOperation(clickedShape, op);

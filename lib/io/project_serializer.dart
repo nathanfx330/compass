@@ -13,6 +13,7 @@ import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
 import '../models/geometry/rectangle.dart';
 import '../models/geometry/mesh.dart';
+import '../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient
 import '../models/layer.dart';
 
 class ProjectSerializer {
@@ -109,6 +110,68 @@ class ProjectSerializer {
     return const [];
   }
 
+  // The optional per-shape GRADIENT token, appended as a trailing comma-field of a
+  // SHAPE line, EXACTLY like the STROKE token above and read the same way (prefix
+  // scan, not a fixed index). Emitted ONLY when the shape carries a gradient with
+  // at least one stop, so a gradientless shape serializes byte-for-byte as before
+  // and older code opening a new file just ignores the trailing field.
+  //
+  // Format: `GRAD:stopPointId:colorARGB|stopPointId:colorARGB|...` -- one stop per
+  // pipe group, IN LIST ORDER (order defines the first->last gradient axis). Only
+  // the per-stop COLOR lives in this token; each stop's POSITION already round-trips
+  // as its own POINT line and its cohesion as an ATTACH edge (the stop is an
+  // ordinary point attached to the shape's anchor), so the token never carries
+  // coordinates. Point ids are comma-free (they already survive the CSV round-trip)
+  // and colon/pipe-free, so the id:color:| grammar can't be corrupted by an id.
+  //
+  // WHY A TOKEN, not a separate GRADIENT line: this format identifies shapes only
+  // by their defining point ids (there is no shape id), so a standalone line would
+  // have to re-derive the owning shape. Riding the shape line instead binds the
+  // gradient to its shape structurally -- it is parsed and assigned right where the
+  // shape is built, with zero lookup. Distinct from the gradient MESH (its own
+  // SHAPE,MESH line): this is a shader fill on an ordinary shape.
+  //
+  // BACKWARD COMPAT: legacy files carry no GRAD token (clean no-op -> gradient stays
+  // null = flat fill); a new save opened by older code ignores the unknown field.
+  static String _gradientToken(CompassShape shape) {
+    final g = shape.gradient;
+    if (g == null || g.stops.isEmpty) return '';
+    final body = g.stops.map((st) => '${st.point.id}:${st.color.value}').join('|');
+    return ',GRAD:$body';
+  }
+
+  // Decodes the optional GRAD token into a LinearGradientFill, or null when absent
+  // or empty. Scans every part for the 'GRAD:' prefix (trimmed first, so a trailing
+  // CRLF '\r' can't corrupt the last stop), mirroring _parseStrokeToken. Each stop
+  // is `pointId:colorARGB`; a stop whose point is missing from [pointMap] or whose
+  // color won't parse is skipped rather than crashing the load. A token that yields
+  // no valid stops returns null (equivalent to no gradient), and the engine treats
+  // a stopless gradient as flat anyway. Stop ORDER is preserved by the pipe split,
+  // so the first->last axis survives exactly.
+  static LinearGradientFill? _parseGradientToken(
+      List<String> parts, Map<String, CompassPoint> pointMap) {
+    for (final raw in parts) {
+      final t = raw.trim();
+      if (!t.startsWith('GRAD:')) continue;
+
+      final body = t.substring('GRAD:'.length);
+      final stops = <GradientStop>[];
+      for (final ss in body.split('|')) {
+        if (ss.isEmpty) continue;
+        final seg = ss.split(':');
+        if (seg.length < 2) continue;
+        final pt = pointMap[seg[0].trim()];
+        if (pt == null) continue; // stop point absent -> drop this stop
+        final cv = int.tryParse(seg[1].trim());
+        if (cv == null) continue; // unparseable color -> drop this stop
+        stops.add(GradientStop(point: pt, color: Color(cv)));
+      }
+      if (stops.isEmpty) return null;
+      return LinearGradientFill(stops: stops);
+    }
+    return null;
+  }
+
   static String serialize(CompassEngine engine) {
     final buffer = StringBuffer();
     for (var p in engine.points) {
@@ -149,15 +212,17 @@ class ProjectSerializer {
       for (var shape in layer.shapes) {
         // Computed once per shape; '' unless this shape has a stroke stack.
         final strk = _strokeToken(shape);
+        // '' unless this shape carries a gradient with >=1 stop.
+        final grad = _gradientToken(shape);
 
         if (shape is CompassLine) {
-          buffer.writeln('SHAPE,LINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.start.id},${shape.end.id}$strk');
+          buffer.writeln('SHAPE,LINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.start.id},${shape.end.id}$strk$grad');
         } else if (shape is CompassCircle) {
-          buffer.writeln('SHAPE,CIRCLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.radiusPoint?.id ?? ""}$strk');
+          buffer.writeln('SHAPE,CIRCLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.radiusPoint?.id ?? ""}$strk$grad');
         } else if (shape is CompassSpiral) {
-          buffer.writeln('SHAPE,SPIRAL,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.startPoint.id},${shape.isClockwise},${shape.revolutions}$strk');
+          buffer.writeln('SHAPE,SPIRAL,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.startPoint.id},${shape.isClockwise},${shape.revolutions}$strk$grad');
         } else if (shape is CompassRectangle) {
-          buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}$strk');
+          buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}$strk$grad');
         } else if (shape is CompassMesh) {
           // --- UPGRADE: Mesh nodes now serialize their Tension values ---
           // Format: `nodeId:colorValue:tension`. Safe because legacy files only had 2 parts,
@@ -166,7 +231,7 @@ class ProjectSerializer {
             final node = shape.nodes[i];
             return '${node.point.id}:${shape.colors[i].value}:${node.tension.value}';
           }).join('|');
-          buffer.writeln('SHAPE,MESH,${layer.id},${shape.operation.name},${shape.isVisible},${shape.rows},${shape.cols},${shape.anchorPoint?.id ?? ""},$nodesStr$strk');
+          buffer.writeln('SHAPE,MESH,${layer.id},${shape.operation.name},${shape.isVisible},${shape.rows},${shape.cols},${shape.anchorPoint?.id ?? ""},$nodesStr$strk$grad');
         } else if (shape is CompassXSpline) {
           // NEW: node token is id:tension, extended to id:tension:hInX:hInY:hOutX:hOutY:wL:wR:pinL:pinR:cornerRadius:miterSize
           // when the node carries explicit Bezier handles, variable width, width pins, corner radius, or miter pulley. 
@@ -188,7 +253,7 @@ class ProjectSerializer {
             }
             return '${n.point.id}:${n.tension.value}';
           }).join('|');
-          buffer.writeln('SHAPE,XSPLINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.isClosed},${shape.anchorPoint?.id ?? ""},$nodesStr$strk');
+          buffer.writeln('SHAPE,XSPLINE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.isClosed},${shape.anchorPoint?.id ?? ""},$nodesStr$strk$grad');
         }
       }
     }
@@ -343,6 +408,11 @@ class ProjectSerializer {
         // when their overrides land. Each region carries its own width and optional
         // add-band color, read here.
         final strokeRegions = _parseStrokeToken(parts);
+        // Optional per-shape linear fill gradient, from the trailing GRAD token.
+        // Stop points already exist (pass 1 built every POINT), so they resolve
+        // via pointMap here; null when the shape has no gradient. Cascaded onto
+        // every shape below alongside operation/strokeRegions/isVisible.
+        final gradient = _parseGradientToken(parts, pointMap);
         
         if (layer != null) {
           bool isVisible = true;
@@ -373,7 +443,8 @@ class ProjectSerializer {
               layer.shapes.add(CompassLine(start: p1, end: p2)
                 ..operation = op
                 ..strokeRegions = strokeRegions
-                ..isVisible = isVisible);
+                ..isVisible = isVisible
+                ..gradient = gradient);
             }
           } else if (shapeType == 'CIRCLE') {
             final center = pointMap[parts[argOffset]];
@@ -382,7 +453,8 @@ class ProjectSerializer {
                final circle = CompassCircle(center: center, radiusPoint: radiusPoint, radius: 0)
                 ..operation = op
                 ..strokeRegions = strokeRegions
-                ..isVisible = isVisible;
+                ..isVisible = isVisible
+                ..gradient = gradient;
                
                center.attach(radiusPoint);
 
@@ -421,7 +493,8 @@ class ProjectSerializer {
               )
                 ..operation = op
                 ..strokeRegions = strokeRegions
-                ..isVisible = isVisible;
+                ..isVisible = isVisible
+                ..gradient = gradient;
               
               center.attach(startPoint);
               layer.shapes.add(spiral);
@@ -440,7 +513,8 @@ class ProjectSerializer {
               final rect = CompassRectangle(p1: p1, p2: p2, radius: radius, isSquare: isSquare)
                 ..operation = op
                 ..strokeRegions = strokeRegions
-                ..isVisible = isVisible;
+                ..isVisible = isVisible
+                ..gradient = gradient;
                 
               if (isSquare) {
                 // Registered (was constructed loose): a constraint the engine
@@ -499,7 +573,8 @@ class ProjectSerializer {
               )
                 ..operation = op
                 ..strokeRegions = strokeRegions
-                ..isVisible = isVisible;
+                ..isVisible = isVisible
+                ..gradient = gradient;
               layer.shapes.add(mesh);
             }
           } else if (shapeType == 'XSPLINE') {
@@ -519,7 +594,8 @@ class ProjectSerializer {
             final spline = CompassXSpline(isClosed: isClosed, anchorPoint: anchorPt)
               ..operation = op
               ..strokeRegions = strokeRegions
-              ..isVisible = isVisible;
+              ..isVisible = isVisible
+              ..gradient = gradient;
             
             bool valid = true;
             final nodesData = nodesRawStr.split('|');

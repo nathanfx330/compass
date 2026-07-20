@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 // --- DATA MODELS ---
 import 'models/geometry/point.dart';
 import 'models/geometry/shape.dart';
+import 'models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient
 import 'models/geometry/line.dart';
 import 'models/geometry/circle.dart';
 import 'models/geometry/spiral.dart';
@@ -129,29 +130,39 @@ class CompassEngine extends ChangeNotifier {
 
   /// The structural points of a shape, one place instead of three hand-rolled
   /// copies (removeShape / removePoints / removeLayer).
+  ///
+  /// GRADIENT STOPS ride the tail of EVERY shape type: a shape gradient is a
+  /// base-class property, and its stop points live in engine.points attached to
+  /// the shape's primary structural point. Appending them here is what makes a
+  /// shape's stops die WITH the shape (removeShape / removeLayer both GC through
+  /// this list), with no per-type casing.
   List<CompassPoint> _pointsOfShape(CompassShape shape) {
+    final pts = <CompassPoint>[];
     if (shape is CompassLine) {
-      return [shape.start, shape.end];
+      pts.addAll([shape.start, shape.end]);
     } else if (shape is CompassCircle) {
-      return [shape.center, if (shape.radiusPoint != null) shape.radiusPoint!];
+      pts.add(shape.center);
+      if (shape.radiusPoint != null) pts.add(shape.radiusPoint!);
     } else if (shape is CompassSpiral) {
-      return [shape.center, shape.startPoint];
+      pts.addAll([shape.center, shape.startPoint]);
     } else if (shape is CompassRectangle) {
-      return [shape.p1, shape.p2];
+      pts.addAll([shape.p1, shape.p2]);
     } else if (shape is CompassRhombus) {
-      return [shape.p1, shape.p2, shape.p3, shape.p4];
+      pts.addAll([shape.p1, shape.p2, shape.p3, shape.p4]);
     } else if (shape is CompassXSpline) {
-      return [
-        ...shape.nodes.map((n) => n.point),
-        if (shape.anchorPoint != null) shape.anchorPoint!,
-      ];
+      pts.addAll(shape.nodes.map((n) => n.point));
+      if (shape.anchorPoint != null) pts.add(shape.anchorPoint!);
     } else if (shape is CompassMesh) {
-      return [
-        ...shape.nodes.map((n) => n.point),
-        if (shape.anchorPoint != null) shape.anchorPoint!,
-      ];
+      pts.addAll(shape.nodes.map((n) => n.point));
+      if (shape.anchorPoint != null) pts.add(shape.anchorPoint!);
     }
-    return [];
+
+    // Gradient stop points ride every shape type (gradient is on the base class).
+    final g = shape.gradient;
+    if (g != null) {
+      pts.addAll(g.stops.map((s) => s.point));
+    }
+    return pts;
   }
 
   void toggleNodeIndices(bool show) {
@@ -547,7 +558,15 @@ class CompassEngine extends ChangeNotifier {
         else if (s is CompassRhombus && (s.p1 == p || s.p2 == p || s.p3 == p || s.p4 == p)) isUsed = true; // <--- NEW
         else if (s is CompassXSpline && (s.nodes.any((n) => n.point == p) || s.anchorPoint == p)) isUsed = true;
         else if (s is CompassMesh && (s.containsNode(p) || s.anchorPoint == p)) isUsed = true;
-        
+
+        // A GRADIENT STOP of any surviving shape is "used": it must live as long
+        // as its shape does, regardless of shape type. Checked independently of
+        // the structural if/else chain above since gradient is a base-class prop.
+        if (!isUsed && s.gradient != null &&
+            s.gradient!.stops.any((st) => st.point == p)) {
+          isUsed = true;
+        }
+
         if (isUsed) break;
       }
       if (isUsed) break;
@@ -745,6 +764,240 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
   
+  // ===========================================================================
+  // SHAPE GRADIENT (linear fill) ENGINE ACTIONS
+  // ===========================================================================
+  //
+  // A per-shape linear fill gradient (models/geometry/gradient.dart). Distinct
+  // from the gradient MESH above: this is a flat shader fill on an ordinary
+  // shape's silhouette, edited via draggable STOP DOTS on the canvas.
+  //
+  // STOP POINTS ARE ORDINARY POINTS. Each stop is a CompassPoint in engine.points,
+  // attached as a CHILD of the shape's primary structural point
+  // (_gradientAnchorPoint). That single attach edge buys everything for free:
+  //   * shape translate (dragging the primary point) cascades to the stops via
+  //     moveBy's attachedPoints walk;
+  //   * rigid-body drag / rotation gathers the stops because getRigidBody walks
+  //     attachedPoints bidirectionally from the shape's structural points;
+  //   * shape deletion GCs the stops because _pointsOfShape appends them.
+  // Dragging a STOP itself is independent (moveBy cascades to children, not up to
+  // the parent), which is exactly the desired "move this one stop" behavior.
+  //
+  // NOTE (build order): the serializer does not yet know about gradients, so a
+  // gradient survives the live session but is dropped on save / undo until the
+  // GRADIENT serialization line lands. Build/test the renderer + canvas editing
+  // first; do the serializer before relying on persistence or Ctrl+Z.
+
+  CompassLayer? _layerOfShape(CompassShape shape) {
+    for (var l in layers) {
+      if (l.shapes.contains(shape)) return l;
+    }
+    return null;
+  }
+
+  /// The point a shape's gradient stops attach to (its rigid-body handle). For a
+  /// pen spline with no anchor this falls back to the first node's point -- so
+  /// dragging node 0 also drags the gradient stops (a minor quirk on anchorless
+  /// splines; every anchored shape -- circle/rect/converted/baked -- is clean).
+  CompassPoint? _gradientAnchorPoint(CompassShape shape) {
+    if (shape is CompassCircle) return shape.center;
+    if (shape is CompassSpiral) return shape.center;
+    if (shape is CompassLine) return shape.start;
+    if (shape is CompassRectangle) return shape.p1;
+    if (shape is CompassRhombus) return shape.p1;
+    if (shape is CompassXSpline) {
+      return shape.anchorPoint ??
+          (shape.nodes.isNotEmpty ? shape.nodes.first.point : null);
+    }
+    if (shape is CompassMesh) return shape.anchorPoint;
+    return null;
+  }
+
+  /// A reasonable placement for a stop when none is supplied -- the shape's
+  /// centroid. (With a single stop the render is a solid, so this only matters
+  /// as the initial dot location.) Engine-local so this file never imports UI.
+  Offset _gradientCentroid(CompassShape shape) {
+    if (shape is CompassCircle) return Offset(shape.center.x.value, shape.center.y.value);
+    if (shape is CompassSpiral) return Offset(shape.center.x.value, shape.center.y.value);
+    if (shape is CompassLine) {
+      return Offset((shape.start.x.value + shape.end.x.value) / 2,
+          (shape.start.y.value + shape.end.y.value) / 2);
+    }
+    if (shape is CompassRectangle) {
+      return Offset((shape.p1.x.value + shape.p2.x.value) / 2,
+          (shape.p1.y.value + shape.p2.y.value) / 2);
+    }
+    if (shape is CompassRhombus) {
+      return Offset((shape.p1.x.value + shape.p3.x.value) / 2,
+          (shape.p1.y.value + shape.p3.y.value) / 2);
+    }
+    if (shape is CompassXSpline) {
+      if (shape.anchorPoint != null) {
+        return Offset(shape.anchorPoint!.x.value, shape.anchorPoint!.y.value);
+      }
+      if (shape.nodes.isNotEmpty) {
+        double cx = 0, cy = 0;
+        for (var n in shape.nodes) {
+          cx += n.point.x.value;
+          cy += n.point.y.value;
+        }
+        return Offset(cx / shape.nodes.length, cy / shape.nodes.length);
+      }
+    }
+    if (shape is CompassMesh) {
+      if (shape.anchorPoint != null) {
+        return Offset(shape.anchorPoint!.x.value, shape.anchorPoint!.y.value);
+      }
+      if (shape.nodes.isNotEmpty) {
+        double cx = 0, cy = 0;
+        for (var n in shape.nodes) {
+          cx += n.point.x.value;
+          cy += n.point.y.value;
+        }
+        return Offset(cx / shape.nodes.length, cy / shape.nodes.length);
+      }
+    }
+    return Offset.zero;
+  }
+
+  /// Creates a fresh stop point in the pool, wires its repaint listeners, and
+  /// attaches it to the shape's rigid-body handle. Returns the point.
+  CompassPoint _spawnStopPoint(CompassShape shape, Offset pos) {
+    final sp = CompassPoint(x: pos.dx, y: pos.dy);
+    points.add(sp);
+    sp.x.addListener(notifyListeners);
+    sp.y.addListener(notifyListeners);
+    final anchor = _gradientAnchorPoint(shape);
+    if (anchor != null && anchor != sp) anchor.attach(sp);
+    return sp;
+  }
+
+  /// Drops a stop point from the pool and strips its cohesion edges both ways.
+  /// Mirrors checkAndGCPoint's teardown (listeners ride the point to GC, as
+  /// everywhere else in the engine).
+  void _detachStopPoint(CompassPoint p) {
+    points.remove(p);
+    for (var other in points) {
+      other.attachedPoints.remove(p);
+    }
+    p.attachedPoints.clear();
+    selectedPoints.remove(p);
+  }
+
+  /// Strips any gradient stop whose point is in [targets] from EVERY shape's
+  /// gradient, and nulls a gradient emptied of its last stop (revert to flat).
+  /// The stop POINTS themselves are dropped by the caller's normal pool sweep --
+  /// this only severs the gradient's reference so no dangling stop survives.
+  /// Called from removePoints so the generic Delete key on a selected stop dot
+  /// does the sane thing instead of corrupting the gradient.
+  void _detachGradientStopsInTargets(Set<CompassPoint> targets) {
+    for (var layer in layers) {
+      for (var shape in layer.shapes) {
+        final g = shape.gradient;
+        if (g == null) continue;
+        if (g.stops.any((s) => targets.contains(s.point))) {
+          g.stops.removeWhere((s) => targets.contains(s.point));
+          if (g.stops.isEmpty) shape.gradient = null;
+        }
+      }
+    }
+  }
+
+  /// RIGHT-CLICK "Make Gradient". Seeds the shape with a ONE-stop linear gradient
+  /// whose color is the shape's current effective fill (the owning layer's fill
+  /// color; a neutral gray if the layer is transparent). The single stop renders
+  /// as a solid of that color -- identical to before -- until a second stop is
+  /// added, at which point the axis/line appears. [seedPos] (the right-click
+  /// location) places the first dot right under the cursor; falls back to the
+  /// centroid. No-op if the shape already carries a gradient.
+  void makeShapeGradient(CompassShape shape, {Offset? seedPos}) {
+    if (shape.gradient != null) return;
+
+    final layer = _layerOfShape(shape);
+    Color seed = layer?.color ?? const Color(0xFF222222);
+    if (seed.alpha == 0) seed = const Color(0xFF808080); // layer had no fill
+
+    final pos = seedPos ?? _gradientCentroid(shape);
+    final sp = _spawnStopPoint(shape, pos);
+
+    shape.gradient =
+        LinearGradientFill(stops: [GradientStop(point: sp, color: seed)]);
+
+    _selectedShape = shape;
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  /// Adds a new stop at [pos] (typically the right-click location) to [shape]'s
+  /// existing gradient. No-op if the shape has no gradient. If [color] is null,
+  /// the new stop takes a CONTRASTING default (white over a dark reference, black
+  /// over a light one) so the gradient is immediately visible; the user then sets
+  /// it via the color picker.
+  void addGradientStop(CompassShape shape, Offset pos, {Color? color}) {
+    final g = shape.gradient;
+    if (g == null) return;
+
+    Color c;
+    if (color != null) {
+      c = color;
+    } else {
+      final ref = g.stops.isNotEmpty ? g.stops.last.color : const Color(0xFF808080);
+      c = ref.computeLuminance() < 0.5 ? Colors.white : Colors.black;
+    }
+
+    final sp = _spawnStopPoint(shape, pos);
+    g.stops.add(GradientStop(point: sp, color: c));
+
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  /// Recolors the stop whose point is [stopPoint]. No-op if the shape has no
+  /// gradient or the point isn't one of its stops.
+  void setGradientStopColor(CompassShape shape, CompassPoint stopPoint, Color color) {
+    final g = shape.gradient;
+    if (g == null) return;
+    for (final s in g.stops) {
+      if (s.point == stopPoint) {
+        s.color = color;
+        saveSnapshot();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  /// Removes one stop by its point, drops that point, and -- if it was the last
+  /// stop -- nulls the gradient (revert to a flat layer fill). No-op if the point
+  /// isn't a stop of this shape's gradient.
+  void removeGradientStop(CompassShape shape, CompassPoint stopPoint) {
+    final g = shape.gradient;
+    if (g == null) return;
+    final idx = g.stops.indexWhere((s) => s.point == stopPoint);
+    if (idx == -1) return;
+
+    g.stops.removeAt(idx);
+    _detachStopPoint(stopPoint);
+    if (g.stops.isEmpty) shape.gradient = null;
+
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  /// Removes the whole gradient from [shape] (drops every stop point) and reverts
+  /// it to a flat layer fill.
+  void removeGradient(CompassShape shape) {
+    final g = shape.gradient;
+    if (g == null) return;
+    for (final s in g.stops) {
+      _detachStopPoint(s.point);
+    }
+    shape.gradient = null;
+
+    saveSnapshot();
+    notifyListeners();
+  }
+
   // ===========================================================================
 
   void toggleShapeVisibility(CompassShape shape) {
@@ -1461,10 +1714,22 @@ class CompassEngine extends ChangeNotifier {
   ///     spline kept referencing it: a dangling rotation pivot carrying ghost
   ///     attach edges on a dead object, self-healing only on save/reload. This
   ///     mirrors what the mesh case has always done with its anchor.
+  ///
+  /// GRADIENT STOPS are NOT shape geometry: a targeted stop point never kills a
+  /// shape. Before the sweep we strip targeted stops from every gradient (and
+  /// null a gradient emptied of its last stop). The stop points themselves are in
+  /// [targets] and get force-removed by the normal pool sweep below, with their
+  /// cohesion edges stripped -- so deleting a selected stop dot cleanly removes
+  /// that stop without touching the shape.
   void removePoints(Iterable<CompassPoint> targetsIn) {
     // Ignore points already gone (double-delete, cascade leftovers, stale UI).
     final targets = targetsIn.where(points.contains).toSet();
     if (targets.isEmpty) return;
+
+    // Sever gradient stops FIRST, so the force-remove below leaves no dangling
+    // stop reference. (The stop points remain in `targets` and are dropped by
+    // the normal pool + edge sweep; this only detaches the gradient's link.)
+    _detachGradientStopsInTargets(targets);
 
     // Points of shapes destroyed as a SIDE EFFECT (a dead line's other endpoint,
     // a collapsed spline's surviving nodes + anchor) -- collected and batch-GC'd
