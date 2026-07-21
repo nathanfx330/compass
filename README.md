@@ -8,7 +8,7 @@
 
 ---
 
-### 🚀 Why Compass? (The Elevator Pitch)
+###  Why Compass? (The Elevator Pitch)
 
 *   **Parametric Precision, Artist-Friendly UI:** Experience the exactness of unbreakable constraints without spreadsheets or code. Build living mathematical systems visually with intuitive drag-and-drop and right-click gestures.
 *   **Relationships over Pixels:** Bind shapes together with unbreakable rules (e.g., *"this circle's radius is exactly the distance between these two points"*). Move one element, and the entire system adapts instantly.
@@ -60,7 +60,7 @@ You are not pushing dead pixels around a canvas. You are constructing a living m
 
 ---
 
-### ✨ Current Features
+###  Current Features
 
 Compass is rapidly evolving into a desktop-grade parametric engine. It currently supports:
 
