@@ -1,4 +1,4 @@
-// lib/io/svg_exporter.dart
+// /lib/io/svg_exporter.dart
 
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -11,8 +11,9 @@ import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
 import '../models/geometry/rectangle.dart';
-import '../models/geometry/rhombus.dart'; // <--- NEW: rhombus
+import '../models/geometry/rhombus.dart'; 
 import '../models/geometry/mesh.dart'; 
+import '../models/geometry/gradient.dart'; // <--- NEW: Import gradient model
 
 class SVGExporter {
   static String sanitizeId(String rawId) {
@@ -25,6 +26,31 @@ class SVGExporter {
   // FLAT color, so smoothness comes only from making the facets smaller. 16 keeps
   // the file reasonable while reading as a smooth gradient at typical sizes.
   static const int _meshSvgSubdivisions = 16;
+
+  // The mirror modifier as an SVG transform string, applied to a <use> that
+  // instantiates the layer's rendered content group. This is the SVG counterpart
+  // of CompassLayer.mirrorMatrix, and reproduces the SAME reflection the renderer
+  // replays through canvas.transform(mirrorMatrix.storage): because the whole
+  // content group is reflected as a unit, masks (mask="url(#..)", userSpaceOnUse),
+  // linearGradients (userSpaceOnUse), and mesh clip paths all reflect WITH the
+  // geometry -- the clip/shader axis maps together exactly as on the raster side.
+  //
+  //   vertical axis at x=p:   x' = 2p - x  -> matrix(-1 0 0 1 2p 0)
+  //   horizontal axis at y=p: y' = 2p - y  -> matrix(1 0 0 -1 0 2p)
+  //
+  // Derived straight from mirrorAxis + mirrorPosition; no Matrix4 needed. The
+  // reflected half can extend past the viewBox and be clipped there -- this
+  // matches the PNG exporter, whose bbox likewise doesn't account for the mirror,
+  // so the two raster/vector outputs stay consistent. (Widening the frame for the
+  // mirror is a separate, cross-exporter change if ever wanted.)
+  static String _mirrorTransform(CompassLayer layer) {
+    final p = layer.mirrorPosition;
+    if (layer.mirrorAxis == MirrorAxis.vertical) {
+      return 'matrix(-1 0 0 1 ${2 * p} 0)';
+    } else {
+      return 'matrix(1 0 0 -1 0 ${2 * p})';
+    }
+  }
 
   // Flatten an arbitrary Path to an SVG path `d` string by walking its metrics.
   // Used for a mesh's boolean-carve clipPath, where the carved silhouette is an
@@ -150,7 +176,6 @@ class SVGExporter {
            if (maxXP > maxX) maxX = maxXP;
            if (maxYP > maxY) maxY = maxYP;
         } else if (shape is CompassRhombus) {
-           // <--- NEW: Rhombus Bounds
            final px1 = shape.p1.x.value; final py1 = shape.p1.y.value;
            final px2 = shape.p2.x.value; final py2 = shape.p2.y.value;
            final px3 = shape.p3.x.value; final py3 = shape.p3.y.value;
@@ -193,7 +218,10 @@ class SVGExporter {
     double height = maxY - minY;
 
     buffer.writeln('<?xml version="1.0" encoding="UTF-8"?>');
-    buffer.writeln('<svg xmlns="http://www.w3.org/2000/svg" viewBox="$minX $minY $width $height">');
+    // xmlns:xlink is declared so the mirror <use> can carry BOTH href and
+    // xlink:href -- modern renderers read href, older viewers / print RIPs /
+    // Inkscape-era tooling read xlink:href. Emitting both is the safe superset.
+    buffer.writeln('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="$minX $minY $width $height">');
 
     String toHex(Color c) {
       if (c == Colors.transparent) return 'none';
@@ -214,26 +242,14 @@ class SVGExporter {
       final sWidth = layer.strokeWidth;
       final cleanLayerId = sanitizeId(layer.id);
 
+      // The id of THIS layer's rendered content group. The mirror <use> below
+      // references it to reflect the whole layer as a unit.
+      final contentId = 'layer_${cleanLayerId}_content';
+
       final addShapes = layer.shapes.where((s) => s.isVisible && s.operation == CompassBooleanOp.add).toList();
       final subShapes = layer.shapes.where((s) => s.isVisible && s.operation == CompassBooleanOp.subtract).toList();
 
       // --- STROKE-STACK contributors (outline-as-boolean) ---
-      // A shape's stroke stack is INDEPENDENT of its fill op, so the same circle can
-      // be an `add` disk AND carry subtract bands (the Ubuntu dot), or carry a mix
-      // of subtract and add bands (tree-rings). Only circles implement
-      // getStrokeOutlinePath today, so only circles populate the stroke passes;
-      // extend the type checks as more overrides land.
-      //
-      // We collect circles whose stack has ANY subtract band (for the mask) and ANY
-      // add band (for the add pass) -- the SAME circle can be in both, and even a
-      // single band's op decides only that band. Each band's radius comes from
-      // _circleStrokeBands (the outward-cursor walk), so the SVG geometry matches
-      // the canvas exactly.
-      //
-      // stroke-INTERSECT bands are intentionally unsupported in SVG: the <mask>
-      // model has no clean intersect primitive (fill-level intersect is likewise
-      // unhandled here), so faking it would diverge from the canvas. Such bands are
-      // silently skipped per-band -- PNG/canvas still honor them.
       final strokeCircles =
           layer.shapes.where((s) => s.isVisible && s is CompassCircle).cast<CompassCircle>().toList();
       bool circleHasSubtractBand(CompassCircle c) =>
@@ -246,62 +262,112 @@ class SVGExporter {
       final meshShapes = addShapes.whereType<CompassMesh>().toList();
       addShapes.removeWhere((s) => s is CompassMesh);
 
+      // --- NEW: Identify shapes that have a native LinearGradient Fill ---
+      final gradShapes = addShapes.where((s) => CompassLayer.hasLiftedGradientFill(s)).toList();
+
       buffer.writeln('  <!-- Layer: ${layer.name} -->');
 
-      // The mask is needed if ANYTHING carves this layer: a fill-subtract shape OR
-      // any circle with a subtract band in its stroke stack.
+      // The defs block is needed if ANYTHING carves this layer (masks) OR if we have gradients.
       final bool needsMask = subShapes.isNotEmpty || strokeSubCircles.isNotEmpty;
 
-      if (needsMask) {
-        final maskId = 'mask_$cleanLayerId';
+      if (needsMask || gradShapes.isNotEmpty) {
         buffer.writeln('  <defs>');
-        buffer.writeln('    <mask id="$maskId" maskUnits="userSpaceOnUse" x="$minX" y="$minY" width="$width" height="$height">');
         
-        buffer.writeln('      <rect x="$minX" y="$minY" width="$width" height="$height" fill="white" />');
-        
-        for (var shape in subShapes) {
-          if (shape is CompassCircle) {
-            buffer.writeln('      <circle cx="${shape.center.x.value}" cy="${shape.center.y.value}" r="${shape.radius.value}" fill="black" />');
-          } else if (shape is CompassRectangle) { 
-            final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
-            buffer.writeln('      <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="black" />');
-          } else if (shape is CompassRhombus) {
-            // <--- NEW: Rhombus Mask logic
-            final pts = '${shape.p1.x.value},${shape.p1.y.value} ${shape.p2.x.value},${shape.p2.y.value} ${shape.p3.x.value},${shape.p3.y.value} ${shape.p4.x.value},${shape.p4.y.value}';
-            buffer.writeln('      <polygon points="$pts" fill="black" />');
-          } else if (shape is CompassXSpline) {
-            buffer.writeln('      <path d="${shape.getSvgPathData()}" fill="black" fill-rule="evenodd" />');
-          }
-        }
-
-        // Each circle's SUBTRACT bands carve the mask: the ring band reads black
-        // (cut), the inner hole stays white (kept), because the even-odd path leaves
-        // the center uncovered. This is what bites the Ubuntu rim gap, and stacks
-        // for concentric subtract rings. Bands are walked in outward order; only
-        // subtract bands are emitted here (add bands go in the add pass, intersect
-        // bands are skipped). A subtract band paints NOTHING visible -- it only
-        // carves -- so a region's color never enters the mask.
-        for (var circle in strokeSubCircles) {
-          for (final band in _circleStrokeBands(circle)) {
-            if (band.region.op != CompassBooleanOp.subtract) continue;
-            final d = _circleBandSvgData(circle, band.width, band.innerOffset);
-            if (d.isNotEmpty) {
-              buffer.writeln('      <path d="$d" fill="black" fill-rule="evenodd" />');
+        // Output Subtract Masks
+        if (needsMask) {
+          final maskId = 'mask_$cleanLayerId';
+          buffer.writeln('    <mask id="$maskId" maskUnits="userSpaceOnUse" x="$minX" y="$minY" width="$width" height="$height">');
+          buffer.writeln('      <rect x="$minX" y="$minY" width="$width" height="$height" fill="white" />');
+          
+          for (var shape in subShapes) {
+            if (shape is CompassCircle) {
+              buffer.writeln('      <circle cx="${shape.center.x.value}" cy="${shape.center.y.value}" r="${shape.radius.value}" fill="black" />');
+            } else if (shape is CompassRectangle) { 
+              final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
+              buffer.writeln('      <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="black" />');
+            } else if (shape is CompassRhombus) {
+              final pts = '${shape.p1.x.value},${shape.p1.y.value} ${shape.p2.x.value},${shape.p2.y.value} ${shape.p3.x.value},${shape.p3.y.value} ${shape.p4.x.value},${shape.p4.y.value}';
+              buffer.writeln('      <polygon points="$pts" fill="black" />');
+            } else if (shape is CompassXSpline) {
+              buffer.writeln('      <path d="${shape.getSvgPathData()}" fill="black" fill-rule="evenodd" />');
             }
           }
+
+          // Output Circle Subtract Strokes into the Mask
+          for (var circle in strokeSubCircles) {
+            for (final band in _circleStrokeBands(circle)) {
+              if (band.region.op != CompassBooleanOp.subtract) continue;
+              final d = _circleBandSvgData(circle, band.width, band.innerOffset);
+              if (d.isNotEmpty) {
+                buffer.writeln('      <path d="$d" fill="black" fill-rule="evenodd" />');
+              }
+            }
+          }
+          buffer.writeln('    </mask>');
+        }
+
+        // --- Output <linearGradient> Definitions ---
+        for (int i = 0; i < gradShapes.length; i++) {
+          final shape = gradShapes[i];
+          final g = shape.gradient!;
+          final gradId = 'grad_${cleanLayerId}_$i';
+          
+          final axis = g.axis;
+          if (axis != null) {
+            final a = axis.$1;
+            final b = axis.$2;
+            
+            // gradientUnits="userSpaceOnUse" locks the gradient to our coordinate system mathematically
+            buffer.writeln('    <linearGradient id="$gradId" x1="${a.dx}" y1="${a.dy}" x2="${b.dx}" y2="${b.dy}" gradientUnits="userSpaceOnUse">');
+            
+            final axisVec = b - a;
+            final len2 = axisVec.dx * axisVec.dx + axisVec.dy * axisVec.dy;
+            
+            final resolved = <(double, Color)>[];
+            for (final s in g.stops) {
+              double t = 0.0;
+              if (len2 >= 1e-9) {
+                final rel = Offset(s.point.x.value, s.point.y.value) - a;
+                t = ((rel.dx * axisVec.dx + rel.dy * axisVec.dy) / len2).clamp(0.0, 1.0);
+              }
+              resolved.add((t, s.color));
+            }
+            resolved.sort((x, y) => x.$1.compareTo(y.$1));
+            
+            for (final r in resolved) {
+              buffer.writeln('      <stop offset="${(r.$1 * 100).toStringAsFixed(2)}%" stop-color="${toHexOpaque(r.$2)}" />');
+            }
+            
+            buffer.writeln('    </linearGradient>');
+          }
         }
         
-        buffer.writeln('    </mask>');
         buffer.writeln('  </defs>');
-        
-        buffer.writeln('  <g mask="url(#$maskId)">');
+      }
+      
+      // Apply the layer-wide Mask if it exists. The content group is ID'd so the
+      // mirror <use> below can instantiate (and reflect) the whole layer -- mask,
+      // gradients, meshes and all -- in one shot.
+      if (needsMask) {
+        final maskId = 'mask_$cleanLayerId';
+        buffer.writeln('  <g id="$contentId" mask="url(#$maskId)">');
       } else {
-        buffer.writeln('  <g>');
+        buffer.writeln('  <g id="$contentId">');
       }
 
       for (var shape in addShapes) {
+        String shapeFillHex = fillHex;
+        
+        // Look up our Dynamic Fills (Gradient URL vs Base Hex Color)
+        if (CompassLayer.hasLiftedGradientFill(shape)) {
+          final idx = gradShapes.indexOf(shape);
+          shapeFillHex = 'url(#grad_${cleanLayerId}_$idx)';
+        } else if (shape.gradient != null && shape.gradient!.solidColor != null) {
+          shapeFillHex = toHexOpaque(shape.gradient!.solidColor!);
+        }
+
         if (shape is CompassCircle) {
-          buffer.writeln('    <circle cx="${shape.center.x.value}" cy="${shape.center.y.value}" r="${shape.radius.value}" fill="$fillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
+          buffer.writeln('    <circle cx="${shape.center.x.value}" cy="${shape.center.y.value}" r="${shape.radius.value}" fill="$shapeFillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
         } else if (shape is CompassLine) {
           buffer.writeln('    <line x1="${shape.start.x.value}" y1="${shape.start.y.value}" x2="${shape.end.x.value}" y2="${shape.end.y.value}" stroke="$strokeHex" stroke-width="$sWidth" />');
         } else if (shape is CompassSpiral) {
@@ -319,42 +385,23 @@ class SVGExporter {
           buffer.writeln('" fill="none" stroke="$strokeHex" stroke-width="$sWidth" />');
         } else if (shape is CompassRectangle) { 
           final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
-          buffer.writeln('    <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="$fillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
+          buffer.writeln('    <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="$shapeFillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
         } else if (shape is CompassRhombus) {
-          // <--- NEW: Rhombus normal SVG draw
           final pts = '${shape.p1.x.value},${shape.p1.y.value} ${shape.p2.x.value},${shape.p2.y.value} ${shape.p3.x.value},${shape.p3.y.value} ${shape.p4.x.value},${shape.p4.y.value}';
-          buffer.writeln('    <polygon points="$pts" fill="$fillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
+          buffer.writeln('    <polygon points="$pts" fill="$shapeFillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
         } else if (shape is CompassXSpline) {
-          // NEW: Distinguish between standard strokes/fills and variable-width Area Strokes
           if (shape.hasWidthProfile) {
-            // A CLOSED width spline is now a first-class stroke: its centerline
-            // region is an inner fill (fill color), with the variable-width ribbon
-            // (stroke color) drawn ON TOP. Emit the centerline fill first so the
-            // ribbon paints over it, matching the renderer's z-order (fill in 1a,
-            // area stroke in 1c). Gate on a real fill color, mirroring the renderer's
-            // `if (layer.color != Colors.transparent)`. An OPEN width spline encloses
-            // no area, so it gets only the ribbon.
-            if (shape.isClosed && fillHex != 'none') {
-              buffer.writeln('    <path d="${shape.getCenterSvgPathData()}" fill="$fillHex" fill-rule="evenodd" stroke="none" />');
+            if (shape.isClosed && shapeFillHex != 'none') {
+              buffer.writeln('    <path d="${shape.getCenterSvgPathData()}" fill="$shapeFillHex" fill-rule="evenodd" stroke="none" />');
             }
             buffer.writeln('    <path d="${shape.getSvgPathData()}" fill="$strokeHex" fill-rule="evenodd" stroke="none" />');
           } else {
-            buffer.writeln('    <path d="${shape.getSvgPathData()}" fill="${shape.isClosed ? fillHex : 'none'}" fill-rule="evenodd" stroke="$strokeHex" stroke-width="$sWidth" />');
+            buffer.writeln('    <path d="${shape.getSvgPathData()}" fill="${shape.isClosed ? shapeFillHex : 'none'}" fill-rule="evenodd" stroke="$strokeHex" stroke-width="$sWidth" />');
           }
         }
       }
 
       // --- STROKE-ADD bands (filled ring as standalone geometry) ---
-      // Each circle's ADD bands paint as even-odd outer/inner paths at their stacked
-      // radii. The fill is the band's OWN color when one is set, else the layer FILL
-      // color (null = inherit) -- exactly matching the canvas/PNG overpaint, where a
-      // null-color add band rides the layer fill and a colored one paints its own
-      // hue. Drawn here in the add pass, INSIDE the same masked <g>, so a
-      // fill-subtract or a subtract band elsewhere carves them just like any other
-      // add geometry. A circle that is BOTH fill-add and carries add bands emits its
-      // disk above AND its rings here; a circle with a mix of add and subtract bands
-      // has its subtract bands in the mask above and its add bands here. Bands walked
-      // in outward order.
       for (var circle in strokeCircles) {
         for (final band in _circleStrokeBands(circle)) {
           if (band.region.op != CompassBooleanOp.add) continue;
@@ -367,17 +414,6 @@ class SVGExporter {
       }
 
       // --- GRADIENT MESHES (faceted flat-polygon approximation) ---
-      // SVG has no usable Gouraud/bilinear mesh primitive (SVG 2 <mesh> exists on
-      // paper but effectively no renderer supports it), so each subdivided patch
-      // quad is emitted as a flat <polygon> filled with its bilinear-CENTER color
-      // (the average of its four corner colors). As subdivision rises the facets
-      // shrink and the result converges to the true gradient -- the same tradeoff
-      // the OBJ scanline mesh makes between fidelity and primitive count.
-      //
-      // The boolean carve is a per-mesh <clipPath> built from the SAME boolean
-      // stack the canvas uses (getLayerMeshClipPath), flattened to a polyline path.
-      // Each mesh's facets are wrapped in a <g clip-path="..."> so subtract/
-      // intersect shapes carve the SVG exactly as they carve on-canvas.
       for (int mi = 0; mi < meshShapes.length; mi++) {
         final mesh = meshShapes[mi];
         if (mesh.rows < 2 || mesh.cols < 2) continue;
@@ -399,7 +435,6 @@ class SVGExporter {
 
         final int sub = _meshSvgSubdivisions;
         Offset nodeOffset(int r, int c) {
-          // FIX: Access the point property from the CompassSplineNode
           final p = mesh.nodes[r * mesh.cols + c].point;
           return Offset(p.x.value, p.y.value);
         }
@@ -423,7 +458,6 @@ class SVGExporter {
                 final u0 = j / sub;
                 final u1 = (j + 1) / sub;
 
-                // Four corners of this sub-quad in position space (bilinear).
                 Offset bp(double u, double v) {
                   final top = Offset.lerp(pTL, pTR, u)!;
                   final bot = Offset.lerp(pBL, pBR, u)!;
@@ -435,7 +469,6 @@ class SVGExporter {
                 final cc = bp(u1, v1);
                 final d = bp(u0, v1);
 
-                // Flat fill = bilinear color at the sub-quad CENTER.
                 final uc = (u0 + u1) / 2;
                 final vc = (v0 + v1) / 2;
                 final topK = Color.lerp(kTL, kTR, uc)!;
@@ -444,7 +477,6 @@ class SVGExporter {
 
                 final pts =
                     '${a.dx},${a.dy} ${b.dx},${b.dy} ${cc.dx},${cc.dy} ${d.dx},${d.dy}';
-                // shape-rendering=crispEdges hides hairline seams between facets.
                 buffer.writeln(
                     '      <polygon points="$pts" fill="${toHexOpaque(cellColor)}" stroke="none" shape-rendering="crispEdges" />');
               }
@@ -456,6 +488,21 @@ class SVGExporter {
       }
 
       buffer.writeln('  </g>');
+
+      // --- MIRROR MODIFIER ---
+      // Reflect the ENTIRE rendered layer by instantiating its content group
+      // through a transformed <use>. This is the SVG analogue of the renderer's
+      // "replay the whole pass through canvas.transform(mirrorMatrix)" -- the one
+      // <use> transform maps flat fills, masked subtractions, userSpaceOnUse
+      // gradients (axis reflects with the geometry), stroke-add bands, and mesh
+      // clip+facets all together, so a subtract on the master half carves the
+      // reflected half symmetrically. Emitting both href and xlink:href covers
+      // modern and legacy renderers. Nothing here duplicates ids: the content is
+      // written once and merely referenced.
+      if (layer.mirrorEnabled) {
+        final t = _mirrorTransform(layer);
+        buffer.writeln('  <use xlink:href="#$contentId" href="#$contentId" transform="$t" />');
+      }
     }
 
     buffer.writeln('</svg>');

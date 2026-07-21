@@ -1955,7 +1955,7 @@ class CompassEngine extends ChangeNotifier {
     );
   }
   
-  Future<String?> toASCII({int columns = 100, bool invert = false}) {
-    return ASCIIExporter.toASCII(this, columns: columns, invert: invert);
+  Future<String?> toASCII({int columns = 100, bool invert = false, bool dither = false}) {
+    return ASCIIExporter.toASCII(this, columns: columns, invert: invert, dither: dither);
   }
 }

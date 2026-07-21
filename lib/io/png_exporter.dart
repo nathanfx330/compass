@@ -15,6 +15,7 @@ import '../models/geometry/rectangle.dart';
 import '../models/geometry/rhombus.dart'; // <--- NEW: rhombus
 import '../models/geometry/spline.dart';
 import '../models/geometry/mesh.dart';
+import '../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient
 
 /// Rasterizes the pure artwork (no scaffolding) to a PNG by re-rendering the
 /// model offscreen. Mirrors SVGExporter's philosophy: export the *design*, not
@@ -171,6 +172,40 @@ class PNGExporter {
           ..style = PaintingStyle.fill
           ..isAntiAlias = true;
         canvas.drawPath(fillPath, fillPaint);
+      }
+
+      // 1a'. Per-shape LINEAR FILL GRADIENTS
+      // Lifted from the flat fill union; painted here with their own shader.
+      for (var shape in layer.shapes) {
+        if (!shape.isVisible) continue;
+        if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
+
+        final g = shape.gradient!;
+        final clip = layer.getLayerGradientClipPath(shape);
+        if (clip.computeMetrics().isEmpty) continue;
+
+        final gradPaint = Paint()
+          ..isAntiAlias = true
+          ..style = PaintingStyle.fill;
+
+        final shader = g.buildShader();
+        if (shader != null) {
+          gradPaint.shader = shader; 
+        } else {
+          final solid = g.solidColor; 
+          if (solid == null) continue; 
+          gradPaint.color = solid;
+        }
+
+        canvas.drawPath(clip, gradPaint);
+
+        // --- MIRROR MODIFIER: second gradient pass ---
+        if (layer.mirrorEnabled) {
+          canvas.save();
+          canvas.transform(layer.mirrorMatrix.storage);
+          canvas.drawPath(clip, gradPaint);
+          canvas.restore();
+        }
       }
 
       // 1b. Stroke Standard Geometry (Uniform outlines)

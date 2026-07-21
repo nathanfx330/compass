@@ -179,7 +179,7 @@ class CompassRenderer extends CustomPainter {
         // color can't express, so a gradient shows even on a transparent layer.
         // No explicit clipPath needed (unlike the mesh, whose drawVertices spans
         // a whole rect): filling the clip path directly bounds the shader to
-        // exactly that region. Save/restore only wraps the mirror transform.
+        // exactly that region.
         for (var shape in layer.shapes) {
           if (!shape.isVisible) continue;
           if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
@@ -203,18 +203,27 @@ class CompassRenderer extends CustomPainter {
 
           canvas.drawPath(clip, gradPaint);
 
-          // --- MIRROR MODIFIER: second gradient pass ---
-          // A shader fill is a paint, not a Path, so (like a mesh) it can't ride
-          // the layer's path-union mirror. Its reflection is a REPLAY of the same
-          // clip + fill inside canvas.transform(mirrorMatrix): the transform maps
-          // the clip region AND the shader's world-space axis together, so the
-          // reflected gradient runs in the mirrored direction with no extra math.
-          // This is exactly why getLayerGradientClipPath stays unmirrored.
+          // --- MIRROR MODIFIER: extend the gradient into the reflected half ---
+          // The mirror fuses the master half and its reflection into ONE shape
+          // (the "borg"), and the gradient must shade that whole fused silhouette
+          // COHESIVELY -- as if the shape simply grew into the new area, sampling
+          // the SAME world-space ramp across the seam. It is NOT a second,
+          // reflected gradient.
+          //
+          // So we reflect ONLY the clip PATH (clip.transform), and fill it with
+          // the SAME untransformed gradPaint. The shader keeps its original
+          // world-space axis, so the ramp continues in the same direction into
+          // the reflected region and the color flows straight across the seam.
+          //
+          // Contrast with the mesh pass at 1d, which DOES transform the whole
+          // canvas: a mesh's color field is glued to its own moving vertices, so
+          // its reflection must carry the vertices (and thus the field) through
+          // the mirror. A linear gradient is a world-space ramp, not vertex-glued,
+          // so mirroring its axis would wrongly fold the color at the seam --
+          // exactly the duplicate-gradient artifact we're avoiding here.
           if (layer.mirrorEnabled) {
-            canvas.save();
-            canvas.transform(layer.mirrorMatrix.storage);
-            canvas.drawPath(clip, gradPaint);
-            canvas.restore();
+            final reflectedClip = clip.transform(layer.mirrorMatrix.storage);
+            canvas.drawPath(reflectedClip, gradPaint);
           }
         }
 
@@ -291,7 +300,9 @@ class CompassRenderer extends CustomPainter {
           // A mesh can't ride the layer's path-union mirror (it paints via
           // drawVertices, not a Path), so its reflection is a REPLAY: the same
           // clip + drawVertices inside canvas.transform(mirrorMatrix), which
-          // maps clip and vertices together. This is exactly why
+          // maps clip and vertices together. Unlike the linear gradient above,
+          // a mesh's color field is glued to its vertices, so the field MUST
+          // travel through the mirror with them. This is exactly why
           // getLayerMeshClipPath stays unmirrored. Save/restore-scoped so the
           // reflection transform never leaks into the next mesh or layer.
           if (layer.mirrorEnabled) {

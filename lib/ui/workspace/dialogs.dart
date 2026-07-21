@@ -1,4 +1,5 @@
-// /lib/ui/workspace/dialogs.dart
+// lib/ui/workspace/dialogs.dart
+
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -523,11 +524,12 @@ class CompassDialogs {
     );
   }
 
-  // --- NEW: ASCII Exporter Dialog ---
+  // --- ASCII Exporter Dialog ---
   static void showExportASCII(BuildContext context, CompassEngine engine) {
     final TextEditingController filenameController = TextEditingController(text: 'compass_art.txt');
     double columnWidth = 100.0;
     bool invertColors = false;
+    bool useDither = false; // <--- NEW: Dither state
 
     showDialog(
       context: context,
@@ -572,6 +574,15 @@ class CompassDialogs {
                     controlAffinity: ListTileControlAffinity.leading,
                     onChanged: (val) => setLocalState(() => invertColors = val ?? false),
                   ),
+                  // <--- NEW: Dither Checkbox --->
+                  CheckboxListTile(
+                    title: const Text('Floyd-Steinberg Dithering'),
+                    subtitle: const Text('Smooths gradients and shading using dot patterns.'),
+                    value: useDither,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    onChanged: (val) => setLocalState(() => useDither = val ?? false),
+                  ),
                 ],
               ),
               actions: [
@@ -590,6 +601,7 @@ class CompassDialogs {
                       final String? asciiData = await engine.toASCII(
                         columns: columnWidth.round(),
                         invert: invertColors,
+                        dither: useDither, // <--- NEW: Pass dither to engine
                       );
                       
                       if (asciiData == null || asciiData.isEmpty) {

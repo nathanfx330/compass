@@ -12,6 +12,7 @@ import 'models/geometry/circle.dart';
 import 'models/geometry/rectangle.dart';
 import 'models/geometry/spline.dart';
 import 'models/geometry/mesh.dart'; 
+import 'models/geometry/gradient.dart'; // <--- NEW: carry a lifted fill gradient onto the bake
 import 'models/layer.dart';
 import 'path_baker.dart';
 
@@ -277,6 +278,42 @@ class ShapeConverter {
       }
     }
 
+    // --- LIFTED-GRADIENT SILHOUETTES (else "nothing to bake") ---
+    // getLayerFillPath() deliberately SKIPS every hasLiftedGradientFill shape:
+    // its interior is painted separately by the renderer (compass_renderer 1a'),
+    // not unioned into the flat fill. So a layer whose fillable geometry lives in
+    // a gradient shape hands an EMPTY path to the baker -> contours.isEmpty ->
+    // "nothing to bake". This is the real cause of the mirror-bake failure (a
+    // mirrored NON-gradient layer bakes fine, because getLayerFillPath already
+    // bakes the mirror into flat geometry).
+    //
+    // Re-introduce each gradient shape's boolean-carved silhouette here.
+    // getLayerGradientClipPath(shape) is the SAME per-shape clip the renderer
+    // fills, so subtracts/holes carved by shapes above are already baked into it.
+    //
+    // MIRROR: these clips come back as the UNMIRRORED master half only -- exactly
+    // as in the renderer, where the reflected half is drawn by transforming the
+    // clip, not the canvas. So we reflect each clip the same way
+    // (clip.transform(mirrorMatrix)) and union it in, fusing master + reflection
+    // into the single "borg" silhouette the baker then walks as ONE shape -- the
+    // spline outline flips and morphs into the extended form, as intended.
+    for (final shape in layer.shapes) {
+      if (!shape.isVisible) continue;
+      if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
+
+      final clip = layer.getLayerGradientClipPath(shape);
+      if (clip.computeMetrics().isEmpty) continue;
+
+      masterPath = masterPath.computeMetrics().isEmpty
+          ? clip
+          : Path.combine(PathOperation.union, masterPath, clip);
+
+      if (layer.mirrorEnabled) {
+        final reflected = clip.transform(layer.mirrorMatrix.storage);
+        masterPath = Path.combine(PathOperation.union, masterPath, reflected);
+      }
+    }
+
     final contours = PathBaker.bake(masterPath);
     if (contours.isEmpty) return;
 
@@ -301,6 +338,23 @@ class ShapeConverter {
       strokeWidth: layer.strokeWidth,
     );
 
+    // --- GRADIENT TO CARRY ONTO THE BAKE ---
+    // The bake fused every shape (flat + gradient + mirror reflection) into ONE
+    // world-space silhouette. A linear fill gradient is a WORLD-SPACE ramp (its
+    // axis is the line between two world-positioned stop points), so the SAME
+    // axis + stops shade the baked silhouette identically to how they shaded the
+    // borg -- the gradient "carries out as if the shape simply extended." We take
+    // the first visible lifted-gradient shape's fill as the source (the borg case
+    // has exactly one); it's cloned per ADD spline below. Null => nothing to carry
+    // (a purely flat layer bakes exactly as before).
+    LinearGradientFill? sourceGradient;
+    for (final shape in layer.shapes) {
+      if (!shape.isVisible) continue;
+      if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
+      sourceGradient = shape.gradient;
+      break;
+    }
+
     for (final contour in contours) {
       final spline = CompassXSpline(isClosed: contour.isClosed, anchorPoint: anchor)
         ..operation = contour.isHole ? CompassBooleanOp.subtract : CompassBooleanOp.add
@@ -321,6 +375,31 @@ class ShapeConverter {
         );
         node.tension.addListener(engine.notifyListeners);
         spline.addNode(node);
+      }
+
+      // --- CARRY THE GRADIENT (ADD splines only) ---
+      // Holes are boolean carves, not fills, so they get no gradient. For a real
+      // ADD contour we CLONE the source gradient with FRESH stop points at the
+      // same world coordinates -- each registered in engine.points, listener-
+      // wired, and anchored to this bake's anchor exactly like the node points
+      // above. That reuses the same drag/rotate/cohere/serialize/undo machinery
+      // every other point uses (per GradientStop's contract), and -- crucially --
+      // the baked gradient shares NOTHING mutable with the now-hidden source
+      // layer, so hiding or later deleting that source can't pull the ramp's stops
+      // out from under the bake. Same world coords => identical shading. A fresh
+      // clone PER add spline (not a shared object) keeps each independently
+      // editable.
+      if (!contour.isHole && sourceGradient != null) {
+        final clonedStops = <GradientStop>[];
+        for (final s in sourceGradient.stops) {
+          final gp = CompassPoint(x: s.point.x.value, y: s.point.y.value);
+          engine.points.add(gp);
+          gp.x.addListener(engine.notifyListeners);
+          gp.y.addListener(engine.notifyListeners);
+          anchor.attach(gp);
+          clonedStops.add(GradientStop(point: gp, color: s.color));
+        }
+        spline.gradient = LinearGradientFill(stops: clonedStops);
       }
 
       baked.shapes.add(spline);

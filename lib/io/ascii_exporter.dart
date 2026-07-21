@@ -1,21 +1,24 @@
-// /lib/io/ascii_exporter.dart
+// lib/io/ascii_exporter.dart
 
 import 'dart:math';
+import 'dart:typed_data'; // <--- NEW: needed for Float32List
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import '../engine.dart';
+import '../models/layer.dart';
 import '../models/geometry/shape.dart';
 import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
-import '../models/geometry/spiral.dart'; // <--- FIXED: Added missing import
+import '../models/geometry/spiral.dart'; 
 import '../models/geometry/rectangle.dart';
 import '../models/geometry/rhombus.dart';
 import '../models/geometry/spline.dart';
 import '../models/geometry/mesh.dart';
+import '../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient
 
 class ASCIIExporter {
-  // <--- CHANGED: High-fidelity 70-character ASCII ramp for better shading --->
+  // High-fidelity 70-character ASCII ramp for better shading
   static const String _ramp = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@\$";
 
   static double _circleStrokeOuterRadius(CompassCircle circle) {
@@ -31,7 +34,8 @@ class ASCIIExporter {
     CompassEngine engine, {
     int columns = 100,
     bool invert = false,
-    double fontAspectRatio = 0.45, // <--- NEW: Dynamic Aspect Ratio
+    bool dither = false, // <--- NEW: Dithering toggle
+    double fontAspectRatio = 0.45, 
   }) async {
     // ---- 1. Compute the artwork bounding box ----
     double minX = double.infinity, minY = double.infinity;
@@ -96,8 +100,6 @@ class ASCIIExporter {
     if (width <= 0 || height <= 0) return null;
 
     // ---- 2. Map coordinates to a text grid ----
-    // Font characters are typically roughly twice as tall as they are wide.
-    // <--- CHANGED: Use the user-defined aspect ratio instead of a hardcoded 0.45 --->
     final int rows = (height / width * columns * fontAspectRatio).ceil();
     if (rows <= 0) return null;
 
@@ -119,9 +121,43 @@ class ASCIIExporter {
       final layerPath = layer.getLayerPath();
       final strokeAreaPath = layer.getLayerStrokeAreaPath();
 
+      // 1a. Fill Standard Geometry
       if (layer.color != Colors.transparent) {
         canvas.drawPath(fillPath, Paint()..color = layer.color..style = PaintingStyle.fill..isAntiAlias = false);
       }
+
+      // 1a'. Per-shape LINEAR FILL GRADIENTS
+      for (var shape in layer.shapes) {
+        if (!shape.isVisible) continue;
+        if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
+
+        final g = shape.gradient!;
+        final clip = layer.getLayerGradientClipPath(shape);
+        if (clip.computeMetrics().isEmpty) continue;
+
+        final gradPaint = Paint()
+          ..isAntiAlias = false
+          ..style = PaintingStyle.fill;
+
+        final shader = g.buildShader();
+        if (shader != null) {
+          gradPaint.shader = shader; 
+        } else {
+          final solid = g.solidColor; 
+          if (solid == null) continue; 
+          gradPaint.color = solid;
+        }
+
+        canvas.drawPath(clip, gradPaint);
+
+        if (layer.mirrorEnabled) {
+          canvas.save();
+          canvas.transform(layer.mirrorMatrix.storage);
+          canvas.drawPath(clip, gradPaint);
+          canvas.restore();
+        }
+      }
+
       if (layer.strokeColor != Colors.transparent && layer.strokeWidth > 0) {
         canvas.drawPath(layerPath, Paint()..color = layer.strokeColor..strokeWidth = layer.strokeWidth..style = PaintingStyle.stroke..isAntiAlias = false);
       }
@@ -161,7 +197,7 @@ class ASCIIExporter {
     // ---- 4. Convert pixels to ASCII ----
     final picture = recorder.endRecording();
     final image = await picture.toImage(columns, rows);
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba); // <--- FIXED: rawRgba
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba); 
     image.dispose();
     picture.dispose();
     
@@ -172,6 +208,8 @@ class ASCIIExporter {
     final List<String> rampChars = invert ? _ramp.split('').reversed.toList() : _ramp.split('');
     final int rampMax = rampChars.length - 1;
 
+    // We extract the luminance to a 1D float array so we can easily mutate it for dithering.
+    final lumArray = Float32List(columns * rows);
     for (int y = 0; y < rows; y++) {
       for (int x = 0; x < columns; x++) {
         final int i = (y * columns + x) * 4;
@@ -180,11 +218,39 @@ class ASCIIExporter {
         final int b = bytes[i + 2];
         
         // Luminance formula (0 = black, 255 = white)
-        final double lum = (0.299 * r + 0.587 * g + 0.114 * b);
+        lumArray[y * columns + x] = (0.299 * r + 0.587 * g + 0.114 * b);
+      }
+    }
+
+    // Floyd-Steinberg Dithering Pass & Character Mapping
+    for (int y = 0; y < rows; y++) {
+      for (int x = 0; x < columns; x++) {
+        final int index = y * columns + x;
+        final double lum = lumArray[index].clamp(0.0, 255.0);
         
         // Map brightness to the ASCII ramp (0 maps to thickest character, 255 to blank)
         final int charIndex = ((255.0 - lum) / 255.0 * rampMax).round().clamp(0, rampMax);
         sb.write(rampChars[charIndex]);
+
+        if (dither) {
+          // Find the exact luminance value this character represents to find the error margin
+          final double quantizedLum = 255.0 - (charIndex / rampMax * 255.0);
+          final double error = lum - quantizedLum;
+
+          // Diffuse the error to adjacent cells (Floyd-Steinberg pattern)
+          if (x + 1 < columns) {
+            lumArray[index + 1] += error * 7 / 16;
+          }
+          if (x - 1 >= 0 && y + 1 < rows) {
+            lumArray[index + columns - 1] += error * 3 / 16;
+          }
+          if (y + 1 < rows) {
+            lumArray[index + columns] += error * 5 / 16;
+          }
+          if (x + 1 < columns && y + 1 < rows) {
+            lumArray[index + columns + 1] += error * 1 / 16;
+          }
+        }
       }
       sb.writeln(); // Newline at the end of each row
     }

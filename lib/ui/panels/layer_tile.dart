@@ -146,6 +146,32 @@ class _LayerTileState extends State<LayerTile> {
     return shape is CompassCircle;
   }
 
+  // Whether a layer has any fillable area the X-Spline baker can walk. This
+  // mirrors the SOURCE SET that ShapeConverter.bakeLayer now unions: the flat
+  // boolean fill, the area-stroke path, AND every visible lifted-gradient
+  // shape's silhouette.
+  //
+  // That last term is the one that matters here: getLayerFillPath() deliberately
+  // SKIPS hasLiftedGradientFill shapes (their interior is painted separately by
+  // the renderer, not unioned into the flat fill), so a layer whose geometry
+  // lives entirely in a gradient shape reports fill+area EMPTY -- even though the
+  // baker can now bake it. Without this the guard fired "nothing to bake" and
+  // returned before bakeLayer ever ran. The mirror reflection isn't checked: if
+  // the master-half clip is non-empty there's bakeable area, and the reflection
+  // only adds more.
+  static bool _hasBakeableArea(CompassLayer layer) {
+    if (layer.getLayerFillPath().computeMetrics().isNotEmpty) return true;
+    if (layer.getLayerStrokeAreaPath().computeMetrics().isNotEmpty) return true;
+    for (final shape in layer.shapes) {
+      if (!shape.isVisible) continue;
+      if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
+      if (layer.getLayerGradientClipPath(shape).computeMetrics().isNotEmpty) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   Color _getOpColor(CompassBooleanOp op) {
     switch (op) {
       case CompassBooleanOp.add:
@@ -274,12 +300,11 @@ class _LayerTileState extends State<LayerTile> {
       if (!mounted) return;
       _beginRename();
     } else if (selected == 'bake') {
-      // Guard the silent no-op: check BOTH the standard fill and the area stroke
-      // path to ensure geometry exists.
-      final fillEmpty = layer.getLayerFillPath().computeMetrics().isEmpty;
-      final areaEmpty = layer.getLayerStrokeAreaPath().computeMetrics().isEmpty;
-
-      if (fillEmpty && areaEmpty) {
+      // Guard the silent no-op. _hasBakeableArea checks the flat fill, the area
+      // stroke, AND lifted-gradient silhouettes (which getLayerFillPath skips) --
+      // the same source set bakeLayer unions -- so a gradient/mirror layer is no
+      // longer wrongly rejected here before the baker ever runs.
+      if (!_hasBakeableArea(layer)) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -293,6 +318,13 @@ class _LayerTileState extends State<LayerTile> {
       engine.bakeLayer(layer);
     } else if (selected == 'bake_scifi') {
       // === Handle Triangulated Bake ===
+      // NOTE: intentionally NARROWER than the 'bake' guard above. The sci-fi
+      // path (bakeLayerToSciFiSkeleton) still sources purely from
+      // getLayerFillPath + area stroke and does NOT union lifted-gradient
+      // silhouettes, so it genuinely can't bake a pure-gradient layer yet.
+      // Keeping the check narrow gives a clear "nothing to bake" instead of
+      // passing through to a silent no-op. Switch this to _hasBakeableArea IF/
+      // WHEN bakeLayerToSciFiSkeleton learns to union gradient clips.
       final fillEmpty = layer.getLayerFillPath().computeMetrics().isEmpty;
       final areaEmpty = layer.getLayerStrokeAreaPath().computeMetrics().isEmpty;
 
