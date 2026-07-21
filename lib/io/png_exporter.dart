@@ -1,5 +1,6 @@
-// lib/io/png_exporter.dart
+// /lib/io/png_exporter.dart
 
+import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -12,10 +13,12 @@ import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/rectangle.dart';
-import '../models/geometry/rhombus.dart'; // <--- NEW: rhombus
+import '../models/geometry/rhombus.dart'; 
 import '../models/geometry/spline.dart';
 import '../models/geometry/mesh.dart';
-import '../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient
+import '../models/geometry/gradient.dart'; 
+
+enum PngExportStyle { standard, dithered, bubbleJet }
 
 /// Rasterizes the pure artwork (no scaffolding) to a PNG by re-rendering the
 /// model offscreen. Mirrors SVGExporter's philosophy: export the *design*, not
@@ -24,10 +27,6 @@ import '../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gr
 /// three outputs stay visually consistent.
 class PNGExporter {
   /// The outermost radius reached by a circle's OUTWARD-STACKED stroke stack.
-  /// Walks the same cursor the layer's boolean walk uses: region 0 starts exactly
-  /// at the shape's boundary (0.0), and each later band butts outward, adding its 
-  /// full width. Returns the bare radius when the stack is empty. Shared by the 
-  /// bbox math so the frame includes a fat stack of add-rings near the artwork edge.
   static double _circleStrokeOuterRadius(CompassCircle circle, CompassLayer layer) {
     double offset = 0.0;
     for (final region in circle.strokeRegions) {
@@ -38,10 +37,14 @@ class PNGExporter {
   }
 
   /// Renders the engine to PNG bytes at the given pixel scale (1.0 = artwork's
-  /// natural logical size, 2.0 = double resolution, etc). Background is left
-  /// fully transparent, matching the SVG export's no-background behavior, so
-  /// boolean subtractions read as transparency.
-  static Future<Uint8List?> toPNG(CompassEngine engine, {double scale = 2.0}) async {
+  /// natural logical size, 2.0 = double resolution, etc).
+  static Future<Uint8List?> toPNG(
+    CompassEngine engine, {
+    double scale = 2.0,
+    PngExportStyle style = PngExportStyle.standard,
+    bool grayscale = false,
+    double bubbleSize = 8.0,
+  }) async {
     // ---- 1. Compute the artwork bounding box (parallel to SVGExporter) ----
     double minX = double.infinity;
     double minY = double.infinity;
@@ -55,20 +58,11 @@ class PNGExporter {
       if (p.y.value > maxY) maxY = p.y.value;
     }
 
-    // Circles, rectangles, and thick Area Strokes extend past their defining points.
     // Widen the bounding box to include their full visual extent.
     for (var layer in engine.layers) {
       for (var shape in layer.shapes) {
         if (!shape.isVisible) continue;
         if (shape is CompassCircle) {
-          // A stroke stack bulges OUTWARD past the disk -- each band stacks on the
-          // last, so the cumulative outer radius is the sum walk in
-          // _circleStrokeOuterRadius (which reduces to r for an empty stack). Use
-          // the larger of the disk radius and that outer reach. Only ADD bands
-          // actually paint outside the disk -- a subtract/intersect band removes
-          // area already inside it -- but widening for the whole stack's extent is
-          // harmless (the margin is at most the summed widths) and keeps the rule
-          // simple and order-independent.
           final r = shape.radius.value;
           final effR = max(r, _circleStrokeOuterRadius(shape, layer));
           final cx = shape.center.x.value;
@@ -87,7 +81,6 @@ class PNGExporter {
           if (maxXP > maxX) maxX = maxXP;
           if (maxYP > maxY) maxY = maxYP;
         } else if (shape is CompassRhombus) {
-          // <--- NEW: Rhombus bounds math
           final px1 = shape.p1.x.value; final py1 = shape.p1.y.value;
           final px2 = shape.p2.x.value; final py2 = shape.p2.y.value;
           final px3 = shape.p3.x.value; final py3 = shape.p3.y.value;
@@ -106,11 +99,6 @@ class PNGExporter {
             if (bounds.bottom > maxY) maxY = bounds.bottom;
           }
         } else if (shape is CompassMesh) {
-          // A mesh is bounded by its nodes (all in engine.points, so already
-          // covered above) -- but its nodes can be dragged anywhere, and we want
-          // parity with how the renderer would show them, so widen explicitly to
-          // the mesh's own bounds. Cheap and keeps the frame correct even if the
-          // point loop above is ever changed.
           final bounds = shape.getBounds();
           if (bounds.left < minX) minX = bounds.left;
           if (bounds.top < minY) minY = bounds.top;
@@ -121,17 +109,9 @@ class PNGExporter {
     }
 
     if (minX == double.infinity) {
-      // Nothing to draw -- fall back to a default frame.
-      minX = 0;
-      minY = 0;
-      maxX = 1920;
-      maxY = 1080;
+      minX = 0; minY = 0; maxX = 1920; maxY = 1080;
     } else {
-      // Same 200-unit padding the SVG exporter applies.
-      minX -= 200;
-      minY -= 200;
-      maxX += 200;
-      maxY += 200;
+      minX -= 200; minY -= 200; maxX += 200; maxY += 200;
     }
 
     final double width = maxX - minX;
@@ -150,22 +130,14 @@ class PNGExporter {
     canvas.scale(scale);
     canvas.translate(-minX, -minY);
 
-    // Draw each visible layer exactly as CompassRenderer does for the master
-    // boolean fill/stroke, minus all scaffolding.
     for (var layer in engine.layers) {
       if (!layer.isVisible) continue;
 
-      // fillPath includes closed width-spline centerlines (matching the renderer's
-      // step 1a); layerPath excludes width splines and remains the target of the
-      // uniform stroke (1b), so no hairline runs along a ribbon's inner edge.
-      // Both now also fold in each shape's whole stroke STACK (all regions, in
-      // order, before the fill op), so a stroke-subtract gap -- or concentric
-      // tree-rings -- is baked into fillPath here with no extra handling.
       final fillPath = layer.getLayerFillPath();
       final layerPath = layer.getLayerPath();
       final strokeAreaPath = layer.getLayerStrokeAreaPath();
 
-      // 1a. Fill Standard Geometry (sourced from the fill path)
+      // 1a. Fill Standard Geometry
       if (layer.color != Colors.transparent) {
         final fillPaint = Paint()
           ..color = layer.color
@@ -175,7 +147,6 @@ class PNGExporter {
       }
 
       // 1a'. Per-shape LINEAR FILL GRADIENTS
-      // Lifted from the flat fill union; painted here with their own shader.
       for (var shape in layer.shapes) {
         if (!shape.isVisible) continue;
         if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
@@ -199,7 +170,6 @@ class PNGExporter {
 
         canvas.drawPath(clip, gradPaint);
 
-        // --- MIRROR MODIFIER: second gradient pass ---
         if (layer.mirrorEnabled) {
           canvas.save();
           canvas.transform(layer.mirrorMatrix.storage);
@@ -208,7 +178,7 @@ class PNGExporter {
         }
       }
 
-      // 1b. Stroke Standard Geometry (Uniform outlines)
+      // 1b. Stroke Standard Geometry
       if (layer.strokeColor != Colors.transparent && layer.strokeWidth > 0) {
         final strokePaint = Paint()
           ..color = layer.strokeColor
@@ -219,7 +189,7 @@ class PNGExporter {
         canvas.drawPath(layerPath, strokePaint);
       }
 
-      // 1c. Area Strokes (Variable-Width Geometry)
+      // 1c. Area Strokes
       if (layer.strokeColor != Colors.transparent) {
         final areaStrokePaint = Paint()
           ..color = layer.strokeColor
@@ -228,15 +198,7 @@ class PNGExporter {
         canvas.drawPath(strokeAreaPath, areaStrokePaint);
       }
 
-      // 1c'. Colored stroke ADD-band overpaints -- the exact mirror of the canvas
-      // renderer's step 1c'. Each colored add band was unioned into fillPath above
-      // and thus painted in the LAYER fill color in 1a; here we repaint each in its
-      // OWN color, on top, in stack order. The band paths come back already
-      // intersected with fillPath, so a band carved by a shape above it paints only
-      // where it survives and color can't bleed into a gap. Null-color add bands are
-      // NOT in this list (they ride the layer color), so nothing double-paints. Done
-      // after the flat fill/stroke but before the mesh pass, keeping a gradient mesh
-      // above its layer's solid geometry as on-canvas.
+      // 1c'. Colored stroke ADD-band overpaints
       if (layer.color != Colors.transparent) {
         final overpaints = layer.getStrokeAddBandOverpaints(fillPath);
         for (final (bandPath, bandColor) in overpaints) {
@@ -248,12 +210,7 @@ class PNGExporter {
         }
       }
 
-      // 1d. Gradient Meshes -- mirrors the renderer's mesh pass exactly: each mesh
-      // paints its interpolated color field via drawVertices, clipped to its
-      // boolean-carved silhouette, after this layer's flat fills. save/restore
-      // scopes the clip so it can't leak onto the next mesh or layer. Same
-      // BlendMode.modulate + white paint as on-canvas, so the authored vertex
-      // colors render identically between screen and PNG.
+      // 1d. Gradient Meshes
       for (var shape in layer.shapes) {
         if (shape is! CompassMesh) continue;
         if (!shape.isVisible) continue;
@@ -269,12 +226,16 @@ class PNGExporter {
           ..color = Colors.white;
         canvas.drawVertices(shape.buildVertices(), BlendMode.modulate, meshPaint);
         canvas.restore();
+
+        if (layer.mirrorEnabled) {
+          canvas.save();
+          canvas.transform(layer.mirrorMatrix.storage);
+          canvas.clipPath(clip);
+          canvas.drawVertices(shape.buildVertices(), BlendMode.modulate, meshPaint);
+          canvas.restore();
+        }
       }
 
-      // getLayerPath() skips shapes with no fill area or operation == none, so
-      // pure stroke geometry (lines, and spirals which default to `none`) must
-      // be stroked separately to keep PNG parity with the SVG export. We draw
-      // only the `add` shapes here, matching the SVG add-shapes loop.
       if (layer.strokeColor != Colors.transparent && layer.strokeWidth > 0) {
         final extraStroke = Paint()
           ..color = layer.strokeColor
@@ -291,22 +252,194 @@ class PNGExporter {
               extraStroke,
             );
           } else if (shape is CompassSpiral) {
-            // Spirals are construction-style (operation defaults to none) and
-            // are never part of the boolean fill, so always stroke them.
             canvas.drawPath(shape.getPath(), extraStroke);
           }
         }
       }
     }
 
-    // ---- 3. Rasterize and PNG-encode ----
     final picture = recorder.endRecording();
     final image = await picture.toImage(pixelW, pixelH);
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
 
+    // Fast Path: Pure vector rendering (Standard + Color)
+    if (style == PngExportStyle.standard && !grayscale) {
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      return byteData?.buffer.asUint8List();
+    }
+
+    // ---- 3. Image Filtering Passes (Dither / BubbleJet / Grayscale) ----
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (byteData == null) {
+      image.dispose();
+      return null;
+    }
+    final bytes = byteData.buffer.asUint8List();
+    
+    ui.Image finalImage;
+
+    if (style == PngExportStyle.bubbleJet) {
+      finalImage = await _renderBubbleJet(bytes, pixelW, pixelH, bubbleSize, grayscale);
+    } else {
+      final modifiedBytes = _processPixels(bytes, pixelW, pixelH, style == PngExportStyle.dithered, grayscale);
+      final completer = Completer<ui.Image>();
+      ui.decodeImageFromPixels(modifiedBytes, pixelW, pixelH, ui.PixelFormat.rgba8888, (img) {
+        completer.complete(img);
+      });
+      finalImage = await completer.future;
+    }
+
+    final finalByteData = await finalImage.toByteData(format: ui.ImageByteFormat.png);
     image.dispose();
-    picture.dispose();
+    finalImage.dispose();
 
-    return byteData?.buffer.asUint8List();
+    return finalByteData?.buffer.asUint8List();
+  }
+
+  // Applies Grayscale conversion and optional Floyd-Steinberg Dithering
+  // Now preserves original Alpha transparency.
+  static Uint8List _processPixels(Uint8List raw, int width, int height, bool dither, bool grayscale) {
+    final int len = width * height;
+    final rF = Float32List(len);
+    final gF = Float32List(len);
+    final bF = Float32List(len);
+    final aF = Float32List(len);
+
+    for (int i = 0; i < len; i++) {
+      rF[i] = raw[i * 4].toDouble();
+      gF[i] = raw[i * 4 + 1].toDouble();
+      bF[i] = raw[i * 4 + 2].toDouble();
+      aF[i] = raw[i * 4 + 3].toDouble();
+
+      if (grayscale && aF[i] > 0) {
+        final lum = 0.299 * rF[i] + 0.587 * gF[i] + 0.114 * bF[i];
+        rF[i] = gF[i] = bF[i] = lum;
+      }
+    }
+
+    final out = Uint8List(len * 4);
+
+    if (!dither) {
+      for (int i = 0; i < len; i++) {
+        out[i * 4] = rF[i].clamp(0, 255).toInt();
+        out[i * 4 + 1] = gF[i].clamp(0, 255).toInt();
+        out[i * 4 + 2] = bF[i].clamp(0, 255).toInt();
+        out[i * 4 + 3] = aF[i].clamp(0, 255).toInt();
+      }
+      return out;
+    }
+
+    // Floyd-Steinberg Pass
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        final i = y * width + x;
+        final alpha = aF[i].clamp(0, 255).toInt();
+        
+        out[i * 4 + 3] = alpha;
+
+        // Skip completely transparent pixels
+        if (alpha == 0) {
+          out[i * 4] = 0;
+          out[i * 4 + 1] = 0;
+          out[i * 4 + 2] = 0;
+          continue;
+        }
+
+        final oldR = rF[i];
+        final oldG = gF[i];
+        final oldB = bF[i];
+
+        // 1-Bit per channel quantization
+        final newR = oldR < 128 ? 0.0 : 255.0;
+        final newG = oldG < 128 ? 0.0 : 255.0;
+        final newB = oldB < 128 ? 0.0 : 255.0;
+
+        out[i * 4] = newR.toInt();
+        out[i * 4 + 1] = newG.toInt();
+        out[i * 4 + 2] = newB.toInt();
+
+        final errR = oldR - newR;
+        final errG = oldG - newG;
+        final errB = oldB - newB;
+
+        void distribute(int dx, int dy, double weight) {
+          final nx = x + dx;
+          final ny = y + dy;
+          if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+            final ni = ny * width + nx;
+            // Only push error to pixels that have some opacity
+            if (aF[ni] > 0) {
+              rF[ni] += errR * weight;
+              gF[ni] += errG * weight;
+              bF[ni] += errB * weight;
+            }
+          }
+        }
+
+        distribute(1, 0, 7 / 16);
+        distribute(-1, 1, 3 / 16);
+        distribute(0, 1, 5 / 16);
+        distribute(1, 1, 1 / 16);
+      }
+    }
+    return out;
+  }
+
+  // Translates pixels into variable-sized dots (Halftone style)
+  // Preserves alpha channel through weighted averaging.
+  static Future<ui.Image> _renderBubbleJet(Uint8List raw, int width, int height, double bubbleSize, bool grayscale) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    final int step = bubbleSize.round();
+
+    for (int y = 0; y < height; y += step) {
+      for (int x = 0; x < width; x += step) {
+        int rSum = 0, gSum = 0, bSum = 0, aSum = 0, count = 0;
+
+        // Sample the regional block
+        for (int dy = 0; dy < step && y + dy < height; dy++) {
+          for (int dx = 0; dx < step && x + dx < width; dx++) {
+            final i = ((y + dy) * width + (x + dx)) * 4;
+            final alpha = raw[i + 3];
+            
+            // Weight color accumulation by alpha to ignore transparent void
+            rSum += raw[i] * alpha;
+            gSum += raw[i + 1] * alpha;
+            bSum += raw[i + 2] * alpha;
+            aSum += alpha;
+            count++;
+          }
+        }
+
+        if (count == 0 || aSum == 0) continue;
+
+        final aAvg = (aSum / count).round();
+        // Retrieve true average color of visible pixels
+        final rAvg = (rSum / aSum).round();
+        final gAvg = (gSum / aSum).round();
+        final bAvg = (bSum / aSum).round();
+        
+        final lum = 0.299 * rAvg + 0.587 * gAvg + 0.114 * bAvg;
+
+        // Halftone math: Darker regions result in larger bubbles
+        final radius = (bubbleSize / 2.0) * (1.0 - (lum / 255.0));
+
+        if (radius > 0.3) {
+          Color c = grayscale 
+              ? Color.fromRGBO(0, 0, 0, aAvg / 255.0) // Black ink, regional opacity
+              : Color.fromRGBO(rAvg, gAvg, bAvg, aAvg / 255.0); // Colored ink, regional opacity
+
+          canvas.drawCircle(
+            Offset(x + step / 2.0, y + step / 2.0),
+            radius,
+            Paint()..color = c..isAntiAlias = true
+          );
+        }
+      }
+    }
+
+    final picture = recorder.endRecording();
+    return picture.toImage(width, height);
   }
 }

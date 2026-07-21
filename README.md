@@ -1,6 +1,6 @@
 # Compass
 
-**A constraint-based, parametric graphic design tool built in Flutter.**
+**A constraint-based, parametric graphic design tool built in Flutter for macOS, Windows, and Linux.**
 
 ---
 
@@ -30,7 +30,7 @@ In Compass, you do not merely draw lines and circles. You define how they relate
 
 *"Create Point A. Create Point B. Draw a line between them. Now create a circle centered on Point A whose radius always equals the distance between A and B."*
 
-Drag Point A and the entire construction moves together. Drag Point B and the line stretches while the circle scales perfectly to maintain its constraint. Nothing needs to be rebuilt because nothing was ever destroyed.
+Drag Point A and the entire construction moves together. Drag Point B and the line stretch while the circle scales perfectly to maintain its constraint. Nothing needs to be rebuilt because nothing was ever destroyed.
 
 You are not pushing dead pixels around a canvas. You are constructing a living mathematical system. When you eventually reach in to move a single point by hand, that direct edit is simply the lowest altitude of the same system. It is not a separate mode that discards the relationships you have already established.
 
@@ -67,7 +67,7 @@ Compass is rapidly evolving into a desktop-grade parametric engine. It currently
 * **Ghost Vertices Mode:** Hide the vertex dots while keeping every point fully live. Sweep the cursor along a bare wireframe and each invisible vertex lights up with a hover ring the instant you reach it—points stay clickable, draggable, and box-selectable, and every live tool preview (fillet, tension tether, mesh slice, rubber-banding) still paints. Unlike the full Scaffolding Toggle, which hides *all* construction, Ghost Vertices clears only the dot clutter; pair it with vertex-index labels for a clean "labels only" reading of a dense spline. Toggle it from the empty-canvas right-click menu (**Ghost Vertices (Hide Dots, Keep Editable)**).
 * **Native `.compass` Serialization:** Save and Open projects directly to your local file system, preserving every mathematical constraint.
 * **3D Mesh Compiler (.obj):** Right-click any layer to export its fully resolved boolean fill as a 2D Wavefront `.obj` mesh. This bridges 2D design directly into 3D/game-engine pipelines (like Blender or Godot) where SVG masks typically fail to handle boolean holes. Features four custom tessellation engines: a **Scanline** algorithm that traces curves robustly for high-fidelity silhouettes, a **Grid** mode that generates uniform quad-based topology perfect for subdivision and displacement, an **Organic** mode that runs a seeded **Delaunay triangulation** (the same Bowyer–Watson math as the in-app Triangulated Spline bake) to produce roughly-equilateral triangles hugging the exact silhouette—the natural topology for organic deformation and wireframe render styles, with a tunable triangle size—and a **Skeleton** mode (Straight Skeleton / Medial Axis Transform) that computes the internal mathematical ridge lines of complex boolean shapes, generating perfect "roof-like" topology for 3D beveling and chiseled edges.
-* **Vector & Raster Compilers:** Export pure XML-based SVG files—Compass calculates complex bounding boxes and utilizes native SVG `<mask...>` tags to perfectly replicate dynamic Boolean Subtractions for external image viewers. Linear gradients export as native `userSpaceOnUse` `<linearGradient>` definitions, and a mirrored layer is reflected with a transformed `<use>` instantiation—so those gradients, masks, and mesh clips all mirror *together* with the geometry, exactly as they do on the canvas. For pixel-based workflows, export crisp **PNG** images at 1x, 2x, or 4x resolution; the raster compiler re-renders the design offscreen from the same mathematical truth, emitting only the clean geometry on a transparent background—never the scaffolding.
+* **Vector & Raster Compilers:** Export pure XML-based SVG files—Compass calculates complex bounding boxes and utilizes native SVG `<mask...>` tags to perfectly replicate dynamic Boolean Subtractions for external image viewers. Linear gradients export as native `userSpaceOnUse` `<linearGradient>` definitions, and a mirrored layer is reflected with a transformed `<use>` instantiation—so those gradients, masks, and mesh clips all mirror *together* with the geometry, exactly as they do on the canvas. For pixel-based workflows, export crisp **PNG** images at preset or custom fractional resolutions (e.g., 0.5x, 4x); the raster compiler re-renders the design offscreen from the same mathematical truth, emitting only the clean geometry on a transparent background. The PNG exporter also features advanced post-processing modes: **Floyd-Steinberg Dithering** for a retro 1-bit quantized aesthetic, and **Bubble Jet (Halftone)**, which converts shading into scaled ink dots. Both effects fully support Alpha transparency and can be rendered in full color or true grayscale.
 * **Desktop UI & Themes:** Complete with a native desktop Menu Bar, floating toolbars, contextual right-click menus, and dynamic Light/Dark modes.
 
 ---
@@ -122,6 +122,9 @@ Compass is built entirely in **Flutter**, utilizing the reactive UI framework to
 **To run the application:**
 ```bash
 flutter pub get
+# Run on your respective desktop platform:
+flutter run -d macos
+flutter run -d windows
 flutter run -d linux
 ```
 

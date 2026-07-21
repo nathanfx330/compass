@@ -1929,8 +1929,19 @@ class CompassEngine extends ChangeNotifier {
     return SVGExporter.toSVG(this);
   }
 
-  Future<Uint8List?> toPNG({double scale = 2.0}) {
-    return PNGExporter.toPNG(this, scale: scale);
+  Future<Uint8List?> toPNG({
+    double scale = 2.0,
+    PngExportStyle style = PngExportStyle.standard,
+    bool grayscale = false,
+    double bubbleSize = 8.0,
+  }) {
+    return PNGExporter.toPNG(
+      this,
+      scale: scale,
+      style: style,
+      grayscale: grayscale,
+      bubbleSize: bubbleSize,
+    );
   }
 
   String toOBJ(

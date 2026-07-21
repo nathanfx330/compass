@@ -1,4 +1,4 @@
-// lib/ui/workspace/dialogs.dart
+// /lib/ui/workspace/dialogs.dart
 
 import 'dart:io';
 import 'dart:typed_data';
@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../../engine.dart';
 import '../../models/layer.dart';
 import '../../models/geometry/spline.dart';
+import '../../io/png_exporter.dart'; // <--- NEW: Import for PngExportStyle
 
 // The OBJ exporter's four output modes as the dialog presents them. Local to
 // this file: the engine/exporter API stays booleans (gridMode, delaunayMode,
@@ -111,8 +112,13 @@ class CompassDialogs {
 
   static void showExportPNG(BuildContext context, CompassEngine engine) {
     final TextEditingController filenameController = TextEditingController(text: 'compass_export.png');
-    // Resolution multiplier over the artwork's natural bounding-box size.
-    double exportScale = 2.0;
+    final TextEditingController customScaleController = TextEditingController(text: '0.25');
+    
+    // Default States
+    double exportScaleSelection = 2.0; // 0.0 acts as our "Custom" sentinel
+    PngExportStyle exportStyle = PngExportStyle.standard;
+    bool isGrayscale = false;
+    double bubbleSize = 10.0;
 
     showDialog(
       context: context,
@@ -121,37 +127,113 @@ class CompassDialogs {
           builder: (context, setLocalState) {
             return AlertDialog(
               title: const Text('Export as PNG'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Enter a filename to save your raster image:'),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: filenameController,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Filename',
-                      suffixText: '.png',
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Save your image with advanced raster effects.'),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: filenameController,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: 'Filename',
+                        suffixText: '.png',
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 20),
-                  const Text('Resolution'),
-                  const SizedBox(height: 8),
-                  SegmentedButton<double>(
-                    segments: const [
-                      ButtonSegment(value: 1.0, label: Text('1x')),
-                      ButtonSegment(value: 2.0, label: Text('2x')),
-                      ButtonSegment(value: 4.0, label: Text('4x')),
+                    const SizedBox(height: 20),
+
+                    // --- Resolution ---
+                    const Text('Resolution Scale', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    SegmentedButton<double>(
+                      segments: const [
+                        ButtonSegment(value: 0.5, label: Text('0.5x')),
+                        ButtonSegment(value: 1.0, label: Text('1x')),
+                        ButtonSegment(value: 2.0, label: Text('2x')),
+                        ButtonSegment(value: 4.0, label: Text('4x')),
+                        ButtonSegment(value: 0.0, label: Text('Custom')),
+                      ],
+                      selected: {exportScaleSelection},
+                      onSelectionChanged: (newSelection) {
+                        setLocalState(() => exportScaleSelection = newSelection.first);
+                      },
+                    ),
+                    if (exportScaleSelection == 0.0) ...[
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: customScaleController,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        decoration: const InputDecoration(
+                          border: OutlineInputBorder(),
+                          labelText: 'Custom Scale',
+                          suffixText: 'x',
+                          isDense: true,
+                        ),
+                      ),
                     ],
-                    selected: {exportScale},
-                    onSelectionChanged: (newSelection) {
-                      setLocalState(() {
-                        exportScale = newSelection.first;
-                      });
-                    },
-                  ),
-                ],
+                    const SizedBox(height: 16),
+                    const Divider(height: 1),
+                    const SizedBox(height: 12),
+
+                    // --- Color Mode ---
+                    const Text('Color Mode', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    SegmentedButton<bool>(
+                      segments: const [
+                        ButtonSegment(value: false, label: Text('Full Color')),
+                        ButtonSegment(value: true, label: Text('Grayscale')),
+                      ],
+                      selected: {isGrayscale},
+                      onSelectionChanged: (newSelection) {
+                        setLocalState(() => isGrayscale = newSelection.first);
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    const Divider(height: 1),
+                    const SizedBox(height: 12),
+
+                    // --- Render Style ---
+                    const Text('Render Style', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    SegmentedButton<PngExportStyle>(
+                      segments: const [
+                        ButtonSegment(value: PngExportStyle.standard, label: Text('Standard')),
+                        ButtonSegment(value: PngExportStyle.dithered, label: Text('Dithered')),
+                        ButtonSegment(value: PngExportStyle.bubbleJet, label: Text('Bubble Jet')),
+                      ],
+                      selected: {exportStyle},
+                      onSelectionChanged: (newSelection) {
+                        setLocalState(() => exportStyle = newSelection.first);
+                      },
+                    ),
+                    const SizedBox(height: 8),
+
+                    // --- Hints / Contextual sliders ---
+                    if (exportStyle == PngExportStyle.standard) ...[
+                      Text('Clean vector rasterization.', style: Theme.of(context).textTheme.bodySmall),
+                    ] else if (exportStyle == PngExportStyle.dithered) ...[
+                      Text('Applies Floyd-Steinberg error diffusion for a crunchier retro/print look.', style: Theme.of(context).textTheme.bodySmall),
+                    ] else if (exportStyle == PngExportStyle.bubbleJet) ...[
+                      Row(
+                        children: [
+                          const Text('Bubble / Halftone Size:'),
+                          const Spacer(),
+                          Text(bubbleSize.round().toString(), style: const TextStyle(fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                      Slider(
+                        value: bubbleSize,
+                        min: 4,
+                        max: 32,
+                        divisions: 28,
+                        onChanged: (v) => setLocalState(() => bubbleSize = v),
+                      ),
+                      Text('Converts shading into scaled ink dots (Pointillism style).', style: Theme.of(context).textTheme.bodySmall),
+                    ],
+                  ],
+                ),
               ),
               actions: [
                 TextButton(
@@ -166,8 +248,23 @@ class CompassDialogs {
                     if (!filename.endsWith('.png')) {
                       filename += '.png';
                     }
+
+                    // Resolve final scale to use
+                    double finalScale = exportScaleSelection;
+                    if (finalScale == 0.0) {
+                      finalScale = double.tryParse(customScaleController.text) ?? 1.0;
+                      if (finalScale <= 0) finalScale = 1.0; // Fallback for invalid input
+                    }
+
                     try {
-                      final Uint8List? bytes = await engine.toPNG(scale: exportScale);
+                      // Trigger the engine compiler with the new parameters
+                      final Uint8List? bytes = await engine.toPNG(
+                        scale: finalScale,
+                        style: exportStyle,
+                        grayscale: isGrayscale,
+                        bubbleSize: bubbleSize,
+                      );
+                      
                       if (bytes == null) {
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
