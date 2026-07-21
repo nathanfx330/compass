@@ -1,6 +1,19 @@
+// /README.md
+
 # Compass
 
 **A constraint-based, parametric graphic design tool built in Flutter for macOS, Windows, and Linux.**
+
+*Compass brings the exactness of parametric design into a fluid, highly accessible graphical interface built for artists. You don't need to write code, balance equations, or understand the underlying geometry. Every living relationship is built visually—just draw, right-click, and drag. The software handles the math; you handle the art.*
+
+---
+
+### 🚀 Why Compass? (The Elevator Pitch)
+
+*   **Parametric Precision, Artist-Friendly UI:** Experience the exactness of unbreakable constraints without spreadsheets or code. Build living mathematical systems visually with intuitive drag-and-drop and right-click gestures.
+*   **Relationships over Pixels:** Bind shapes together with unbreakable rules (e.g., *"this circle's radius is exactly the distance between these two points"*). Move one element, and the entire system adapts instantly.
+*   **Non-Destructive by Design:** Live Boolean operations, persistent corner pulleys, and dynamic stroke stacks ensure your foundational geometry is never permanently flattened or lost. 
+*   **Bridge 2D and 3D Pipelines:** Export to crisp SVGs, retro-filtered PNGs (Dithered & Halftone), or bridge 2D directly into 3D by exporting your flat booleans into `.obj` meshes with perfect hole preservation and custom topology.
 
 ---
 
@@ -34,12 +47,14 @@ Drag Point A and the entire construction moves together. Drag Point B and the li
 
 You are not pushing dead pixels around a canvas. You are constructing a living mathematical system. When you eventually reach in to move a single point by hand, that direct edit is simply the lowest altitude of the same system. It is not a separate mode that discards the relationships you have already established.
 
+**Most importantly, building this system is entirely visual.** There are no spreadsheets or property matrices required to link objects. You establish constraints through intuitive graphical gestures, allowing anyone to build robust, scalable vector art.
+
 ---
 
 ### Core Concepts
 
 1. **Points are the Source of Truth:** Shapes do not own their own coordinates. Every shape is merely a visual manifestation of the relationships between underlying mathematical Points.
-2. **Constraints over Clicks:** Objects are bound together by unbreakable rules. A radius isn't "100 pixels"—it is a live formula driven by the canvas state.
+2. **Constraints over Clicks:** Objects are bound together by unbreakable rules. A radius isn't "100 pixels"—it is a live formula driven by the canvas state, **established effortlessly via right-click menus and simple drag-and-drop gestures.**
 3. **Parent/Child Relativity:** Moving an anchor point calculates a mathematical delta and pushes that movement down to all dependent geometries, ensuring complex structures move as a single rigid body without ever "grouping" them.
 4. **Pure Geometry:** Toggle off the scaffolding to hide the points and rules, revealing only the mathematically perfect design you have constructed.
 
