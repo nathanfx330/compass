@@ -695,62 +695,215 @@ class CompassRenderer extends CustomPainter {
       }
 
       // --- GRADIENT STOP DOTS + AXIS (selected shape's linear fill gradient) ---
-      // The gradient's stops are ordinary points in engine.points, SUPPRESSED
-      // from the generic blue-dot pass below; here they're drawn as COLORED dots
-      // (each showing its own stop color) with a dashed axis line from the first
-      // to the last stop -- the on-canvas gradient-editing UI the feature is
-      // built around.
       //
-      // Only for the SELECTED shape, matching every other per-shape handle
-      // (pulley rim dots, tension boxes, bezier handles): the canvas stays clean,
-      // and you reveal a gradient's stops by selecting its shape. NOT ghosted --
-      // like the pulley rim dots, these dots ARE a live editing affordance, so
-      // hiding them would make gradients uneditable in Ghost Vertices mode. The
-      // selected/hovered halos from the generic passes still land on these points
-      // (they're real points), so a grabbed stop still reads as selected.
+      // Gradient stops are ordinary CompassPoints, but they are intentionally
+      // suppressed from the generic blue-point pass below. The selected shape's
+      // gradient is edited here as its own compact control:
+      //
+      //   * diamond handles are the two freely draggable axis endpoints;
+      //   * round handles are interior color stops that slide along the axis;
+      //   * hovering close to the dotted axis shows a small "+" insertion preview,
+      //     matching the right-click "Add Gradient Stop Here" interaction.
+      //
+      // These controls are never ghosted. They are active editing affordances,
+      // like pulley rims, rather than ordinary vertex clutter.
       final gradSel = engine.selectedShape;
       final grad = gradSel?.gradient;
+
       if (grad != null && grad.stops.isNotEmpty) {
-        // Dashed axis (first -> last stop). Meaningful only with >=2 stops; a
-        // lone seed stop has no axis yet (it renders as a solid), so none drawn.
         final axis = grad.axis;
+        Offset? axisNormal;
+
         if (axis != null) {
+          final axisVector = axis.$2 - axis.$1;
+          final axisLength = axisVector.distance;
+
+          if (axisLength > 1e-9) {
+            final axisUnit = axisVector / axisLength;
+            axisNormal = Offset(-axisUnit.dy, axisUnit.dx);
+          }
+
+          // A dark underlay keeps the dotted line readable over pale gradients;
+          // the narrow white pass on top keeps it crisp over dark gradients.
+          final axisUnderlayPaint = Paint()
+            ..color = Colors.black.withOpacity(0.45)
+            ..strokeWidth = 3.5 * invScale
+            ..style = PaintingStyle.stroke;
+
           final axisPaint = Paint()
-            ..color = Colors.white.withOpacity(0.75)
+            ..color = Colors.white.withOpacity(0.9)
             ..strokeWidth = 1.5 * invScale
             ..style = PaintingStyle.stroke;
-          RendererHelpers.drawDashedLine(canvas, axis.$1, axis.$2, axisPaint, invScale);
+
+          RendererHelpers.drawDashedLine(
+            canvas,
+            axis.$1,
+            axis.$2,
+            axisUnderlayPaint,
+            invScale,
+          );
+
+          RendererHelpers.drawDashedLine(
+            canvas,
+            axis.$1,
+            axis.$2,
+            axisPaint,
+            invScale,
+          );
+
+          // Right-click insertion preview. The hit radius deliberately matches
+          // the context-menu axis hit test, so the marker appears exactly where
+          // "Add Gradient Stop Here" is available.
+          final canPreviewInsertion =
+              currentTool == CompassTool.select &&
+              hoverPosition != null &&
+              hoveredPoint == null &&
+              !isRPressed &&
+              !isShiftRPressed &&
+              !isCtrlRPressed &&
+              !isAPressed &&
+              !isFPressed &&
+              !isWPressed;
+
+          if (canPreviewInsertion) {
+            final projected = grad.projectOntoAxis(hoverPosition!);
+            final axisHitRadius = 12.0 * invScale;
+
+            if ((hoverPosition! - projected).distance <= axisHitRadius) {
+              final previewRadius = 8.0 * invScale;
+
+              canvas.drawCircle(
+                projected,
+                previewRadius,
+                Paint()
+                  ..color = Colors.black.withOpacity(0.6)
+                  ..style = PaintingStyle.fill,
+              );
+
+              canvas.drawCircle(
+                projected,
+                previewRadius,
+                Paint()
+                  ..color = Colors.greenAccent.withOpacity(0.9)
+                  ..strokeWidth = 1.5 * invScale
+                  ..style = PaintingStyle.stroke,
+              );
+
+              final plusPaint = Paint()
+                ..color = Colors.greenAccent
+                ..strokeWidth = 1.8 * invScale
+                ..strokeCap = StrokeCap.round
+                ..style = PaintingStyle.stroke;
+
+              final plusHalf = 3.5 * invScale;
+
+              canvas.drawLine(
+                projected + Offset(-plusHalf, 0),
+                projected + Offset(plusHalf, 0),
+                plusPaint,
+              );
+
+              canvas.drawLine(
+                projected + Offset(0, -plusHalf),
+                projected + Offset(0, plusHalf),
+                plusPaint,
+              );
+            }
+          }
         }
 
         for (final stop in grad.stops) {
-          final c = Offset(stop.point.x.value, stop.point.y.value);
-          const r = 7.0;
+          final center = Offset(
+            stop.point.x.value,
+            stop.point.y.value,
+          );
 
-          // Dark outer ring first, so a white/pale stop stays visible on a pale
-          // fill; theme border ring last for a crisp edge on a dark fill. The
-          // color core between them is the stop's actual value.
-          canvas.drawCircle(
-            c, r * invScale,
-            Paint()
-              ..color = Colors.black.withOpacity(0.55)
-              ..strokeWidth = 3.0 * invScale
-              ..style = PaintingStyle.stroke,
-          );
-          canvas.drawCircle(
-            c, r * invScale,
-            Paint()
-              ..color = stop.color
-              ..style = PaintingStyle.fill,
-          );
-          canvas.drawCircle(
-            c, r * invScale,
-            Paint()
-              ..color = pointBorderColor
+          final isEndpoint = grad.isEndpoint(stop);
+
+          if (!isEndpoint && axisNormal != null) {
+            // A short perpendicular tick reinforces that this round stop is a
+            // slider on the line rather than a free-floating point.
+            final tickHalf = 9.0 * invScale;
+            final tickPaint = Paint()
+              ..color = Colors.white.withOpacity(0.75)
               ..strokeWidth = 1.5 * invScale
-              ..style = PaintingStyle.stroke,
-          );
+              ..style = PaintingStyle.stroke;
+
+            canvas.drawLine(
+              center - axisNormal * tickHalf,
+              center + axisNormal * tickHalf,
+              tickPaint,
+            );
+          }
+
+          if (isEndpoint) {
+            // Axis endpoints are diamonds: they remain freely draggable and
+            // therefore need to read differently from interior slider stops.
+            final outerRadius = 9.5 * invScale;
+            final innerRadius = 7.0 * invScale;
+
+            Path diamond(double radius) {
+              return Path()
+                ..moveTo(center.dx, center.dy - radius)
+                ..lineTo(center.dx + radius, center.dy)
+                ..lineTo(center.dx, center.dy + radius)
+                ..lineTo(center.dx - radius, center.dy)
+                ..close();
+            }
+
+            canvas.drawPath(
+              diamond(outerRadius),
+              Paint()
+                ..color = Colors.black.withOpacity(0.6)
+                ..style = PaintingStyle.fill,
+            );
+
+            canvas.drawPath(
+              diamond(innerRadius),
+              Paint()
+                ..color = stop.color
+                ..style = PaintingStyle.fill,
+            );
+
+            canvas.drawPath(
+              diamond(innerRadius),
+              Paint()
+                ..color = pointBorderColor
+                ..strokeWidth = 1.5 * invScale
+                ..style = PaintingStyle.stroke,
+            );
+          } else {
+            const radius = 7.0;
+
+            canvas.drawCircle(
+              center,
+              radius * invScale,
+              Paint()
+                ..color = Colors.black.withOpacity(0.6)
+                ..strokeWidth = 3.0 * invScale
+                ..style = PaintingStyle.stroke,
+            );
+
+            canvas.drawCircle(
+              center,
+              radius * invScale,
+              Paint()
+                ..color = stop.color
+                ..style = PaintingStyle.fill,
+            );
+
+            canvas.drawCircle(
+              center,
+              radius * invScale,
+              Paint()
+                ..color = pointBorderColor
+                ..strokeWidth = 1.5 * invScale
+                ..style = PaintingStyle.stroke,
+            );
+          }
         }
       }
+
 
       // --- MULTI-SELECTION BOUNDING BOX ---
       if (selectionBounds != null) {

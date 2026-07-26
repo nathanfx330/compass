@@ -1,10 +1,10 @@
-// lib/models/layer.dart
+// /lib/models/layer.dart
 
 import 'package:flutter/material.dart';
 import 'geometry/shape.dart';
-import 'geometry/spline.dart'; // <--- Needed to identify variable width splines
-import 'geometry/mesh.dart';   // <--- NEW: Needed to exclude/clip gradient meshes
-import 'geometry/gradient.dart'; // <--- NEW: identify renderable gradient fills
+import 'geometry/spline.dart';
+import 'geometry/mesh.dart';
+import 'geometry/gradient.dart';
 
 /// Which axis the mirror modifier reflects across.
 /// vertical   => a vertical LINE at x = mirrorPosition (left/right symmetry)
@@ -53,409 +53,640 @@ class CompassLayer {
   }) : id = id ?? UniqueKey().toString();
 
   /// The affine reflection for the current axis, as a Matrix4.
-  /// Vertical axis at x=p:   x' = 2p - x  (translate(p) * scaleX(-1) * translate(-p))
+  /// Vertical axis at x=p:   x' = 2p - x
   /// Horizontal axis at y=p: y' = 2p - y
-  /// Exposed publicly so the RENDERER can replay gradient meshes through the
-  /// same transform (a mesh paints via drawVertices, not a Path, so its
-  /// mirrored copy is a second canvas-transformed draw pass rather than a path
-  /// union) and so exporters that work on raw geometry can reuse it. The
-  /// gradient-FILL pass replays through this exact transform too (a shader fill
-  /// is a paint, not a Path, so it mirrors the same way a mesh does).
+  ///
+  /// Exposed publicly so the renderer can replay self-painted geometry through
+  /// the same transform and exporters can reuse the exact mirror rule.
   Matrix4 get mirrorMatrix {
-    final m = Matrix4.identity();
+    final matrix = Matrix4.identity();
+
     if (mirrorAxis == MirrorAxis.vertical) {
-      m.translate(mirrorPosition, 0.0);
-      m.scale(-1.0, 1.0, 1.0);
-      m.translate(-mirrorPosition, 0.0);
+      matrix.translate(mirrorPosition, 0.0);
+      matrix.scale(-1.0, 1.0, 1.0);
+      matrix.translate(-mirrorPosition, 0.0);
     } else {
-      m.translate(0.0, mirrorPosition);
-      m.scale(1.0, -1.0, 1.0);
-      m.translate(0.0, -mirrorPosition);
+      matrix.translate(0.0, mirrorPosition);
+      matrix.scale(1.0, -1.0, 1.0);
+      matrix.translate(0.0, -mirrorPosition);
     }
-    return m;
+
+    return matrix;
   }
 
-  /// Applies the mirror modifier to a fully-resolved master path: returns the
-  /// union of the path with its reflection. Identity when disabled or empty.
+  /// Applies the mirror modifier to a fully resolved master path.
   ///
-  /// Plain union (not _combine) on purpose: the mirror replicates the RESULT,
-  /// so seeding rules don't apply -- if the master resolved to something, its
-  /// reflection exists by construction. Path.transform returns a new path and
-  /// never mutates its input.
+  /// Plain union is used intentionally: the mirror replicates the completed
+  /// result, so the normal empty-master seeding rules do not apply here.
   Path applyMirror(Path master) {
     if (!mirrorEnabled) return master;
     if (master.computeMetrics().isEmpty) return master;
+
     final reflected = master.transform(mirrorMatrix.storage);
-    return Path.combine(PathOperation.union, master, reflected);
+    return Path.combine(
+      PathOperation.union,
+      master,
+      reflected,
+    );
   }
 
-  /// Applies one (path, op) to the running [master], preserving the ORIGINAL
-  /// seeding rule the boolean walk has always used: an `add` against an empty
-  /// master ESTABLISHES the base region; a subtract/intersect against nothing
-  /// yields nothing (you cannot carve what is not there). An empty contribution
-  /// or a `none` op is a no-op.
+  /// Applies one `(path, operation)` contribution to [master].
   ///
-  /// This is the single chokepoint that BOTH a shape's fill op and its stroke
-  /// regions route through, so the committed "stroke before fill" ordering is
-  /// simply the order of the calls within a shape's turn -- no per-call casing.
-  ///
-  /// The contribution is always a freshly-built Path (getPath / getCenterPath /
-  /// getStrokeOutlinePath all return new paths), so returning it directly when
-  /// seeding cannot alias a shape's internal state, and Path.combine never mutates
-  /// its inputs.
-  Path _combine(Path master, Path contribution, CompassBooleanOp op) {
-    if (op == CompassBooleanOp.none) return master;
+  /// An ADD operation seeds an empty master. SUBTRACT and INTERSECT cannot
+  /// establish geometry when nothing exists yet.
+  Path _combine(
+    Path master,
+    Path contribution,
+    CompassBooleanOp operation,
+  ) {
+    if (operation == CompassBooleanOp.none) return master;
     if (contribution.computeMetrics().isEmpty) return master;
 
     if (master.computeMetrics().isEmpty) {
-      return op == CompassBooleanOp.add ? contribution : master;
+      return operation == CompassBooleanOp.add
+          ? contribution
+          : master;
     }
 
-    switch (op) {
+    switch (operation) {
       case CompassBooleanOp.add:
-        return Path.combine(PathOperation.union, master, contribution);
+        return Path.combine(
+          PathOperation.union,
+          master,
+          contribution,
+        );
+
       case CompassBooleanOp.subtract:
-        return Path.combine(PathOperation.difference, master, contribution);
+        return Path.combine(
+          PathOperation.difference,
+          master,
+          contribution,
+        );
+
       case CompassBooleanOp.intersect:
-        return Path.combine(PathOperation.intersect, master, contribution);
+        return Path.combine(
+          PathOperation.intersect,
+          master,
+          contribution,
+        );
+
       case CompassBooleanOp.none:
         return master;
     }
   }
 
-  /// Walks a shape's OUTWARD-STACKED stroke stack and yields one record per
-  /// non-zero-width region, in list order, carrying that region plus its band
-  /// geometry inputs (width + innerOffset). This is the SINGLE source of the
-  /// stacking-cursor math: region 0 starts exactly at the shape's boundary (0.0).
+  /// Resolves the outward-stacked stroke regions belonging to [shape].
   ///
-  /// Starting at 0.0 means the custom ring touches the base shape perfectly, 
-  /// allowing the boolean engine to merge them into a single continuous object.
-  List<({StrokeRegion region, double width, double innerOffset})> _strokeBands(
-      CompassShape shape) {
-    final out = <({StrokeRegion region, double width, double innerOffset})>[];
-    
-    // Start exactly at the shape's boundary (0.0 offset).
-    // This pushes the strokes purely OUTWARD without leaving a mathematical gap.
-    double offset = 0.0; 
-    
+  /// Each record contains the region, its width, and the accumulated inner
+  /// offset. The first region begins directly at the shape boundary.
+  List<
+      ({
+        StrokeRegion region,
+        double width,
+        double innerOffset,
+      })> _strokeBands(CompassShape shape) {
+    final output = <
+        ({
+          StrokeRegion region,
+          double width,
+          double innerOffset,
+        })>[];
+
+    var offset = 0.0;
+
     for (final region in shape.strokeRegions) {
-      final w = region.width;
-      if (w <= 0) continue;
-      
-      out.add((region: region, width: w, innerOffset: offset));
-      offset += w;
+      final width = region.width;
+      if (width <= 0) continue;
+
+      output.add((
+        region: region,
+        width: width,
+        innerOffset: offset,
+      ));
+
+      offset += width;
     }
-    return out;
+
+    return output;
   }
 
-  /// Applies a shape's stroke stack to [master], in list order, returning the
-  /// updated path. The stacking geometry comes from _strokeBands (shared with the
-  /// overpaint collector), so all four boolean walks and the paint pass agree on
-  /// where every band sits.
+  /// Applies a shape's stroke stack to [master] in list order.
   ///
-  /// [addsAllowed] false means only subtract/intersect regions are applied (the
-  /// ribbon-area and mesh-clip walks, which can only be CARVED, never seeded, by a
-  /// stroke). When true (the fill/outline walks) all three ops apply through
-  /// _combine, which also handles seeding an empty master from an `add`. An add
-  /// region skipped under addsAllowed:false still advanced the cursor inside
-  /// _strokeBands, so later subtract/intersect bands land at the right radii.
-  Path _applyStrokeStack(Path master, CompassShape shape, {required bool addsAllowed}) {
-    for (final b in _strokeBands(shape)) {
-      final op = b.region.op;
-      final apply = addsAllowed ||
-          op == CompassBooleanOp.subtract ||
-          op == CompassBooleanOp.intersect;
-      if (!apply) continue;
+  /// With [addsAllowed] disabled, ADD regions are ignored while SUBTRACT and
+  /// INTERSECT regions may only carve an existing master.
+  Path _applyStrokeStack(
+    Path master,
+    CompassShape shape, {
+    required bool addsAllowed,
+  }) {
+    for (final bandData in _strokeBands(shape)) {
+      final operation = bandData.region.op;
 
-      final band = shape.getStrokeOutlinePath(b.width, b.innerOffset);
+      final shouldApply = addsAllowed ||
+          operation == CompassBooleanOp.subtract ||
+          operation == CompassBooleanOp.intersect;
+
+      if (!shouldApply) continue;
+
+      final band = shape.getStrokeOutlinePath(
+        bandData.width,
+        bandData.innerOffset,
+      );
+
       if (addsAllowed) {
-        master = _combine(master, band, op);
+        master = _combine(
+          master,
+          band,
+          operation,
+        );
       } else if (master.computeMetrics().isNotEmpty &&
           band.computeMetrics().isNotEmpty) {
-        // Carve-only path: never seed, only difference/intersect an existing master.
-        master = op == CompassBooleanOp.subtract
-            ? Path.combine(PathOperation.difference, master, band)
-            : Path.combine(PathOperation.intersect, master, band);
+        master = operation == CompassBooleanOp.subtract
+            ? Path.combine(
+                PathOperation.difference,
+                master,
+                band,
+              )
+            : Path.combine(
+                PathOperation.intersect,
+                master,
+                band,
+              );
       }
     }
+
     return master;
   }
 
-  /// True if any of the shape's stroke regions can CARVE (subtract/intersect) --
-  /// the cheap gate the ribbon-area walk uses to decide a shape is interesting.
+  /// Whether any stroke region on [shape] can carve geometry.
   bool _hasCarvingStroke(CompassShape shape) {
-    for (final r in shape.strokeRegions) {
-      if (r.op == CompassBooleanOp.subtract || r.op == CompassBooleanOp.intersect) {
+    for (final region in shape.strokeRegions) {
+      if (region.op == CompassBooleanOp.subtract ||
+          region.op == CompassBooleanOp.intersect) {
         return true;
       }
     }
+
     return false;
   }
 
-  /// Whether [shape]'s FILL is lifted out of the flat boolean union and painted
-  /// separately in the gradient pass (clipped to getLayerGradientClipPath),
-  /// EXACTLY the way a mesh is a separate self-painted category. True only for an
-  /// ADD shape carrying a renderable gradient (>=1 stop):
+  /// Whether [shape]'s fill is painted separately in the linear-gradient pass.
   ///
-  ///   * ADD only -- a subtract/intersect shape's job is to CARVE, and a gradient
-  ///     on a cutter paints nothing, so those keep their normal boolean
-  ///     contribution and are never lifted.
-  ///   * renderable -- gradient != null AND at least one stop. A gradient with 0
-  ///     stops (never produced by "Make Gradient", which always seeds one) is
-  ///     inert and the shape flat-fills as before. A ONE-stop gradient IS lifted
-  ///     and paints a solid of that stop's color, so the fill is owned by the
-  ///     gradient the instant it's created rather than tracking the layer color.
-  ///
-  /// Public + static so the RENDERER (which shapes to paint in the gradient pass)
-  /// and this layer's flat walks (which fills to skip) agree on one predicate.
-  static bool hasLiftedGradientFill(CompassShape shape) =>
-      shape.operation == CompassBooleanOp.add &&
-      shape.gradient != null &&
-      shape.gradient!.isRenderable;
+  /// Only ADD shapes with at least one gradient stop are lifted. A subtract or
+  /// intersect shape remains a Boolean operator and does not paint a gradient.
+  static bool hasLiftedGradientFill(CompassShape shape) {
+    return shape.operation == CompassBooleanOp.add &&
+        shape.gradient != null &&
+        shape.gradient!.isRenderable;
+  }
 
-  /// The master boolean path intended to be OUTLINED with the uniform stroke.
-  /// Excludes Variable-Width Splines, which live in their own Stroke Area Path.
-  /// MIRRORED: post-resolve, so the outline traces both halves.
+  /// The master Boolean path intended to receive the uniform outline stroke.
   ///
-  /// A gradient-fill shape is DELIBERATELY NOT excluded here (unlike a mesh): its
-  /// fill lifts out of the FILL union, but the layer hairline should still wrap
-  /// it, so it keeps contributing its silhouette to the OUTLINE master. The
-  /// renderer paints the gradient fill BEFORE the uniform stroke, so the hairline
-  /// lands on top of the shader edge and stays full-width.
+  /// Gradient meshes are excluded because they are self-painted. Linear-gradient
+  /// shapes remain included so the layer hairline still follows their boundary.
   Path getLayerPath() {
-    Path master = Path();
-    for (var shape in shapes) {
+    var master = Path();
+
+    for (final shape in shapes) {
       if (!shape.isVisible) continue;
 
-      // Gradient meshes are their own render category.
-      if (shape is CompassMesh) continue;
-
-      // --- STROKE STACK (before fill) ---
-      master = _applyStrokeStack(master, shape, addsAllowed: true);
-
-      // --- FILL CONTRIBUTION ---
-      if (shape.operation != CompassBooleanOp.none) {
-        final bool isAddWidthSpline = shape.operation == CompassBooleanOp.add &&
-            shape is CompassXSpline &&
-            shape.hasWidthProfile;
-        
-        if (!isAddWidthSpline) {
-          master = _combine(master, shape.getPath(), shape.operation);
-        }
-      }
-    }
-    return applyMirror(master);
-  }
-
-  /// The master boolean path intended to be FILLED.
-  /// MIRRORED: post-resolve.
-  Path getLayerFillPath() {
-    Path master = Path();
-    for (var shape in shapes) {
-      if (!shape.isVisible) continue;
-
-      // Gradient meshes never join the flat fill union -- they're a separate
-      // self-painted, separately-clipped render category.
-      if (shape is CompassMesh) continue;
-
-      // --- STROKE STACK (before fill) ---
-      // Runs even for a lifted-gradient shape, so a gradient circle keeps its
-      // outward stroke RINGS in the flat union -- only its FILL is lifted.
-      master = _applyStrokeStack(master, shape, addsAllowed: true);
-
-      // --- FILL CONTRIBUTION ---
-      // A renderable-gradient ADD shape lifts its FILL out of the flat union
-      // (painted separately in the gradient pass, clipped to
-      // getLayerGradientClipPath), EXACTLY as a mesh does. Subtract/intersect
-      // shapes are never lifted (hasLiftedGradientFill is add-only), so a cutter
-      // still carves here as always.
-      if (shape.operation != CompassBooleanOp.none && !hasLiftedGradientFill(shape)) {
-        Path? fillPath;
-        if (shape is CompassXSpline &&
-            shape.hasWidthProfile &&
-            shape.operation == CompassBooleanOp.add) {
-          if (shape.isClosed) {
-            fillPath = shape.getCenterPath()..fillType = PathFillType.evenOdd;
-          }
-        } else {
-          fillPath = shape.getPath();
-        }
-
-        if (fillPath != null) {
-          master = _combine(master, fillPath, shape.operation);
-        }
-      }
-    }
-    return applyMirror(master);
-  }
-
-  /// The colored ADD-band overpaints for this layer, in paint order (Z-order across
-  /// shapes, then stack order -- innermost first -- within a shape), as (path,
-  /// color) pairs. The renderer/PNG paint these on TOP of the flat layer fill so a
-  /// custom-colored band shows in its own color instead of the layer fill color.
-  ///
-  /// MIRRORED per band: [fillMaster] arrives already mirrored (it comes from
-  /// getLayerFillPath), while the raw band geometry lives only on the master
-  /// half -- so we clip the band against the master first, then mirror the
-  /// CLIPPED result. Since reflect(fill ∩ band) = reflect(fill) ∩ reflect(band)
-  /// and the mirrored fillMaster contains reflect(fill), the mirrored band is
-  /// exactly the band's colored region on the far half: colors replicate in
-  /// perfect symmetry with the geometry.
-  ///
-  /// Gradient shapes need no special handling here: their stroke RINGS are still
-  /// in fillMaster (the stroke stack ran in getLayerFillPath), and rings stack
-  /// strictly OUTWARD from the boundary, so a ring band clips cleanly against
-  /// fillMaster even though the shape's own interior fill was lifted out.
-  List<(Path, Color)> getStrokeAddBandOverpaints(Path fillMaster) {
-    if (fillMaster.computeMetrics().isEmpty) return const [];
-
-    final out = <(Path, Color)>[];
-    for (var shape in shapes) {
-      if (!shape.isVisible) continue;
-      if (shape is CompassMesh) continue; // meshes carry no stroke bands
-
-      for (final b in _strokeBands(shape)) {
-        if (b.region.op != CompassBooleanOp.add) continue;
-        final color = b.region.color;
-        if (color == null) continue; // null-color add bands ride the master
-
-        final band = shape.getStrokeOutlinePath(b.width, b.innerOffset);
-        if (band.computeMetrics().isEmpty) continue;
-
-        final clipped = Path.combine(PathOperation.intersect, fillMaster, band);
-        if (clipped.computeMetrics().isEmpty) continue;
-
-        out.add((applyMirror(clipped), color));
-      }
-    }
-    return out;
-  }
-
-  /// The master boolean path for Variable-Width Area Strokes.
-  /// MIRRORED: post-resolve, same as the fill walk.
-  Path getLayerStrokeAreaPath() {
-    Path master = Path();
-    for (var shape in shapes) {
-      if (!shape.isVisible) continue;
-      if (shape.operation == CompassBooleanOp.none && !_hasCarvingStroke(shape)) {
+      if (shape is CompassMesh) {
         continue;
       }
 
-      // --- STROKE STACK carve (before fill) --- carve-only: never seeds the master.
-      master = _applyStrokeStack(master, shape, addsAllowed: false);
+      master = _applyStrokeStack(
+        master,
+        shape,
+        addsAllowed: true,
+      );
 
-      // --- FILL handling (original area-stroke logic) ---
-      if (shape.operation == CompassBooleanOp.none) continue;
+      if (shape.operation == CompassBooleanOp.none) {
+        continue;
+      }
+
+      final isAddWidthSpline =
+          shape.operation == CompassBooleanOp.add &&
+              shape is CompassXSpline &&
+              shape.hasWidthProfile;
+
+      if (!isAddWidthSpline) {
+        master = _combine(
+          master,
+          shape.getPath(),
+          shape.operation,
+        );
+      }
+    }
+
+    return applyMirror(master);
+  }
+
+  /// The master Boolean path intended to receive the flat layer fill.
+  ///
+  /// Linear-gradient ADD fills and gradient meshes are excluded because they
+  /// paint themselves in dedicated renderer passes. Stroke regions belonging to
+  /// gradient shapes still participate here.
+  Path getLayerFillPath() {
+    var master = Path();
+
+    for (final shape in shapes) {
+      if (!shape.isVisible) continue;
+
+      if (shape is CompassMesh) {
+        continue;
+      }
+
+      master = _applyStrokeStack(
+        master,
+        shape,
+        addsAllowed: true,
+      );
+
+      if (shape.operation == CompassBooleanOp.none ||
+          hasLiftedGradientFill(shape)) {
+        continue;
+      }
+
+      Path? fillPath;
+
+      if (shape is CompassXSpline &&
+          shape.hasWidthProfile &&
+          shape.operation == CompassBooleanOp.add) {
+        if (shape.isClosed) {
+          fillPath = shape.getCenterPath()
+            ..fillType = PathFillType.evenOdd;
+        }
+      } else {
+        fillPath = shape.getPath();
+      }
+
+      if (fillPath != null) {
+        master = _combine(
+          master,
+          fillPath,
+          shape.operation,
+        );
+      }
+    }
+
+    return applyMirror(master);
+  }
+
+  /// Returns custom-colored ADD stroke bands in their painting order.
+  ///
+  /// The paths are clipped against the resolved flat-fill master so colored
+  /// bands cannot repaint portions removed by later Boolean operations.
+  List<(Path, Color)> getStrokeAddBandOverpaints(
+    Path fillMaster,
+  ) {
+    if (fillMaster.computeMetrics().isEmpty) {
+      return const [];
+    }
+
+    final output = <(Path, Color)>[];
+
+    for (final shape in shapes) {
+      if (!shape.isVisible) continue;
+      if (shape is CompassMesh) continue;
+
+      for (final bandData in _strokeBands(shape)) {
+        if (bandData.region.op != CompassBooleanOp.add) {
+          continue;
+        }
+
+        final color = bandData.region.color;
+        if (color == null) continue;
+
+        final band = shape.getStrokeOutlinePath(
+          bandData.width,
+          bandData.innerOffset,
+        );
+
+        if (band.computeMetrics().isEmpty) {
+          continue;
+        }
+
+        final clipped = Path.combine(
+          PathOperation.intersect,
+          fillMaster,
+          band,
+        );
+
+        if (clipped.computeMetrics().isEmpty) {
+          continue;
+        }
+
+        output.add((
+          applyMirror(clipped),
+          color,
+        ));
+      }
+    }
+
+    return output;
+  }
+
+  /// The resolved path for variable-width area strokes.
+  Path getLayerStrokeAreaPath() {
+    var master = Path();
+
+    for (final shape in shapes) {
+      if (!shape.isVisible) continue;
+
+      if (shape.operation == CompassBooleanOp.none &&
+          !_hasCarvingStroke(shape)) {
+        continue;
+      }
+
+      master = _applyStrokeStack(
+        master,
+        shape,
+        addsAllowed: false,
+      );
+
+      if (shape.operation == CompassBooleanOp.none) {
+        continue;
+      }
 
       final shapePath = shape.getPath();
-      if (shapePath.computeMetrics().isEmpty) continue;
+      if (shapePath.computeMetrics().isEmpty) {
+        continue;
+      }
 
-      // Only Add if it is an explicitly defined Area Stroke
       if (shape.operation == CompassBooleanOp.add) {
-        // A lifted-gradient width-spline paints its ribbon in the gradient pass
-        // instead, so keep it out of the area-stroke union (mirrors the flat-fill
-        // walk's skip). Its subtract/intersect siblings below are unaffected.
         if (shape is CompassXSpline &&
             shape.hasWidthProfile &&
             !hasLiftedGradientFill(shape)) {
           if (master.computeMetrics().isEmpty) {
             master = shapePath;
           } else {
-            master = Path.combine(PathOperation.union, master, shapePath);
+            master = Path.combine(
+              PathOperation.union,
+              master,
+              shapePath,
+            );
           }
         }
-        continue; // Normal fills don't add to the stroke master
+
+        continue;
       }
 
-      // Subtractions and Intersections cut through Area Strokes just like Fills!
-      if (master.computeMetrics().isNotEmpty) {
-        if (shape.operation == CompassBooleanOp.subtract) {
-          master = Path.combine(PathOperation.difference, master, shapePath);
-        } else if (shape.operation == CompassBooleanOp.intersect) {
-          master = Path.combine(PathOperation.intersect, master, shapePath);
-        }
+      if (master.computeMetrics().isEmpty) {
+        continue;
+      }
+
+      if (shape.operation == CompassBooleanOp.subtract) {
+        master = Path.combine(
+          PathOperation.difference,
+          master,
+          shapePath,
+        );
+      } else if (shape.operation == CompassBooleanOp.intersect) {
+        master = Path.combine(
+          PathOperation.intersect,
+          master,
+          shapePath,
+        );
       }
     }
+
     return applyMirror(master);
   }
 
-  /// The clip silhouette for a SINGLE gradient mesh on this layer: the mesh's own
-  /// outer ring, carved by the layer's boolean stack. The renderer clips the
-  /// mesh's drawVertices output to this path each frame.
+  /// The clip silhouette for one gradient mesh.
   ///
-  /// DELIBERATELY NOT MIRRORED. A mesh paints its color field via drawVertices,
-  /// not via this path -- mirroring only the clip would open a window on the far
-  /// half with no pixels behind it. Instead the RENDERER mirrors the whole mesh
-  /// pass: it draws the mesh once as normal, then (when mirrorEnabled) replays
-  /// the same clip + drawVertices inside canvas.transform(mirrorMatrix.storage),
-  /// which maps clip and vertices together. Exporters that rasterize meshes
-  /// follow the same recipe.
+  /// This path is deliberately not mirrored. The renderer mirrors the clip and
+  /// mesh vertices together in a transformed second drawing pass.
   Path getLayerMeshClipPath(CompassMesh mesh) {
-    Path clip = mesh.getPath();
-    if (clip.computeMetrics().isEmpty) return clip;
+    var clip = mesh.getPath();
 
-    for (var shape in shapes) {
+    if (clip.computeMetrics().isEmpty) {
+      return clip;
+    }
+
+    for (final shape in shapes) {
       if (!shape.isVisible) continue;
-      if (shape is CompassMesh) continue; // self + siblings: meshes never carve
 
-      // --- STROKE STACK cut (before fill) --- carve-only: add regions do nothing.
-      clip = _applyStrokeStack(clip, shape, addsAllowed: false);
+      if (shape is CompassMesh) {
+        continue;
+      }
 
-      // --- FILL cut ---
+      clip = _applyStrokeStack(
+        clip,
+        shape,
+        addsAllowed: false,
+      );
+
       if (shape.operation == CompassBooleanOp.subtract) {
         final cutter = shape.getPath();
-        if (cutter.computeMetrics().isEmpty) continue;
-        clip = Path.combine(PathOperation.difference, clip, cutter);
+
+        if (cutter.computeMetrics().isEmpty) {
+          continue;
+        }
+
+        clip = Path.combine(
+          PathOperation.difference,
+          clip,
+          cutter,
+        );
       } else if (shape.operation == CompassBooleanOp.intersect) {
         final cutter = shape.getPath();
-        if (cutter.computeMetrics().isEmpty) continue;
-        clip = Path.combine(PathOperation.intersect, clip, cutter);
+
+        if (cutter.computeMetrics().isEmpty) {
+          continue;
+        }
+
+        clip = Path.combine(
+          PathOperation.intersect,
+          clip,
+          cutter,
+        );
       }
     }
+
     return clip;
   }
 
-  /// The clip silhouette for a SINGLE gradient-FILL shape on this layer:
-  /// [target]'s own outline (getPath), carved by the layer's boolean stack. The
-  /// renderer clips the shader fill to this path each frame -- the exact analogue
-  /// of getLayerMeshClipPath, so a subtract shape carves a gradient circle just
-  /// as it carves a mesh.
+  /// The visible clip silhouette for one lifted gradient-fill [target].
   ///
-  /// DIFFERENCES from the mesh clip, both deliberate:
-  ///   * The TARGET itself is skipped by identity (a shape never carves its own
-  ///     fill -- and a shape's own stroke stack carves LOWER geometry, never its
-  ///     fill, so skipping the target skips its stroke here too). Meshes are still
-  ///     skipped wholesale because meshes never carve.
-  ///   * Other GRADIENT shapes are NOT skipped -- only their OP matters. A
-  ///     subtract shape that happens to carry a gradient still carves; an add
-  ///     gradient sibling doesn't (add never carves), exactly like any add shape.
+  /// The renderer paints flat layer geometry first and lifted gradients in a
+  /// later pass. Without compensating here, a lower gradient would overpaint an
+  /// ordinary ADD shape that appears later in [shapes], making the gradient look
+  /// as though it had jumped to the top of the layer.
   ///
-  /// DELIBERATELY NOT MIRRORED, for the same reason as the mesh clip: a shader
-  /// fill is a paint, so the renderer mirror-replays the whole gradient pass
-  /// (clip + shader) through mirrorMatrix rather than mirroring this path.
+  /// Only shapes after [target] are replayed because those are the shapes above
+  /// it in this layer's Boolean and Z-order:
+  ///
+  /// - A later ordinary ADD fill occludes the gradient.
+  /// - A later SUBTRACT or INTERSECT carves the gradient.
+  /// - A later lifted gradient naturally paints afterward and remains unclipped,
+  ///   preserving normal alpha compositing.
+  /// - A gradient mesh naturally paints after gradients and remains unclipped.
+  ///
+  /// Stroke regions follow the same stroke-before-fill ordering as the primary
+  /// Boolean walk. Null-color ADD bands belong to the early flat-fill pass and
+  /// therefore occlude the gradient. Custom-colored ADD bands paint after the
+  /// gradient and composite naturally. SUBTRACT and INTERSECT bands carve.
+  ///
+  /// The returned clip is deliberately not mirrored. The renderer reflects the
+  /// clip path and reuses the same world-space shader for the mirrored half.
   Path getLayerGradientClipPath(CompassShape target) {
-    Path clip = target.getPath();
-    if (clip.computeMetrics().isEmpty) return clip;
+    final targetIndex = shapes.indexOf(target);
 
-    for (var shape in shapes) {
-      if (!shape.isVisible) continue;
-      if (identical(shape, target)) continue; // never carve a shape by itself
-      if (shape is CompassMesh) continue;      // meshes never carve
+    if (targetIndex == -1 || !target.isVisible) {
+      return Path();
+    }
 
-      // --- STROKE STACK cut (before fill) --- carve-only: add regions do nothing.
-      clip = _applyStrokeStack(clip, shape, addsAllowed: false);
+    var clip = target.getPath();
 
-      // --- FILL cut ---
-      if (shape.operation == CompassBooleanOp.subtract) {
-        final cutter = shape.getPath();
-        if (cutter.computeMetrics().isEmpty) continue;
-        clip = Path.combine(PathOperation.difference, clip, cutter);
-      } else if (shape.operation == CompassBooleanOp.intersect) {
-        final cutter = shape.getPath();
-        if (cutter.computeMetrics().isEmpty) continue;
-        clip = Path.combine(PathOperation.intersect, clip, cutter);
+    if (clip.computeMetrics().isEmpty) {
+      return clip;
+    }
+
+    for (var index = targetIndex + 1;
+        index < shapes.length;
+        index++) {
+      final shape = shapes[index];
+
+      if (!shape.isVisible) {
+        continue;
+      }
+
+      // Meshes paint after the gradient pass and already composite correctly.
+      // They also never act as Boolean cutters.
+      if (shape is CompassMesh) {
+        continue;
+      }
+
+      // -----------------------------------------------------------------------
+      // Later shape's stroke stack
+      // -----------------------------------------------------------------------
+      for (final bandData in _strokeBands(shape)) {
+        final region = bandData.region;
+
+        if (region.op == CompassBooleanOp.none) {
+          continue;
+        }
+
+        final band = shape.getStrokeOutlinePath(
+          bandData.width,
+          bandData.innerOffset,
+        );
+
+        if (band.computeMetrics().isEmpty) {
+          continue;
+        }
+
+        switch (region.op) {
+          case CompassBooleanOp.add:
+            // Null-color bands are painted in the early layer-color pass. Remove
+            // their area from this later gradient pass so they remain above it.
+            //
+            // Custom-colored bands repaint after gradients and should naturally
+            // alpha-composite over them, so those are not removed here.
+            if (region.color == null) {
+              clip = Path.combine(
+                PathOperation.difference,
+                clip,
+                band,
+              );
+            }
+            break;
+
+          case CompassBooleanOp.subtract:
+            clip = Path.combine(
+              PathOperation.difference,
+              clip,
+              band,
+            );
+            break;
+
+          case CompassBooleanOp.intersect:
+            clip = Path.combine(
+              PathOperation.intersect,
+              clip,
+              band,
+            );
+            break;
+
+          case CompassBooleanOp.none:
+            break;
+        }
+
+        if (clip.computeMetrics().isEmpty) {
+          return clip;
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // Later shape's fill
+      // -----------------------------------------------------------------------
+      switch (shape.operation) {
+        case CompassBooleanOp.add:
+          // A later lifted gradient paints later in the same gradient pass, so
+          // retaining the lower gradient beneath it preserves alpha compositing.
+          if (hasLiftedGradientFill(shape)) {
+            break;
+          }
+
+          Path? occluder;
+
+          // Match getLayerFillPath for ADD width splines. Only a closed center
+          // fill belongs to the early flat-fill pass. The ribbon area is painted
+          // later and already sits above gradients through normal compositing.
+          if (shape is CompassXSpline &&
+              shape.hasWidthProfile) {
+            if (shape.isClosed) {
+              occluder = shape.getCenterPath()
+                ..fillType = PathFillType.evenOdd;
+            }
+          } else {
+            occluder = shape.getPath();
+          }
+
+          if (occluder != null &&
+              occluder.computeMetrics().isNotEmpty) {
+            clip = Path.combine(
+              PathOperation.difference,
+              clip,
+              occluder,
+            );
+          }
+          break;
+
+        case CompassBooleanOp.subtract:
+          final cutter = shape.getPath();
+
+          if (cutter.computeMetrics().isNotEmpty) {
+            clip = Path.combine(
+              PathOperation.difference,
+              clip,
+              cutter,
+            );
+          }
+          break;
+
+        case CompassBooleanOp.intersect:
+          final cutter = shape.getPath();
+
+          if (cutter.computeMetrics().isNotEmpty) {
+            clip = Path.combine(
+              PathOperation.intersect,
+              clip,
+              cutter,
+            );
+          }
+          break;
+
+        case CompassBooleanOp.none:
+          break;
+      }
+
+      if (clip.computeMetrics().isEmpty) {
+        return clip;
       }
     }
+
     return clip;
   }
 }

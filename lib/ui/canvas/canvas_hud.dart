@@ -1,4 +1,4 @@
-// lib/ui/canvas/canvas_hud.dart
+// /lib/ui/canvas/canvas_hud.dart
 import 'dart:math';
 import 'package:flutter/material.dart';
 
@@ -169,7 +169,13 @@ class CanvasHUD extends StatelessWidget {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text('Spiral Properties', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                          const Text(
+                            'Spiral Properties',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
                           IconButton(
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(),
@@ -184,43 +190,71 @@ class CanvasHUD extends StatelessWidget {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text('Direction:', style: TextStyle(fontSize: 12)),
+                          const Text(
+                            'Direction:',
+                            style: TextStyle(fontSize: 12),
+                          ),
                           SegmentedButton<bool>(
                             segments: const [
-                              ButtonSegment(value: false, icon: Icon(Icons.rotate_left, size: 16)),
-                              ButtonSegment(value: true, icon: Icon(Icons.rotate_right, size: 16)),
+                              ButtonSegment(
+                                value: false,
+                                icon: Icon(Icons.rotate_left, size: 16),
+                              ),
+                              ButtonSegment(
+                                value: true,
+                                icon: Icon(Icons.rotate_right, size: 16),
+                              ),
                             ],
                             selected: {selectedShape.isClockwise},
                             onSelectionChanged: (Set<bool> newSelection) {
-                              engine.updateSpiral(selectedShape, isClockwise: newSelection.first);
+                              engine.updateSpiral(
+                                selectedShape,
+                                isClockwise: newSelection.first,
+                              );
                             },
                           ),
                         ],
                       ),
                       const SizedBox(height: 12),
-                      Text('Revolutions: ${selectedShape.revolutions.toStringAsFixed(1)}', style: const TextStyle(fontSize: 12)),
+                      Text(
+                        'Revolutions: ${selectedShape.revolutions.toStringAsFixed(1)}',
+                        style: const TextStyle(fontSize: 12),
+                      ),
                       Slider(
                         value: selectedShape.revolutions,
                         min: 0.1,
                         max: 10.0,
                         divisions: 99,
                         onChanged: (val) {
-                          engine.updateSpiral(selectedShape, revolutions: val);
+                          engine.updateSpiral(
+                            selectedShape,
+                            revolutions: val,
+                          );
                         },
                       ),
                     ],
                   ),
                 ),
               );
-            } else if (showScaffolding && selectedShape is CompassRectangle) { 
-              final logicalX = min(selectedShape.p1.x.value, selectedShape.p2.x.value);
-              final logicalY = min(selectedShape.p1.y.value, selectedShape.p2.y.value);
+            } else if (
+                showScaffolding &&
+                selectedShape is CompassRectangle) {
+              final logicalX = min(
+                selectedShape.p1.x.value,
+                selectedShape.p2.x.value,
+              );
+              final logicalY = min(
+                selectedShape.p1.y.value,
+                selectedShape.p2.y.value,
+              );
               
               final physicalX = logicalX * canvasScale + panOffset.dx;
               final physicalY = logicalY * canvasScale + panOffset.dy;
 
-              final width = (selectedShape.p1.x.value - selectedShape.p2.x.value).abs();
-              final height = (selectedShape.p1.y.value - selectedShape.p2.y.value).abs();
+              final width =
+                  (selectedShape.p1.x.value - selectedShape.p2.x.value).abs();
+              final height =
+                  (selectedShape.p1.y.value - selectedShape.p2.y.value).abs();
               final maxRadius = max(0.1, min(width, height) / 2);
 
               return Positioned(
@@ -248,7 +282,13 @@ class CanvasHUD extends StatelessWidget {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text('Rectangle Properties', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                          const Text(
+                            'Rectangle Properties',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
                           IconButton(
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(),
@@ -259,7 +299,6 @@ class CanvasHUD extends StatelessWidget {
                         ],
                       ),
                       const Divider(),
-                      
                       Row(
                         children: [
                           SizedBox(
@@ -269,24 +308,38 @@ class CanvasHUD extends StatelessWidget {
                               value: selectedShape.isSquare,
                               onChanged: (val) {
                                 if (val != null) {
-                                  engine.toggleRectangleSquare(selectedShape, val);
+                                  engine.toggleRectangleSquare(
+                                    selectedShape,
+                                    val,
+                                  );
                                 }
                               },
                             ),
                           ),
                           const SizedBox(width: 8),
-                          const Text('Lock as Perfect Square', style: TextStyle(fontSize: 12)),
+                          const Text(
+                            'Lock as Perfect Square',
+                            style: TextStyle(fontSize: 12),
+                          ),
                         ],
                       ),
                       const SizedBox(height: 8),
-
-                      Text('Corner Radius: ${selectedShape.cornerRadius.value.toStringAsFixed(1)}', style: const TextStyle(fontSize: 12)),
+                      Text(
+                        'Corner Radius: ${selectedShape.cornerRadius.value.toStringAsFixed(1)}',
+                        style: const TextStyle(fontSize: 12),
+                      ),
                       Slider(
-                        value: selectedShape.cornerRadius.value.clamp(0.0, maxRadius),
+                        value: selectedShape.cornerRadius.value.clamp(
+                          0.0,
+                          maxRadius,
+                        ),
                         min: 0.0,
                         max: maxRadius,
                         onChanged: (val) {
-                          engine.updateRectangleRadius(selectedShape, val);
+                          engine.updateRectangleRadius(
+                            selectedShape,
+                            val,
+                          );
                         },
                       ),
                     ],
@@ -294,6 +347,7 @@ class CanvasHUD extends StatelessWidget {
                 ),
               );
             }
+
             return const SizedBox.shrink();
           },
         ),
@@ -307,7 +361,10 @@ class CanvasHUD extends StatelessWidget {
               decoration: BoxDecoration(
                 color: theme.colorScheme.surface,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: theme.dividerColor, width: 1),
+                border: Border.all(
+                  color: theme.dividerColor,
+                  width: 1,
+                ),
                 boxShadow: [
                   BoxShadow(
                     color: isDark ? Colors.black54 : Colors.black26,
@@ -354,14 +411,6 @@ class CanvasHUD extends StatelessWidget {
                     theme: theme,
                   ),
                   const SizedBox(width: 8),
-                  // <--- NEW: Rhombus Button added here --->
-                  _buildToolButton(
-                    icon: Icons.polyline,
-                    tooltip: 'Draw Rhombus',
-                    tool: CompassTool.addRhombus,
-                    theme: theme,
-                  ),
-                  const SizedBox(width: 8),
                   _buildToolButton(
                     icon: Icons.cyclone,
                     tooltip: 'Draw Golden Spiral',
@@ -390,10 +439,13 @@ class CanvasHUD extends StatelessWidget {
     required ThemeData theme,
   }) {
     final isSelected = currentTool == tool;
+
     return Tooltip(
       message: tooltip,
       child: Material(
-        color: isSelected ? theme.colorScheme.primary.withOpacity(0.15) : Colors.transparent,
+        color: isSelected
+            ? theme.colorScheme.primary.withOpacity(0.15)
+            : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           borderRadius: BorderRadius.circular(8),
@@ -402,7 +454,9 @@ class CanvasHUD extends StatelessWidget {
             padding: const EdgeInsets.all(12.0),
             child: Icon(
               icon,
-              color: isSelected ? theme.colorScheme.primary : theme.iconTheme.color,
+              color: isSelected
+                  ? theme.colorScheme.primary
+                  : theme.iconTheme.color,
             ),
           ),
         ),

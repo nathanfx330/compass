@@ -1,96 +1,461 @@
-// lib/models/geometry/gradient.dart
+// /lib/models/geometry/gradient.dart
 
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import 'point.dart';
 
-/// One color stop of a shape gradient. A stop is a POINT (source of truth, like
-/// everything else in Compass) carrying a color. The point lives in
-/// engine.points and is attached to the owning shape's primary structural point,
-/// so it drags, rotates, coheres, serializes, and undoes through the exact same
-/// machinery every other point uses -- no bespoke drag path, no bespoke GC.
+/// The shader geometry used by a per-shape gradient fill.
+///
+/// [linear] uses the first and last stops as the two ends of a straight axis.
+///
+/// [circular] uses the first stop as the center and the last stop as a radius
+/// handle. Interior stops are positioned by their normalized distance from the
+/// center and are displayed along the center-to-radius guide.
+enum GradientFillType {
+  linear,
+  circular,
+}
+
+/// One color stop of a shape gradient.
+///
+/// A stop is a real [CompassPoint], just like every other editable point in
+/// Compass. Its point lives in the engine's point collection and carries the
+/// stop's world-space position, while [color] carries its visual value.
+///
+/// The first and last stops in a [LinearGradientFill] are the gradient's two
+/// geometry handles. Stops between them are interior color stops.
 class GradientStop {
   final CompassPoint point;
   Color color;
 
-  GradientStop({required this.point, required this.color});
+  GradientStop({
+    required this.point,
+    required this.color,
+  });
 }
 
-/// A per-shape LINEAR fill gradient. Independent of the layer fill color AND of
-/// the gradient MESH system (that is a Coons surface; this is a flat fill shader
-/// on an ordinary shape's silhouette).
+/// A per-shape linear or circular fill gradient.
 ///
-/// AXIS MODEL: the gradient runs along the line from the FIRST stop to the LAST
-/// stop (in list order). Every stop's parametric position t is its scalar
-/// projection onto that axis, clamped to [0,1]; the two endpoints are therefore
-/// t=0 and t=1 by construction. The (position,color) pairs are sorted ascending
-/// before the shader is built, satisfying ui.Gradient.linear's non-decreasing
-/// stops contract even if the user has dragged stops out of projection order.
+/// This is independent of the gradient-mesh system. A gradient mesh is a Coons
+/// surface, while this class produces a flat shader clipped to an ordinary
+/// shape's resolved silhouette.
 ///
-/// DEGENERATE: a gradient with <2 stops renders as a SOLID fill of its single
-/// stop color -- the "Make Gradient" seed state before a second stop is added.
-/// 0 stops should never occur (Make Gradient always seeds one).
+/// The historical class name is intentionally retained so existing constructor
+/// calls and serialized document loading paths remain source-compatible.
 ///
-/// FUTURE (radial): add a `type` discriminant selecting ui.Gradient.radial with
-/// the first stop as center and |last-first| as radius. The stop list and the
-/// entire interaction/render/serialize layer are already type-agnostic, so
-/// radial is a shader swap here, not a rebuild upstream.
+/// ## Stop-list invariant
+///
+/// When two or more stops exist:
+///
+/// - `stops.first` is the start/center geometry handle.
+/// - `stops.last` is the end/radius geometry handle.
+/// - Every stop between them is an interior color stop.
+///
+/// New interior stops must therefore be inserted before the final stop rather
+/// than appended. Use [insertInteriorStop] to preserve that invariant.
+///
+/// ## Linear stop positions
+///
+/// A stop's normalized position is calculated by projecting its world-space
+/// point onto the start-to-end axis.
+///
+/// ## Circular stop positions
+///
+/// The first stop is the center. A stop's normalized position is its distance
+/// from that center divided by the center-to-radius-handle distance.
+///
+/// Interior points are displayed and dragged on the same finite guide segment
+/// in both modes. [projectOntoAxis] converts an arbitrary pointer position to
+/// the corresponding point on that guide.
+///
+/// ## Degenerate state
+///
+/// A gradient with fewer than two stops, or with coincident geometry handles,
+/// renders as a solid fill using its first available color.
 class LinearGradientFill {
+  static const double _axisEpsilon = 1e-9;
+
   final List<GradientStop> stops;
 
-  LinearGradientFill({required this.stops});
+  /// The current gradient geometry.
+  ///
+  /// Defaults to [GradientFillType.linear] so documents created before circular
+  /// gradients existed keep their original appearance.
+  GradientFillType type;
+
+  LinearGradientFill({
+    required this.stops,
+    this.type = GradientFillType.linear,
+  });
 
   bool get isRenderable => stops.isNotEmpty;
 
-  /// The single color to paint when the gradient is degenerate (<2 stops), else
-  /// null (a real shader is available). Caller paints a solid fill with this.
-  Color? get solidColor =>
-      stops.length >= 2 ? null : (stops.isEmpty ? null : stops.first.color);
+  bool get isLinear => type == GradientFillType.linear;
 
-  Offset _pt(GradientStop s) => Offset(s.point.x.value, s.point.y.value);
+  bool get isCircular => type == GradientFillType.circular;
 
-  /// The axis endpoints in world space (first -> last stop). Meaningful only
-  /// when there are >=2 stops; returned for the renderer's dashed axis line.
-  (Offset, Offset)? get axis =>
-      stops.length >= 2 ? (_pt(stops.first), _pt(stops.last)) : null;
+  /// The first geometry handle.
+  ///
+  /// In linear mode this is the start endpoint. In circular mode it is the
+  /// gradient center.
+  GradientStop? get startStop => stops.isEmpty ? null : stops.first;
 
-  /// Projection of every stop onto the first->last axis, clamped [0,1], paired
-  /// with its color and sorted ascending -- exactly the form ui.Gradient.linear
-  /// consumes. Endpoints land at 0 and 1 by construction; a stop dragged past an
-  /// endpoint simply clamps.
-  List<(double, Color)> _resolvedStops() {
-    if (stops.length < 2) return const [];
-    final a = _pt(stops.first);
-    final b = _pt(stops.last);
-    final axis = b - a;
-    final len2 = axis.dx * axis.dx + axis.dy * axis.dy;
+  /// The second geometry handle.
+  ///
+  /// In linear mode this is the end endpoint. In circular mode it controls the
+  /// radius. A one-stop gradient does not yet have a distinct second handle.
+  GradientStop? get endStop => stops.length < 2 ? null : stops.last;
 
-    final out = <(double, Color)>[];
-    for (final s in stops) {
-      double t;
-      if (len2 < 1e-9) {
-        t = 0.0; // coincident endpoints: degenerate axis, everything at 0
-      } else {
-        final rel = _pt(s) - a;
-        t = ((rel.dx * axis.dx + rel.dy * axis.dy) / len2).clamp(0.0, 1.0);
-      }
-      out.add((t, s.color));
+  /// All color stops between the two geometry handles.
+  Iterable<GradientStop> get interiorStops {
+    if (stops.length <= 2) {
+      return const <GradientStop>[];
     }
-    out.sort((x, y) => x.$1.compareTo(y.$1));
-    return out;
+
+    return stops.getRange(1, stops.length - 1);
   }
 
-  /// Builds the fill shader, or null when the gradient is degenerate (<2 stops)
-  /// -- the caller then paints a solid [solidColor]. Equal adjacent positions
-  /// are legal (they read as a hard color transition); only decreasing order is
-  /// illegal, and the sort above forbids that.
+  Offset _pointOffset(GradientStop stop) {
+    return Offset(
+      stop.point.x.value,
+      stop.point.y.value,
+    );
+  }
+
+  /// The world-space editing guide from the first stop to the last stop.
+  ///
+  /// In circular mode this is the center-to-radius guide. It is still exposed as
+  /// [axis] so the existing renderer, context menu, and drag code can remain
+  /// shared between both gradient types.
+  ///
+  /// Returns `null` until the gradient has two stops.
+  (Offset, Offset)? get axis {
+    if (stops.length < 2) {
+      return null;
+    }
+
+    return (
+      _pointOffset(stops.first),
+      _pointOffset(stops.last),
+    );
+  }
+
+  double get _axisLengthSquared {
+    final currentAxis = axis;
+    if (currentAxis == null) {
+      return 0.0;
+    }
+
+    final direction = currentAxis.$2 - currentAxis.$1;
+    return direction.dx * direction.dx +
+        direction.dy * direction.dy;
+  }
+
+  double get _axisLength {
+    final lengthSquared = _axisLengthSquared;
+    if (lengthSquared < _axisEpsilon) {
+      return 0.0;
+    }
+
+    return math.sqrt(lengthSquared);
+  }
+
+  bool get hasUsableAxis =>
+      stops.length >= 2 &&
+      _axisLengthSquared >= _axisEpsilon;
+
+  /// The circular gradient radius in world-space units.
+  ///
+  /// Returns `null` when the gradient has not yet established a usable guide.
+  double? get circularRadius {
+    if (!hasUsableAxis) {
+      return null;
+    }
+
+    return _axisLength;
+  }
+
+  /// The single color to paint when no usable shader geometry exists.
+  ///
+  /// Returns `null` when a real linear or circular shader can be built.
+  Color? get solidColor {
+    if (stops.isEmpty) {
+      return null;
+    }
+
+    if (!hasUsableAxis) {
+      return stops.first.color;
+    }
+
+    return null;
+  }
+
+  /// Whether [stop] is one of the two geometry handles.
+  bool isEndpoint(GradientStop stop) {
+    if (stops.isEmpty) {
+      return false;
+    }
+
+    if (identical(stop, stops.first)) {
+      return true;
+    }
+
+    return stops.length >= 2 &&
+        identical(stop, stops.last);
+  }
+
+  /// Projects a world-space position into the gradient's normalized range.
+  ///
+  /// Linear mode uses orthogonal projection onto the guide.
+  ///
+  /// Circular mode uses radial distance from the first stop divided by the
+  /// current radius. This means dragging around the center changes a stop's
+  /// radius naturally; [projectOntoAxis] then places the visible stop back onto
+  /// the center-to-radius guide.
+  ///
+  /// With [clampToAxis] enabled, the result is constrained to `[0, 1]`.
+  ///
+  /// Returns `0` when the gradient has no usable guide.
+  double projectPosition(
+    Offset worldPosition, {
+    bool clampToAxis = true,
+  }) {
+    final currentAxis = axis;
+    if (currentAxis == null) {
+      return 0.0;
+    }
+
+    final (start, end) = currentAxis;
+    final direction = end - start;
+    final lengthSquared =
+        direction.dx * direction.dx +
+        direction.dy * direction.dy;
+
+    if (lengthSquared < _axisEpsilon) {
+      return 0.0;
+    }
+
+    double projected;
+
+    if (isCircular) {
+      projected =
+          (worldPosition - start).distance /
+          math.sqrt(lengthSquared);
+    } else {
+      final relative = worldPosition - start;
+      projected =
+          (relative.dx * direction.dx +
+              relative.dy * direction.dy) /
+          lengthSquared;
+    }
+
+    if (!clampToAxis) {
+      return projected;
+    }
+
+    return projected.clamp(0.0, 1.0).toDouble();
+  }
+
+  /// Returns the normalized position of [stop].
+  double positionOf(GradientStop stop) {
+    return projectPosition(_pointOffset(stop));
+  }
+
+  /// Returns the world-space point at normalized position [t] on the editing
+  /// guide.
+  ///
+  /// With [clampToAxis] enabled, values outside `[0, 1]` are clamped to the
+  /// nearest geometry handle.
+  Offset pointAt(
+    double t, {
+    bool clampToAxis = true,
+  }) {
+    final currentAxis = axis;
+    if (currentAxis == null) {
+      return stops.isEmpty
+          ? Offset.zero
+          : _pointOffset(stops.first);
+    }
+
+    final (start, end) = currentAxis;
+    final resolvedT = clampToAxis
+        ? t.clamp(0.0, 1.0).toDouble()
+        : t;
+
+    return Offset.lerp(start, end, resolvedT) ?? start;
+  }
+
+  /// Returns the corresponding world-space point on the finite editing guide.
+  ///
+  /// For a linear gradient this is the closest orthogonal point on the axis.
+  /// For a circular gradient it is the point on the center-to-radius guide with
+  /// the same normalized radial distance.
+  Offset projectOntoAxis(Offset worldPosition) {
+    return pointAt(projectPosition(worldPosition));
+  }
+
+  /// Inserts [stop] as an interior color stop without replacing the existing
+  /// final geometry handle.
+  ///
+  /// The stop is placed in normalized gradient order. Its [CompassPoint] should
+  /// already be positioned at the intended world-space location, preferably
+  /// using [projectOntoAxis].
+  ///
+  /// When the gradient has zero or one stops, the new stop is appended because
+  /// it is still establishing the initial geometry.
+  void insertInteriorStop(GradientStop stop) {
+    if (stops.contains(stop)) {
+      return;
+    }
+
+    if (stops.length < 2) {
+      stops.add(stop);
+      return;
+    }
+
+    final newPosition = positionOf(stop);
+    var insertionIndex = stops.length - 1;
+
+    for (var index = 1;
+        index < stops.length - 1;
+        index++) {
+      final existingPosition = positionOf(stops[index]);
+
+      if (newPosition < existingPosition) {
+        insertionIndex = index;
+        break;
+      }
+    }
+
+    stops.insert(insertionIndex, stop);
+  }
+
+  /// Returns the currently rendered color at normalized position [t].
+  ///
+  /// This lets the context-menu interaction create a new stop without changing
+  /// the appearance of the gradient: sample the existing color first, then add
+  /// the new stop using that color.
+  Color? colorAt(double t) {
+    if (stops.isEmpty) {
+      return null;
+    }
+
+    if (stops.length == 1) {
+      return stops.first.color;
+    }
+
+    final resolved = resolvedStops();
+    if (resolved.isEmpty) {
+      return stops.first.color;
+    }
+
+    final clampedT = t.clamp(0.0, 1.0).toDouble();
+
+    if (clampedT <= resolved.first.$1) {
+      return resolved.first.$2;
+    }
+
+    for (var index = 0;
+        index < resolved.length - 1;
+        index++) {
+      final left = resolved[index];
+      final right = resolved[index + 1];
+
+      if (clampedT > right.$1) {
+        continue;
+      }
+
+      final span = right.$1 - left.$1;
+
+      if (span.abs() < _axisEpsilon) {
+        return right.$2;
+      }
+
+      final localT =
+          (clampedT - left.$1) / span;
+
+      return Color.lerp(
+            left.$2,
+            right.$2,
+            localT,
+          ) ??
+          right.$2;
+    }
+
+    return resolved.last.$2;
+  }
+
+  /// Returns the currently rendered color at [worldPosition].
+  Color? colorAtPosition(Offset worldPosition) {
+    return colorAt(projectPosition(worldPosition));
+  }
+
+  /// Resolves every stop into a sorted `(position, color)` pair suitable for
+  /// Flutter's linear and radial gradient shader constructors.
+  ///
+  /// Equal adjacent positions are valid and create a hard color transition.
+  List<(double, Color)> resolvedStops() {
+    if (stops.length < 2) {
+      return const <(double, Color)>[];
+    }
+
+    final output = <(double, Color)>[];
+
+    for (final stop in stops) {
+      output.add((
+        positionOf(stop),
+        stop.color,
+      ));
+    }
+
+    output.sort(
+      (left, right) =>
+          left.$1.compareTo(right.$1),
+    );
+
+    return output;
+  }
+
+  /// Builds the active linear or circular fill shader.
+  ///
+  /// Returns `null` when fewer than two stops exist or the two geometry handles
+  /// are coincident. The caller should use [solidColor] in that state.
   ui.Shader? buildShader() {
-    if (stops.length < 2) return null;
-    final (a, b) = axis!;
-    final resolved = _resolvedStops();
-    final positions = [for (final r in resolved) r.$1];
-    final colors = [for (final r in resolved) r.$2];
-    return ui.Gradient.linear(a, b, colors, positions);
+    final currentAxis = axis;
+
+    if (currentAxis == null || !hasUsableAxis) {
+      return null;
+    }
+
+    final (start, end) = currentAxis;
+    final resolved = resolvedStops();
+
+    final positions = <double>[
+      for (final stop in resolved) stop.$1,
+    ];
+
+    final colors = <Color>[
+      for (final stop in resolved) stop.$2,
+    ];
+
+    switch (type) {
+      case GradientFillType.linear:
+        return ui.Gradient.linear(
+          start,
+          end,
+          colors,
+          positions,
+        );
+
+      case GradientFillType.circular:
+        return ui.Gradient.radial(
+          start,
+          (end - start).distance,
+          colors,
+          positions,
+        );
+    }
   }
 }

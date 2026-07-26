@@ -101,6 +101,60 @@ class CanvasGestureHandler {
     );
   }
 
+  /// Whether [point] belongs to any ordinary shape's linear fill gradient.
+  ///
+  /// Gradient-stop points live in the global point pool, but their dots are
+  /// drawn only for the selected shape. Without this check, an invisible stop
+  /// belonging to another shape can steal hover, click, and drag hit tests.
+  static bool _isGradientStopPoint(
+    CompassEngine engine,
+    CompassPoint point,
+  ) {
+    for (final layer in engine.layers) {
+      for (final shape in layer.shapes) {
+        final gradient = shape.gradient;
+        if (gradient == null) {
+          continue;
+        }
+
+        if (gradient.stops.any((stop) => stop.point == point)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /// Hit-tests an ordinary editable point.
+  ///
+  /// A gradient stop is returned only when it belongs to the currently selected,
+  /// visible, unlocked shape. Structural geometry points keep their existing
+  /// hit-testing behavior.
+  static CompassPoint? _hitTestEditablePoint(
+    CanvasController controller,
+    CompassEngine engine,
+    Offset logicalPosition,
+    double threshold,
+  ) {
+    final point = CanvasHitTester.hitTestPoint(
+      engine,
+      logicalPosition,
+      threshold,
+    );
+
+    if (point == null) {
+      return null;
+    }
+
+    if (_isGradientStopPoint(engine, point) &&
+        controller.editableGradientStopForPoint(point) == null) {
+      return null;
+    }
+
+    return point;
+  }
+
   // ===========================================================================
   // PAN & SCROLL GESTURES (Canvas Movement)
   // ===========================================================================
@@ -157,7 +211,12 @@ class CanvasGestureHandler {
     final logicalPosition = controller.getLogicalPosition(localPosition);
 
     controller.hoverPosition = logicalPosition;
-    controller.hoveredPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, controller.hitThreshold / controller.canvasScale);
+    controller.hoveredPoint = _hitTestEditablePoint(
+      controller,
+      engine,
+      logicalPosition,
+      controller.hitThreshold / controller.canvasScale,
+    );
 
     controller.updateAddVertexHover(logicalPosition);
     controller.updateMeshSliceHover(logicalPosition); 
@@ -253,7 +312,12 @@ class CanvasGestureHandler {
 
     CompassShape? clickedShape;
     final scaledThreshold = controller.hitThreshold / controller.canvasScale;
-    CompassPoint? clickedPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, scaledThreshold);
+    CompassPoint? clickedPoint = _hitTestEditablePoint(
+      controller,
+      engine,
+      logicalPosition,
+      scaledThreshold,
+    );
 
     if (clickedPoint == null) {
       for (var layer in engine.layers.reversed) {
@@ -375,7 +439,12 @@ class CanvasGestureHandler {
     }
 
     if (controller.currentTool == CompassTool.select) {
-      CompassPoint? hitPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, controller.hitThreshold / controller.canvasScale);
+      CompassPoint? hitPoint = _hitTestEditablePoint(
+        controller,
+        engine,
+        logicalPosition,
+        controller.hitThreshold / controller.canvasScale,
+      );
 
       final pressOnSelectionMember = hitPoint != null && controller.selectedPoints.contains(hitPoint);
       final pressInsideBox = hitPoint == null && isPressOnSelection(controller, logicalPosition);
@@ -397,18 +466,27 @@ class CanvasGestureHandler {
         controller.notifyListeners();
 
         CompassShape? ownerShape;
-        for (var layer in engine.layers.reversed) {
-          if (!layer.isVisible || layer.isLocked) continue; 
-          for (var shape in layer.shapes.reversed) {
-            if (!shape.isVisible) continue;
-            if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; } 
-            else if (shape is CompassMesh && (shape.containsNode(hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
-            else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) { ownerShape = shape; break; } 
-            else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; } 
-            else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) { ownerShape = shape; break; } 
-            else if (shape is CompassSpiral && (shape.center == hitPoint || shape.startPoint == hitPoint)) { ownerShape = shape; break; }
+
+        final gradientOwner =
+            controller.editableGradientStopForPoint(hitPoint);
+        if (gradientOwner != null) {
+          ownerShape = gradientOwner.$1;
+        }
+
+        if (ownerShape == null) {
+          for (var layer in engine.layers.reversed) {
+            if (!layer.isVisible || layer.isLocked) continue; 
+            for (var shape in layer.shapes.reversed) {
+              if (!shape.isVisible) continue;
+              if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassMesh && (shape.containsNode(hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
+              else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassSpiral && (shape.center == hitPoint || shape.startPoint == hitPoint)) { ownerShape = shape; break; }
+            }
+            if (ownerShape != null) break;
           }
-          if (ownerShape != null) break;
         }
 
         engine.selectShape(ownerShape);
@@ -649,7 +727,12 @@ class CanvasGestureHandler {
       if (controller.hoveredPoint != null) {
         tappedPoint = controller.hoveredPoint;
       } else {
-        tappedPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, controller.hitThreshold / controller.canvasScale);
+        tappedPoint = _hitTestEditablePoint(
+          controller,
+          engine,
+          logicalPosition,
+          controller.hitThreshold / controller.canvasScale,
+        );
       }
 
       if (tappedPoint == null) {
@@ -712,19 +795,29 @@ class CanvasGestureHandler {
         controller.selectedPoints = {hitPoint};
 
         CompassShape? ownerShape;
-        for (var layer in engine.layers.reversed) {
-          if (!layer.isVisible || layer.isLocked) continue;
-          for (var shape in layer.shapes.reversed) {
-            if (!shape.isVisible) continue;
-            if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; } 
-            else if (shape is CompassMesh && (shape.containsNode(hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
-            else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) { ownerShape = shape; break; } 
-            else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; } 
-            else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) { ownerShape = shape; break; } 
-            else if (shape is CompassSpiral && (shape.center == hitPoint || shape.startPoint == hitPoint)) { ownerShape = shape; break; }
-          }
-          if (ownerShape != null) break;
+
+        final gradientOwner =
+            controller.editableGradientStopForPoint(hitPoint);
+        if (gradientOwner != null) {
+          ownerShape = gradientOwner.$1;
         }
+
+        if (ownerShape == null) {
+          for (var layer in engine.layers.reversed) {
+            if (!layer.isVisible || layer.isLocked) continue;
+            for (var shape in layer.shapes.reversed) {
+              if (!shape.isVisible) continue;
+              if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassMesh && (shape.containsNode(hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
+              else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassSpiral && (shape.center == hitPoint || shape.startPoint == hitPoint)) { ownerShape = shape; break; }
+            }
+            if (ownerShape != null) break;
+          }
+        }
+
         engine.selectShape(ownerShape);
       }
     } else {
@@ -802,6 +895,47 @@ class CanvasGestureHandler {
       return;
     }
 
+    // --- PER-SHAPE LINEAR GRADIENT STOP DRAG ---
+    //
+    // Gradient stops win over the mirror axis, selection-box movement, and the
+    // generic point-drag path. Endpoint stops remain free so they can redefine
+    // the axis. Interior stops are projected onto that axis during updates.
+    if (showScaffolding &&
+        !controller.isRPressed &&
+        !controller.isShiftRPressed &&
+        !controller.isCtrlRPressed &&
+        !controller.isAPressed &&
+        !controller.isFPressed &&
+        !controller.isWPressed &&
+        !controller.isZPressed &&
+        !controller.isShiftZPressed &&
+        !controller.isQPressed &&
+        !controller.isXPressed) {
+      final gradientHit = _hitTestEditablePoint(
+        controller,
+        engine,
+        logicalPosition,
+        controller.hitThreshold / controller.canvasScale,
+      );
+
+      if (gradientHit != null &&
+          controller.beginGradientStopDrag(gradientHit)) {
+        controller.pendingSelectPress = null;
+        controller.selectedPoints = {gradientHit};
+        controller.transformingPoints = {gradientHit};
+        controller.isPanningSelectedPoints = true;
+        gradientHit.isBeingDragged = true;
+
+        final gradientShape = controller.gradientDragShape;
+        if (gradientShape != null) {
+          engine.selectShape(gradientShape);
+        }
+
+        controller.notifyListeners();
+        return;
+      }
+    }
+
     // --- MIRROR MODIFIER: axis line drag ---
     // Grab the ACTIVE layer's mirror axis when pressing near it. Guards:
     //   * only the active, unlocked, mirror-enabled layer -- dim axes of other
@@ -819,8 +953,12 @@ class CanvasGestureHandler {
           !controller.isAPressed && !controller.isFPressed && !controller.isWPressed &&
           !controller.isZPressed && !controller.isShiftZPressed && !controller.isQPressed &&
           !controller.isXPressed) {
-        final pointUnderCursor = CanvasHitTester.hitTestPoint(
-            engine, logicalPosition, controller.hitThreshold / controller.canvasScale);
+        final pointUnderCursor = _hitTestEditablePoint(
+          controller,
+          engine,
+          logicalPosition,
+          controller.hitThreshold / controller.canvasScale,
+        );
         if (pointUnderCursor == null) {
           final double distToAxis = mLayer.mirrorAxis == MirrorAxis.vertical
               ? (logicalPosition.dx - mLayer.mirrorPosition).abs()
@@ -869,7 +1007,12 @@ class CanvasGestureHandler {
 
     if (controller.selectedPoints.length >= 2 &&
         !controller.isRPressed && !controller.isShiftRPressed && !controller.isCtrlRPressed && !controller.isAPressed && !controller.isFPressed && !controller.isWPressed && !controller.isZPressed && !controller.isShiftZPressed) {
-      final hp = CanvasHitTester.hitTestPoint(engine, logicalPosition, controller.hitThreshold / controller.canvasScale);
+      final hp = _hitTestEditablePoint(
+        controller,
+        engine,
+        logicalPosition,
+        controller.hitThreshold / controller.canvasScale,
+      );
       final onMember = hp != null && controller.selectedPoints.contains(hp);
       final inBoxNoDot = hp == null && isPressOnSelection(controller, logicalPosition);
 
@@ -1018,7 +1161,12 @@ class CanvasGestureHandler {
        }
     }
 
-    CompassPoint? hitPoint = CanvasHitTester.hitTestPoint(engine, logicalPosition, controller.hitThreshold / controller.canvasScale);
+    CompassPoint? hitPoint = _hitTestEditablePoint(
+      controller,
+      engine,
+      logicalPosition,
+      controller.hitThreshold / controller.canvasScale,
+    );
 
     if (hitPoint != null) {
       if (!controller.selectedPoints.contains(hitPoint)) {
@@ -1061,6 +1209,53 @@ class CanvasGestureHandler {
 
     final dx = logicalPosition.dx - controller.lastPanPosition!.dx;
     final dy = logicalPosition.dy - controller.lastPanPosition!.dy;
+
+    // --- PER-SHAPE LINEAR GRADIENT STOP: live drag ---
+    //
+    // Use absolute proposed coordinates for the active stop. Interior stops are
+    // projected onto the finite dotted axis; endpoint stops pass through
+    // unchanged and therefore remain freely draggable.
+    final activeGradientStop = controller.gradientDragStop;
+    if (activeGradientStop != null) {
+      final stopPoint = activeGradientStop.point;
+      final gradient = controller.gradientDragShape?.gradient;
+
+      // Preserve every interior stop's parametric offset before moving an axis
+      // endpoint. After the endpoint moves, place those stops back at the same
+      // offsets on the new axis so their dots never drift away from the line.
+      final interiorPositions = <(CompassPoint, double)>[];
+      if (gradient != null &&
+          !controller.isDraggingInteriorGradientStop) {
+        for (final interiorStop in gradient.interiorStops) {
+          interiorPositions.add((
+            interiorStop.point,
+            gradient.positionOf(interiorStop),
+          ));
+        }
+      }
+
+      final proposed = Offset(
+        stopPoint.x.value + dx,
+        stopPoint.y.value + dy,
+      );
+      final constrained =
+          controller.constrainGradientStopDrag(proposed);
+
+      stopPoint.x.value = constrained.dx;
+      stopPoint.y.value = constrained.dy;
+
+      if (gradient != null && interiorPositions.isNotEmpty) {
+        for (final entry in interiorPositions) {
+          final repositioned = gradient.pointAt(entry.$2);
+          entry.$1.x.value = repositioned.dx;
+          entry.$1.y.value = repositioned.dy;
+        }
+      }
+
+      engine.notifyListeners();
+      controller.lastPanPosition = logicalPosition;
+      return;
+    }
 
     // --- MIRROR MODIFIER: live axis drag ---
     // Absolute placement (cursor coordinate, not delta accumulation) so the
@@ -1272,6 +1467,20 @@ class CanvasGestureHandler {
       return;
     }
 
+    final activeGradientStop = controller.gradientDragStop;
+    if (activeGradientStop != null) {
+      activeGradientStop.point.isBeingDragged = false;
+      controller.isPanningSelectedPoints = false;
+      controller.transformingPoints.clear();
+      controller.clearGradientStopDragState();
+
+      engine.finalizePointDrag();
+      controller.notifyListeners();
+      controller.lastPanPosition = null;
+      controller.dragStartLogicalPosition = null;
+      return;
+    }
+
     if (controller.isRotating || controller.isPanningShape) {
       controller.isRotating = false;
       controller.isPanningShape = false;
@@ -1333,6 +1542,14 @@ class CanvasGestureHandler {
   }
   
   static void onPanCancel(CanvasController controller) {
+    final activeGradientStop = controller.gradientDragStop;
+    if (activeGradientStop != null) {
+      activeGradientStop.point.isBeingDragged = false;
+      controller.isPanningSelectedPoints = false;
+      controller.transformingPoints.clear();
+      controller.clearGradientStopDragState();
+    }
+
     if (controller.isRotating || controller.isPanningShape) {
       controller.isRotating = false;
       controller.isPanningShape = false;

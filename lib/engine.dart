@@ -928,25 +928,53 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Adds a new stop at [pos] (typically the right-click location) to [shape]'s
-  /// existing gradient. No-op if the shape has no gradient. If [color] is null,
-  /// the new stop takes a CONTRASTING default (white over a dark reference, black
-  /// over a light one) so the gradient is immediately visible; the user then sets
-  /// it via the color picker.
+  /// Adds a stop to [shape]'s existing linear gradient.
+  ///
+  /// STOP 2 establishes the end of the gradient axis. It is allowed to use the
+  /// supplied world-space [pos] directly, because there is no axis to project
+  /// onto until that second endpoint exists.
+  ///
+  /// STOP 3 AND LATER are interior color stops. They are projected onto the
+  /// existing first-to-last axis, then inserted before the final endpoint in
+  /// projected order. This preserves the two endpoint stops and prevents adding
+  /// a color stop from silently redefining the gradient direction.
+  ///
+  /// When [color] is omitted:
+  ///   * the second endpoint receives a contrasting color so the new ramp is
+  ///     immediately visible;
+  ///   * an interior stop samples the gradient's current color at its projected
+  ///     position, so inserting it does not alter the artwork until recolored.
   void addGradientStop(CompassShape shape, Offset pos, {Color? color}) {
-    final g = shape.gradient;
-    if (g == null) return;
+    final gradient = shape.gradient;
+    if (gradient == null) return;
 
-    Color c;
+    final isEstablishingAxis = gradient.stops.length < 2;
+    final resolvedPosition =
+        isEstablishingAxis ? pos : gradient.projectOntoAxis(pos);
+
+    Color resolvedColor;
     if (color != null) {
-      c = color;
+      resolvedColor = color;
+    } else if (isEstablishingAxis) {
+      final referenceColor = gradient.stops.isNotEmpty
+          ? gradient.stops.first.color
+          : const Color(0xFF808080);
+
+      resolvedColor = referenceColor.computeLuminance() < 0.5
+          ? Colors.white
+          : Colors.black;
     } else {
-      final ref = g.stops.isNotEmpty ? g.stops.last.color : const Color(0xFF808080);
-      c = ref.computeLuminance() < 0.5 ? Colors.white : Colors.black;
+      resolvedColor = gradient.colorAtPosition(resolvedPosition) ??
+          gradient.stops.first.color;
     }
 
-    final sp = _spawnStopPoint(shape, pos);
-    g.stops.add(GradientStop(point: sp, color: c));
+    final stopPoint = _spawnStopPoint(shape, resolvedPosition);
+    final stop = GradientStop(
+      point: stopPoint,
+      color: resolvedColor,
+    );
+
+    gradient.insertInteriorStop(stop);
 
     saveSnapshot();
     notifyListeners();

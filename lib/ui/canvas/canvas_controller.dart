@@ -11,6 +11,7 @@ import '../../models/geometry/point.dart';
 import '../../models/geometry/shape.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh slicing
+import '../../models/geometry/gradient.dart';
 import '../../models/layer.dart'; // <--- NEW: CompassLayer for the mirror-axis drag slot
 
 // --- Imports ---
@@ -137,6 +138,19 @@ class CanvasController extends ChangeNotifier {
   // (snapshot on onPanEnd, cleared on onPanCancel).
   CompassLayer? mirrorDragLayer;
 
+  // --- PER-SHAPE LINEAR GRADIENT STOP DRAG ---
+  //
+  // The first and last gradient stops define the axis and remain freely
+  // draggable so the user can reposition, rotate, and resize that axis.
+  // Stops between them are interior color stops. While an interior stop is
+  // dragged, the gesture handler asks [constrainGradientStopDrag] for the
+  // nearest position on the dotted axis, producing a true slider interaction.
+  //
+  // These slots are controller interaction state only. They are not document
+  // state and therefore are never serialized or snapshotted.
+  CompassShape? gradientDragShape;
+  GradientStop? gradientDragStop;
+
   // --- TOOL MANAGEMENT ---
   void setTool(CompassTool tool) {
     currentTool = tool;
@@ -144,6 +158,7 @@ class CanvasController extends ChangeNotifier {
     shapeStartPoint = null; 
     activeSpline = null;
     pendingSelectPress = null;
+    clearGradientStopDragState();
     clearAddVertexHover();
     clearMeshSliceHover();
     notifyListeners();
@@ -216,6 +231,7 @@ class CanvasController extends ChangeNotifier {
     isStrictPanningSelection = false;
     isPanningShape = false;
     mirrorDragLayer = null;
+    clearGradientStopDragState();
 
     clearRotationState();
     clearFilletState();
@@ -254,6 +270,118 @@ class CanvasController extends ChangeNotifier {
       selectedPoints.remove(point);
       notifyListeners();
     }
+  }
+
+  // ===========================================================================
+  // PER-SHAPE LINEAR GRADIENT STOP DRAG
+  // ===========================================================================
+
+  /// Returns the selected, visible, unlocked shape and gradient stop that own
+  /// [point], or `null` when the point is not an editable visible gradient stop.
+  ///
+  /// Gradient stops belonging to unselected shapes are intentionally ignored.
+  /// Their dots and dotted axes are not drawn, so they must not remain
+  /// accidentally hittable as invisible points.
+  (CompassShape, GradientStop)? editableGradientStopForPoint(
+    CompassPoint point,
+  ) {
+    final shape = engine.selectedShape;
+    if (shape == null || !shape.isVisible) {
+      return null;
+    }
+
+    CompassLayer? owningLayer;
+    for (final layer in engine.layers) {
+      if (layer.shapes.contains(shape)) {
+        owningLayer = layer;
+        break;
+      }
+    }
+
+    if (owningLayer == null ||
+        !owningLayer.isVisible ||
+        owningLayer.isLocked) {
+      return null;
+    }
+
+    final gradient = shape.gradient;
+    if (gradient == null) {
+      return null;
+    }
+
+    for (final stop in gradient.stops) {
+      if (stop.point == point) {
+        return (shape, stop);
+      }
+    }
+
+    return null;
+  }
+
+  /// Captures a gradient stop for the current point drag.
+  ///
+  /// Returns `true` when [point] is an editable stop belonging to the currently
+  /// selected shape. The gesture handler can still use its ordinary point-drag
+  /// machinery; it only needs to pass proposed positions through
+  /// [constrainGradientStopDrag].
+  bool beginGradientStopDrag(CompassPoint point) {
+    final hit = editableGradientStopForPoint(point);
+
+    if (hit == null) {
+      clearGradientStopDragState();
+      return false;
+    }
+
+    gradientDragShape = hit.$1;
+    gradientDragStop = hit.$2;
+    return true;
+  }
+
+  /// Whether the captured gradient stop is an interior color stop.
+  ///
+  /// Endpoint stops define the gradient axis and therefore remain freely
+  /// draggable. Only interior stops behave as sliders locked to that axis.
+  bool get isDraggingInteriorGradientStop {
+    final shape = gradientDragShape;
+    final stop = gradientDragStop;
+    final gradient = shape?.gradient;
+
+    if (shape == null || stop == null || gradient == null) {
+      return false;
+    }
+
+    if (!gradient.stops.contains(stop)) {
+      return false;
+    }
+
+    return !gradient.isEndpoint(stop);
+  }
+
+  /// Constrains a proposed world-space drag position when an interior gradient
+  /// stop is active.
+  ///
+  /// For endpoint stops, ordinary points, removed stops, or gradients that no
+  /// longer exist, the proposed position is returned unchanged.
+  Offset constrainGradientStopDrag(Offset proposedPosition) {
+    final shape = gradientDragShape;
+    final stop = gradientDragStop;
+    final gradient = shape?.gradient;
+
+    if (shape == null || stop == null || gradient == null) {
+      return proposedPosition;
+    }
+
+    if (!gradient.stops.contains(stop) || gradient.isEndpoint(stop)) {
+      return proposedPosition;
+    }
+
+    return gradient.projectOntoAxis(proposedPosition);
+  }
+
+  /// Clears the transient gradient-stop drag capture.
+  void clearGradientStopDragState() {
+    gradientDragShape = null;
+    gradientDragStop = null;
   }
 
   void startSplineFrom(CompassPoint point) {

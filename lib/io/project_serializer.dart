@@ -110,65 +110,117 @@ class ProjectSerializer {
     return const [];
   }
 
-  // The optional per-shape GRADIENT token, appended as a trailing comma-field of a
-  // SHAPE line, EXACTLY like the STROKE token above and read the same way (prefix
-  // scan, not a fixed index). Emitted ONLY when the shape carries a gradient with
-  // at least one stop, so a gradientless shape serializes byte-for-byte as before
-  // and older code opening a new file just ignores the trailing field.
+  // Optional per-shape gradient tokens, appended as trailing comma-fields of a
+  // SHAPE line and discovered by prefix scan rather than fixed indexes.
   //
-  // Format: `GRAD:stopPointId:colorARGB|stopPointId:colorARGB|...` -- one stop per
-  // pipe group, IN LIST ORDER (order defines the first->last gradient axis). Only
-  // the per-stop COLOR lives in this token; each stop's POSITION already round-trips
-  // as its own POINT line and its cohesion as an ATTACH edge (the stop is an
-  // ordinary point attached to the shape's anchor), so the token never carries
-  // coordinates. Point ids are comma-free (they already survive the CSV round-trip)
-  // and colon/pipe-free, so the id:color:| grammar can't be corrupted by an id.
+  // `GRAD:stopPointId:colorARGB|stopPointId:colorARGB|...`
+  // stores the stops in list order. Their POINT lines already persist positions,
+  // while ATTACH lines persist the shape-cohesion edges.
   //
-  // WHY A TOKEN, not a separate GRADIENT line: this format identifies shapes only
-  // by their defining point ids (there is no shape id), so a standalone line would
-  // have to re-derive the owning shape. Riding the shape line instead binds the
-  // gradient to its shape structurally -- it is parsed and assigned right where the
-  // shape is built, with zero lookup. Distinct from the gradient MESH (its own
-  // SHAPE,MESH line): this is a shader fill on an ordinary shape.
+  // `GRADTYPE:linear|circular`
+  // stores the shader geometry independently from the stop list. Keeping this as
+  // its own comma-field is intentionally backward-compatible:
   //
-  // BACKWARD COMPAT: legacy files carry no GRAD token (clean no-op -> gradient stays
-  // null = flat fill); a new save opened by older code ignores the unknown field.
+  //   * legacy files have no GRADTYPE token and therefore load as linear;
+  //   * older Compass builds still parse the unchanged GRAD token and simply
+  //     ignore the unknown GRADTYPE field;
+  //   * gradientless shapes emit neither token and remain byte-for-byte unchanged.
+  //
+  // Both tokens ride the SHAPE line because the project format has no independent
+  // shape id. Parsing them while the shape is constructed binds the gradient to
+  // its owner without a later shape-matching pass.
   static String _gradientToken(CompassShape shape) {
-    final g = shape.gradient;
-    if (g == null || g.stops.isEmpty) return '';
-    final body = g.stops.map((st) => '${st.point.id}:${st.color.value}').join('|');
-    return ',GRAD:$body';
+    final gradient = shape.gradient;
+    if (gradient == null || gradient.stops.isEmpty) {
+      return '';
+    }
+
+    final stopBody = gradient.stops
+        .map((stop) => '${stop.point.id}:${stop.color.value}')
+        .join('|');
+
+    return ',GRAD:$stopBody,GRADTYPE:${gradient.type.name}';
+  }
+
+  /// Reads the optional gradient-type token.
+  ///
+  /// Linear is the defensive and legacy default. An unknown value also falls back
+  /// to linear so a partially corrupt project cannot prevent the shape from loading.
+  static GradientFillType _parseGradientTypeToken(List<String> parts) {
+    for (final raw in parts) {
+      final token = raw.trim();
+      if (!token.startsWith('GRADTYPE:')) {
+        continue;
+      }
+
+      final name = token.substring('GRADTYPE:'.length).trim();
+
+      return GradientFillType.values.firstWhere(
+        (candidate) => candidate.name == name,
+        orElse: () => GradientFillType.linear,
+      );
+    }
+
+    return GradientFillType.linear;
   }
 
   // Decodes the optional GRAD token into a LinearGradientFill, or null when absent
-  // or empty. Scans every part for the 'GRAD:' prefix (trimmed first, so a trailing
-  // CRLF '\r' can't corrupt the last stop), mirroring _parseStrokeToken. Each stop
-  // is `pointId:colorARGB`; a stop whose point is missing from [pointMap] or whose
-  // color won't parse is skipped rather than crashing the load. A token that yields
-  // no valid stops returns null (equivalent to no gradient), and the engine treats
-  // a stopless gradient as flat anyway. Stop ORDER is preserved by the pipe split,
-  // so the first->last axis survives exactly.
+  // or empty. Each stop is `pointId:colorARGB`; a stop whose point is missing from
+  // [pointMap], or whose color cannot be parsed, is skipped rather than crashing
+  // the load. Stop order is preserved exactly.
   static LinearGradientFill? _parseGradientToken(
-      List<String> parts, Map<String, CompassPoint> pointMap) {
-    for (final raw in parts) {
-      final t = raw.trim();
-      if (!t.startsWith('GRAD:')) continue;
+    List<String> parts,
+    Map<String, CompassPoint> pointMap,
+  ) {
+    final gradientType = _parseGradientTypeToken(parts);
 
-      final body = t.substring('GRAD:'.length);
-      final stops = <GradientStop>[];
-      for (final ss in body.split('|')) {
-        if (ss.isEmpty) continue;
-        final seg = ss.split(':');
-        if (seg.length < 2) continue;
-        final pt = pointMap[seg[0].trim()];
-        if (pt == null) continue; // stop point absent -> drop this stop
-        final cv = int.tryParse(seg[1].trim());
-        if (cv == null) continue; // unparseable color -> drop this stop
-        stops.add(GradientStop(point: pt, color: Color(cv)));
+    for (final raw in parts) {
+      final token = raw.trim();
+      if (!token.startsWith('GRAD:')) {
+        continue;
       }
-      if (stops.isEmpty) return null;
-      return LinearGradientFill(stops: stops);
+
+      final body = token.substring('GRAD:'.length);
+      final stops = <GradientStop>[];
+
+      for (final stopString in body.split('|')) {
+        if (stopString.isEmpty) {
+          continue;
+        }
+
+        final segments = stopString.split(':');
+        if (segments.length < 2) {
+          continue;
+        }
+
+        final point = pointMap[segments[0].trim()];
+        if (point == null) {
+          continue;
+        }
+
+        final colorValue = int.tryParse(segments[1].trim());
+        if (colorValue == null) {
+          continue;
+        }
+
+        stops.add(
+          GradientStop(
+            point: point,
+            color: Color(colorValue),
+          ),
+        );
+      }
+
+      if (stops.isEmpty) {
+        return null;
+      }
+
+      return LinearGradientFill(
+        stops: stops,
+        type: gradientType,
+      );
     }
+
     return null;
   }
 
