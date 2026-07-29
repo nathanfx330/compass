@@ -14,6 +14,7 @@ import '../../models/geometry/spiral.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/mesh.dart';
+import '../../models/geometry/image.dart';
 import '../workspace/dialogs.dart';
 import 'shape_row.dart';
 
@@ -138,37 +139,21 @@ class _LayerTileState extends State<LayerTile> {
 
   // --- Per-shape derivations (lifted from LayersPanel) ---
 
-  // Whether a shape type currently implements getStrokeOutlinePath -- i.e. its
-  // outline can feed the boolean walk as a stroke region. Only such shapes get the
-  // stroke-stack UI. Extend as line/rect/spiral/xspline overrides land. (Mirrors
-  // the same helper in the canvas context menus.)
+  // Whether a shape type implements getStrokeOutlinePath -- i.e. its visible
+  // silhouette can feed the Boolean walk as an outward stroke region.
   static bool _supportsStrokeRegion(CompassShape shape) {
-    return shape is CompassCircle;
+    return shape is CompassCircle ||
+        shape is CompassRectangle ||
+        shape is CompassXSpline;
   }
 
   // Whether a layer has any fillable area the X-Spline baker can walk. This
-  // mirrors the SOURCE SET that ShapeConverter.bakeLayer now unions: the flat
-  // boolean fill, the area-stroke path, AND every visible lifted-gradient
-  // shape's silhouette.
-  //
-  // That last term is the one that matters here: getLayerFillPath() deliberately
-  // SKIPS hasLiftedGradientFill shapes (their interior is painted separately by
-  // the renderer, not unioned into the flat fill), so a layer whose geometry
-  // lives entirely in a gradient shape reports fill+area EMPTY -- even though the
-  // baker can now bake it. Without this the guard fired "nothing to bake" and
-  // returned before bakeLayer ever ran. The mirror reflection isn't checked: if
-  // the master-half clip is non-empty there's bakeable area, and the reflection
-  // only adds more.
+  // mirrors the SOURCE SET shared by baking and OBJ export: every vector fill,
+  // including self-painted gradients and IMG masks, plus variable-width area
+  // strokes. Raster pixels are not part of this test; only their live mask is.
   static bool _hasBakeableArea(CompassLayer layer) {
-    if (layer.getLayerFillPath().computeMetrics().isNotEmpty) return true;
+    if (layer.getLayerMeshExportPath().computeMetrics().isNotEmpty) return true;
     if (layer.getLayerStrokeAreaPath().computeMetrics().isNotEmpty) return true;
-    for (final shape in layer.shapes) {
-      if (!shape.isVisible) continue;
-      if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
-      if (layer.getLayerGradientClipPath(shape).computeMetrics().isNotEmpty) {
-        return true;
-      }
-    }
     return false;
   }
 
@@ -197,6 +182,8 @@ class _LayerTileState extends State<LayerTile> {
       shapePts = [shape.center, shape.startPoint];
     } else if (shape is CompassRectangle) {
       shapePts = [shape.p1, shape.p2];
+    } else if (shape is CompassImage) {
+      shapePts = [shape.origin, shape.xHandle, shape.yHandle];
     } else if (shape is CompassXSpline) {
       shapePts.addAll(shape.nodes.map((n) => n.point));
       if (shape.anchorPoint != null) shapePts.add(shape.anchorPoint!);
@@ -301,9 +288,7 @@ class _LayerTileState extends State<LayerTile> {
       _beginRename();
     } else if (selected == 'bake') {
       // Guard the silent no-op. _hasBakeableArea checks the flat fill, the area
-      // stroke, AND lifted-gradient silhouettes (which getLayerFillPath skips) --
-      // the same source set bakeLayer unions -- so a gradient/mirror layer is no
-      // longer wrongly rejected here before the baker ever runs.
+      // stroke, gradients, and IMG masks -- the same source set bakeLayer uses.
       if (!_hasBakeableArea(layer)) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -318,17 +303,7 @@ class _LayerTileState extends State<LayerTile> {
       engine.bakeLayer(layer);
     } else if (selected == 'bake_scifi') {
       // === Handle Triangulated Bake ===
-      // NOTE: intentionally NARROWER than the 'bake' guard above. The sci-fi
-      // path (bakeLayerToSciFiSkeleton) still sources purely from
-      // getLayerFillPath + area stroke and does NOT union lifted-gradient
-      // silhouettes, so it genuinely can't bake a pure-gradient layer yet.
-      // Keeping the check narrow gives a clear "nothing to bake" instead of
-      // passing through to a silent no-op. Switch this to _hasBakeableArea IF/
-      // WHEN bakeLayerToSciFiSkeleton learns to union gradient clips.
-      final fillEmpty = layer.getLayerFillPath().computeMetrics().isEmpty;
-      final areaEmpty = layer.getLayerStrokeAreaPath().computeMetrics().isEmpty;
-
-      if (fillEmpty && areaEmpty) {
+      if (!_hasBakeableArea(layer)) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -341,10 +316,8 @@ class _LayerTileState extends State<LayerTile> {
 
       ShapeConverter.bakeLayerToSciFiSkeleton(engine, layer);
     } else if (selected == 'export_obj') {
-      // No pre-guard here: the OBJ exporter reads getLayerFillPath, which differs
-      // from the bake guard's path for closed width-splines. Let showExportOBJ
-      // surface the empty case via toOBJ's empty-string return -- the exporter
-      // stays the single source of truth for "is there fillable area."
+      // Let showExportOBJ surface the empty case via toOBJ's empty-string return;
+      // the exporter stays the single source of truth for final mesh topology.
       if (context.mounted) {
         CompassDialogs.showExportOBJ(context, engine, layer);
       }
@@ -496,8 +469,7 @@ class _LayerTileState extends State<LayerTile> {
                                     : theme.disabledColor,
                               ),
                               onPressed: () {
-                                layer.isVisible = !layer.isVisible;
-                                engine.selectLayer(layer);
+                                engine.toggleLayerVisibility(layer);
                               },
                             ),
                             const SizedBox(width: 8),

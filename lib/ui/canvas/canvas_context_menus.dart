@@ -11,6 +11,7 @@ import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/line.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/mesh.dart';
+import '../../models/geometry/image.dart';
 import '../../models/geometry/gradient.dart';
 import '../../models/layer.dart';
 
@@ -546,6 +547,15 @@ class CanvasContextMenus {
         const PopupMenuDivider(),
       ];
 
+      if (clickedShape is CompassImage) {
+        menuItems.removeWhere(
+          (item) => item is PopupMenuItem<String> && item.value == 'add_point',
+        );
+        if (menuItems.isNotEmpty && menuItems.first is PopupMenuDivider) {
+          menuItems.removeAt(0);
+        }
+      }
+
       if (clickedShape is CompassXSpline) {
         menuItems.insert(
           6,
@@ -591,14 +601,14 @@ class CanvasContextMenus {
       // all additional stops are inserted through the axis context menu above.
       final shapeGradient = clickedShape.gradient;
 
-      if (shapeGradient == null) {
+      if (clickedShape is! CompassImage && shapeGradient == null) {
         menuItems.add(
           const PopupMenuItem(
             value: 'make_gradient',
             child: Text('Make Gradient'),
           ),
         );
-      } else {
+      } else if (clickedShape is! CompassImage && shapeGradient != null) {
         if (shapeGradient.stops.length == 1) {
           menuItems.add(
             const PopupMenuItem(

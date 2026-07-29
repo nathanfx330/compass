@@ -13,6 +13,7 @@ import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
 import '../models/geometry/rectangle.dart';
 import '../models/geometry/mesh.dart';
+import '../models/geometry/image.dart';
 import '../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient
 import '../models/layer.dart';
 
@@ -275,6 +276,11 @@ class ProjectSerializer {
           buffer.writeln('SHAPE,SPIRAL,${layer.id},${shape.operation.name},${shape.isVisible},${shape.center.id},${shape.startPoint.id},${shape.isClockwise},${shape.revolutions}$strk$grad');
         } else if (shape is CompassRectangle) {
           buffer.writeln('SHAPE,RECTANGLE,${layer.id},${shape.operation.name},${shape.isVisible},${shape.p1.id},${shape.p2.id},${shape.cornerRadius.value},${shape.isSquare}$strk$grad');
+        } else if (shape is CompassImage) {
+          // URI component encoding keeps commas/newlines/path punctuation out of
+          // the line-oriented comma-delimited project grammar.
+          final encodedPath = Uri.encodeComponent(shape.imagePath);
+          buffer.writeln('SHAPE,IMG,${layer.id},${shape.operation.name},${shape.isVisible},${shape.origin.id},${shape.xHandle.id},${shape.yHandle.id},$encodedPath,${shape.opacity}$strk$grad');
         } else if (shape is CompassMesh) {
           // --- UPGRADE: Mesh nodes now serialize their Tension values ---
           // Format: `nodeId:colorValue:tension`. Safe because legacy files only had 2 parts,
@@ -455,9 +461,10 @@ class ProjectSerializer {
 
         // Optional stroke stack, scanned from the trailing STROKE token. Applied
         // via cascade to EVERY shape type below (parallel to op/isVisible), so the
-        // stack round-trips uniformly -- even on primitives whose getStrokeOutlinePath
-        // is still the empty-Path base (harmless no-op), which future-proofs them for
-        // when their overrides land. Each region carries its own width and optional
+        // stack round-trips uniformly. Circle, rectangle, and X-spline currently
+        // resolve real stroke-region geometry; unsupported primitives retain the
+        // harmless empty-Path base until their overrides land. Each region carries
+        // its own width and optional
         // add-band color, read here.
         final strokeRegions = _parseStrokeToken(parts);
         // Optional per-shape linear fill gradient, from the trailing GRAD token.
@@ -575,6 +582,42 @@ class ProjectSerializer {
               }
                 
               layer.shapes.add(rect);
+            }
+          } else if (shapeType == 'IMG') {
+            final origin = pointMap[parts[argOffset]];
+            final xHandle = pointMap[parts[argOffset + 1]];
+            final yHandle = pointMap[parts[argOffset + 2]];
+
+            String imagePath = '';
+            try {
+              imagePath = Uri.decodeComponent(parts[argOffset + 3].trim());
+            } catch (_) {
+              imagePath = parts[argOffset + 3].trim();
+            }
+
+            final opacity = parts.length > argOffset + 4
+                ? (double.tryParse(parts[argOffset + 4]) ?? 1.0)
+                : 1.0;
+
+            if (origin != null && xHandle != null && yHandle != null) {
+              final imageShape = CompassImage(
+                imagePath: imagePath,
+                origin: origin,
+                xHandle: xHandle,
+                yHandle: yHandle,
+                opacity: opacity.clamp(0.0, 1.0).toDouble(),
+              )
+                ..operation = op
+                ..strokeRegions = strokeRegions
+                ..isVisible = isVisible
+                ..gradient = gradient;
+
+              // Defensive for files created before ATTACH persistence; attach()
+              // deduplicates when the normal ATTACH pass already restored them.
+              origin.attach(xHandle);
+              origin.attach(yHandle);
+              layer.shapes.add(imageShape);
+              engine.decodeImageShape(imageShape);
             }
           } else if (shapeType == 'MESH') {
             final rows = int.tryParse(parts[argOffset]) ?? 0;

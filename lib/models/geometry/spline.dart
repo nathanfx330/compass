@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'point.dart';
 import 'shape.dart';
+import 'stroke_outline.dart';
 
 typedef FilletData = ({
   Offset cutPt1,
@@ -73,13 +74,69 @@ class CompassXSpline extends CompassShape {
   bool isClosed;
   CompassPoint? anchorPoint;
 
-  CompassXSpline({this.isClosed = false, this.anchorPoint, super.operation, super.isVisible});
+  // Shared spline geometry caches. A single render revision can ask for the
+  // resolved pulley nodes, center path, visible ribbon, SVG data, hit testing,
+  // and several stroke dilations. Previously each request rebuilt the full
+  // tension/pulley solution independently.
+  int? _pathCacheGeometryHash;
+  List<ResolvedSplineNode>? _resolvedNodesCache;
+  Path? _centerPathCache;
+  Path? _visiblePathCache;
+
+  int? _strokeCacheGeometryHash;
+  bool? _strokeCacheInteractive;
+  StrokeOutlineGeometry? _preparedStrokeGeometry;
+  final Map<double, Path> _strokeDilationCache = {};
+  final Map<(double, double), Path> _strokeOutlineCache = {};
+
+  CompassXSpline({
+    this.isClosed = false,
+    this.anchorPoint,
+    super.operation,
+    super.strokeRegions,
+    super.isVisible,
+  });
 
   void addNode(CompassSplineNode node) {
     nodes.add(node);
   }
 
   bool get hasWidthProfile => nodes.any((n) => n.widthLeft.value > 0.01 || n.widthRight.value > 0.01);
+
+  int _strokeGeometryHash() {
+    var hash = Object.hash(isClosed, nodes.length);
+    for (final node in nodes) {
+      hash = Object.hash(
+        hash,
+        node.point.x.value,
+        node.point.y.value,
+        node.tension.value,
+        node.widthLeft.value,
+        node.widthRight.value,
+        node.cornerRadius.value,
+        node.miterSize.value,
+      );
+      hash = Object.hash(
+        hash,
+        node.handleIn?.dx,
+        node.handleIn?.dy,
+        node.handleOut?.dx,
+        node.handleOut?.dy,
+      );
+    }
+    return hash;
+  }
+
+  int _syncPathCaches() {
+    final hash = _strokeGeometryHash();
+    if (_pathCacheGeometryHash != hash) {
+      _pathCacheGeometryHash = hash;
+      _resolvedNodesCache = null;
+      _centerPathCache = null;
+      _visiblePathCache = null;
+    }
+    return hash;
+  }
 
   FilletData? computeFillet(CompassSplineNode node, double cutDistance) {
     int index = nodes.indexOf(node);
@@ -263,7 +320,7 @@ class CompassXSpline extends CompassShape {
   }
 
   // --- Dynamic Pulley Constraints: round (cornerRadius) and sharp/miter (miterSize) ---
-  List<ResolvedSplineNode> getResolvedNodes() {
+  List<ResolvedSplineNode> _buildResolvedNodes() {
     final controls = getEvaluatedControls();
     final n = nodes.length;
     
@@ -500,6 +557,16 @@ class CompassXSpline extends CompassShape {
     return result;
   }
 
+  List<ResolvedSplineNode> getResolvedNodes() {
+    _syncPathCaches();
+    final cached = _resolvedNodesCache;
+    if (cached != null) return cached;
+
+    final resolved = _buildResolvedNodes();
+    _resolvedNodesCache = resolved;
+    return resolved;
+  }
+
   // Calculate normals using the dynamically resolved virtual nodes
   List<Offset> calculateResolvedNormals(List<ResolvedSplineNode> resolved) {
     final normals = <Offset>[];
@@ -542,7 +609,7 @@ class CompassXSpline extends CompassShape {
   }
 
   // --- Extracts pure 1D center spine (using resolved nodes) ---
-  Path getCenterPath() {
+  Path _buildCenterPath() {
     final path = Path();
     if (nodes.isEmpty) return path;
 
@@ -572,8 +639,17 @@ class CompassXSpline extends CompassShape {
     return path;
   }
 
-  @override
-  Path getPath() {
+  Path getCenterPath() {
+    _syncPathCaches();
+    final cached = _centerPathCache;
+    if (cached != null) return cached;
+
+    final path = _buildCenterPath();
+    _centerPathCache = path;
+    return path;
+  }
+
+  Path _buildVisiblePath() {
     if (!hasWidthProfile) {
       return getCenterPath()..fillType = PathFillType.evenOdd;
     }
@@ -654,6 +730,92 @@ class CompassXSpline extends CompassShape {
     }
 
     return path;
+  }
+
+  @override
+  Path getPath() {
+    _syncPathCaches();
+    final cached = _visiblePathCache;
+    if (cached != null) return cached;
+
+    final path = _buildVisiblePath();
+    _visiblePathCache = path;
+    return path;
+  }
+
+  /// Builds an outward stroke region around the spline's CURRENT visible
+  /// silhouette. A variable-width spline therefore wraps its ribbon, including
+  /// its asymmetric widths and round caps, rather than falling back to a constant
+  /// centerline stroke. A closed zero-width spline is treated as a filled area; an
+  /// open zero-width spline is treated as a round-capped centerline ribbon.
+  @override
+  Path getStrokeOutlinePath(double width, double innerOffset) {
+    if (nodes.isEmpty || width <= 0) {
+      return Path()..fillType = PathFillType.evenOdd;
+    }
+
+    final geometryHash = _strokeGeometryHash();
+    final interactive = nodes.any((node) => node.point.isBeingDragged);
+    if (_strokeCacheGeometryHash != geometryHash ||
+        _strokeCacheInteractive != interactive) {
+      _strokeCacheGeometryHash = geometryHash;
+      _strokeCacheInteractive = interactive;
+      _preparedStrokeGeometry = null;
+      _strokeDilationCache.clear();
+      _strokeOutlineCache.clear();
+    }
+
+    final key = (width, innerOffset);
+    final cached = _strokeOutlineCache[key];
+    if (cached != null) return cached;
+
+    final sourceIsArea = hasWidthProfile || isClosed;
+    final geometry = _preparedStrokeGeometry ??= StrokeOutlineBuilder.prepare(
+      sourceIsArea ? getPath() : getCenterPath(),
+      sourceIsArea: sourceIsArea,
+      interactive: interactive,
+    );
+
+    Path dilation(double distance) {
+      if (distance <= StrokeOutlineBuilder.epsilon) {
+        return geometry.sourceIsArea
+            ? geometry.buildDilation(0.0)
+            : Path();
+      }
+
+      final cachedDilation = _strokeDilationCache[distance];
+      if (cachedDilation != null) return Path.from(cachedDilation);
+
+      final built = geometry.buildDilation(distance);
+      _strokeDilationCache[distance] = Path.from(built);
+      return built;
+    }
+
+    final innerDistance = innerOffset < 0.0 ? 0.0 : innerOffset;
+    final outer = dilation(innerDistance + width);
+    final inner = dilation(innerDistance);
+
+    final innerIsEmpty = inner.getBounds() == Rect.zero &&
+        inner.computeMetrics().isEmpty;
+    final band = innerIsEmpty
+        ? (Path.from(outer)..fillType = PathFillType.evenOdd)
+        : (Path()
+          ..fillType = PathFillType.evenOdd
+          ..addPath(outer, Offset.zero)
+          ..addPath(inner, Offset.zero));
+
+    // A normal stack only needs one cumulative dilation per boundary. Keep the
+    // caches bounded for live width-slider edits while retaining all values used
+    // by the current stack and renderer/export passes.
+    if (_strokeDilationCache.length >= 32) {
+      _strokeDilationCache.clear();
+    }
+    if (_strokeOutlineCache.length >= 32) {
+      _strokeOutlineCache.clear();
+    }
+
+    _strokeOutlineCache[key] = Path.from(band);
+    return band;
   }
 
   // --- Centerline as an SVG path string ---

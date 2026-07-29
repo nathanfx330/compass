@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../../engine.dart';
 import '../../models/layer.dart';
 import '../../models/geometry/spline.dart';
+import '../../models/geometry/image.dart';
 import '../../io/png_exporter.dart'; // <--- NEW: Import for PngExportStyle
 
 // The OBJ exporter's four output modes as the dialog presents them. Local to
@@ -339,6 +340,37 @@ class CompassDialogs {
     final TextEditingController filenameController =
         TextEditingController(text: '${safeName.isEmpty ? 'layer' : safeName}.obj');
 
+    final textureImages = layer.shapes
+        .whereType<CompassImage>()
+        .where((image) =>
+            image.isVisible && CompassLayer.hasLiftedImageFill(image))
+        .toList();
+
+    // -1 preserves the existing geometry-only export. With one IMG, default to
+    // the textured surface because its mask has unambiguous material ownership.
+    int textureImageIndex =
+        textureImages.isNotEmpty && !layer.mirrorEnabled ? 0 : -1;
+
+    String basename(String path) =>
+        path.replaceAll('\\', '/').split('/').last;
+
+    String withoutExtension(String name) {
+      final dot = name.lastIndexOf('.');
+      return dot <= 0 ? name : name.substring(0, dot);
+    }
+
+    String extensionOf(String name) {
+      final dot = name.lastIndexOf('.');
+      return dot <= 0 ? '' : name.substring(dot).toLowerCase();
+    }
+
+    String safeSidecarStem(String raw) {
+      final cleaned = raw
+          .replaceAll(RegExp(r'\s+'), '_')
+          .replaceAll(RegExp(r'[^A-Za-z0-9_\-.]'), '');
+      return cleaned.isEmpty ? 'compass_texture' : cleaned;
+    }
+
     // Sampling spacing in logical px. Smaller = denser polygon = smoother.
     double samplingSpacing = 2.0;
     // Output mode + shared density. gridCount = cells across the longest bbox
@@ -367,8 +399,19 @@ class CompassDialogs {
             const double lamMax = 200.0;
             final double lamValue = skeletonLambda.clamp(lamMin, lamMax);
 
+            final selectedTextureImage =
+                textureImageIndex >= 0 &&
+                        textureImageIndex < textureImages.length
+                    ? textureImages[textureImageIndex]
+                    : null;
+
             String headerText;
-            switch (mode) {
+            if (selectedTextureImage != null) {
+              headerText = 'Exports the selected IMG Boolean mask as a textured '
+                  'triangle mesh. The mesh itself hides every pixel outside the '
+                  'mask; Compass writes OBJ + MTL + a copy of the source image.';
+            } else {
+              switch (mode) {
               case _ObjExportMode.skeleton:
                 headerText = 'Exports this layer\'s medial-axis skeleton as loose '
                     'edge geometry on the Z=0 plane (for Skin modifier / '
@@ -383,6 +426,7 @@ class CompassDialogs {
               default:
                 headerText = 'Exports this layer\'s resolved boolean fill as a flat '
                     'triangle mesh on the Z=0 plane (holes preserved).';
+              }
             }
 
             return AlertDialog(
@@ -402,6 +446,58 @@ class CompassDialogs {
                         suffixText: '.obj',
                       ),
                     ),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<int>(
+                      value: textureImageIndex,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: 'OBJ material',
+                      ),
+                      items: [
+                        const DropdownMenuItem<int>(
+                          value: -1,
+                          child: Text('Geometry only'),
+                        ),
+                        for (var i = 0; i < textureImages.length; i++)
+                          DropdownMenuItem<int>(
+                            value: i,
+                            child: Text(
+                              'IMG texture — ${textureImages[i].displayName}',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: mode == _ObjExportMode.skeleton ||
+                              layer.mirrorEnabled
+                          ? null
+                          : (value) {
+                              setLocalState(() {
+                                textureImageIndex = value ?? -1;
+                              });
+                            },
+                    ),
+                    if (layer.mirrorEnabled) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'IMG texture export is currently disabled while the '
+                        'Mirror Modifier is enabled. Geometry-only OBJ remains '
+                        'available.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ] else if (mode == _ObjExportMode.skeleton) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Skeleton mode exports loose edges, so it cannot carry '
+                        'an image texture.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ] else if (textureImages.isEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'No visible Add IMG object exists on this layer.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
                     const SizedBox(height: 20),
                     const Text('Curve Resolution'),
                     const SizedBox(height: 8),
@@ -451,6 +547,9 @@ class CompassDialogs {
                       onSelectionChanged: (newSelection) {
                         setLocalState(() {
                           mode = newSelection.first;
+                          if (mode == _ObjExportMode.skeleton) {
+                            textureImageIndex = -1;
+                          }
                         });
                       },
                     ),
@@ -573,34 +672,126 @@ class CompassDialogs {
                       filename += '.obj';
                     }
                     try {
-                      final objData = engine.toOBJ(
+                      final objFile = File(filename).absolute;
+                      await objFile.parent.create(recursive: true);
+
+                      final selectedTexture =
+                          textureImageIndex >= 0 &&
+                                  textureImageIndex < textureImages.length
+                              ? textureImages[textureImageIndex]
+                              : null;
+
+                      if (selectedTexture == null) {
+                        final objData = engine.toOBJ(
+                          layer,
+                          samplingSpacing: samplingSpacing,
+                          gridMode: mode == _ObjExportMode.grid,
+                          gridCount: gridCount.round(),
+                          delaunayMode: mode == _ObjExportMode.delaunay,
+                          delaunaySpacing: delaunaySpacing,
+                          skeletonMode: mode == _ObjExportMode.skeleton,
+                          skeletonLambda: lamValue,
+                        );
+                        if (objData.isEmpty) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(mode == _ObjExportMode.skeleton
+                                    ? 'Nothing to export — no skeleton survived. Try lowering branch pruning or check the layer has filled area.'
+                                    : 'Nothing to export — this layer has no filled area.'),
+                              ),
+                            );
+                          }
+                          return;
+                        }
+
+                        await objFile.writeAsString(objData);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'Successfully saved to ${objFile.path}!',
+                              ),
+                            ),
+                          );
+                          Navigator.of(context).pop();
+                        }
+                        return;
+                      }
+
+                      final sourceTexture = File(selectedTexture.imagePath);
+                      if (!await sourceTexture.exists()) {
+                        throw FileSystemException(
+                          'IMG source file is missing',
+                          selectedTexture.imagePath,
+                        );
+                      }
+
+                      final outputStem = safeSidecarStem(
+                        withoutExtension(basename(objFile.path)),
+                      );
+                      final sourceExtension =
+                          extensionOf(basename(sourceTexture.path));
+                      final textureExtension =
+                          sourceExtension == '.jpg' ||
+                                  sourceExtension == '.jpeg' ||
+                                  sourceExtension == '.png'
+                              ? sourceExtension
+                              : '.png';
+                      final mtlFileName = '$outputStem.mtl';
+                      final textureFileName =
+                          '${outputStem}_texture$textureExtension';
+
+                      final export = engine.toTexturedOBJ(
                         layer,
+                        selectedTexture,
+                        materialLibraryFileName: mtlFileName,
+                        textureFileName: textureFileName,
                         samplingSpacing: samplingSpacing,
                         gridMode: mode == _ObjExportMode.grid,
                         gridCount: gridCount.round(),
                         delaunayMode: mode == _ObjExportMode.delaunay,
                         delaunaySpacing: delaunaySpacing,
                         skeletonMode: mode == _ObjExportMode.skeleton,
-                        skeletonLambda: lamValue,
                       );
-                      if (objData.isEmpty) {
+
+                      if (export.isEmpty) {
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
-                              content: Text(mode == _ObjExportMode.skeleton
-                                  ? 'Nothing to export — no skeleton survived. Try lowering branch pruning or check the layer has filled area.'
-                                  : 'Nothing to export — this layer has no filled area.'),
+                              content: Text(
+                                export.error ??
+                                    'Nothing to export from the selected IMG mask.',
+                              ),
                             ),
                           );
                         }
                         return;
                       }
 
-                      final file = File(filename);
-                      await file.writeAsString(objData);
+                      final separator = Platform.pathSeparator;
+                      final mtlFile = File(
+                        '${objFile.parent.path}$separator${export.materialLibraryFileName}',
+                      );
+                      final textureFile = File(
+                        '${objFile.parent.path}$separator${export.textureFileName}',
+                      );
+
+                      if (sourceTexture.absolute.path !=
+                          textureFile.absolute.path) {
+                        await sourceTexture.copy(textureFile.path);
+                      }
+                      await mtlFile.writeAsString(export.mtlData);
+                      await objFile.writeAsString(export.objData);
+
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Successfully saved to $filename!')),
+                          SnackBar(
+                            content: Text(
+                              'Saved textured OBJ, MTL, and image to '
+                              '${objFile.parent.path}',
+                            ),
+                          ),
                         );
                         Navigator.of(context).pop();
                       }
@@ -845,6 +1036,66 @@ class CompassDialogs {
                       SnackBar(content: Text('Error loading project: $e')),
                     );
                   }
+                }
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  static void showImportImageLayer(BuildContext context, CompassEngine engine) {
+    final TextEditingController filepathController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Import IMG Layer'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Enter the absolute path to a PNG or JPG. The image becomes an '
+                'ordered layer object and can be carved by normal Boolean shapes.',
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: filepathController,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: 'Image File Path',
+                  hintText: '/home/user/Pictures/photo.png',
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton.icon(
+              icon: const Icon(Icons.add_photo_alternate_outlined),
+              label: const Text('Import IMG'),
+              onPressed: () async {
+                final path = filepathController.text.trim();
+                if (path.isEmpty) return;
+
+                Navigator.of(context).pop();
+                final image = await engine.importImageLayer(path);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        image == null
+                            ? 'Could not import that PNG/JPG.'
+                            : 'Imported ${image.displayName} as an IMG layer.',
+                      ),
+                    ),
+                  );
                 }
               },
             ),

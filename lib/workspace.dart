@@ -40,6 +40,7 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
   // Distinct from _showScaffolding=false, which hides everything AND disables
   // interaction with points.
   bool _ghostVertices = false;
+  bool _showFpsOverlay = false;
   
   // NEW: State for the resizable right panel width
   double _rightPanelWidth = 280.0;
@@ -107,6 +108,12 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
     });
   }
 
+  void _toggleFpsOverlay() {
+    setState(() {
+      _showFpsOverlay = !_showFpsOverlay;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -138,6 +145,8 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
                 onToggleHandles: _toggleHandles,
                 ghostVertices: _ghostVertices, // <--- NEW
                 onToggleGhostVertices: _toggleGhostVertices, // <--- NEW
+                showFpsOverlay: _showFpsOverlay,
+                onToggleFpsOverlay: _toggleFpsOverlay,
                 onClearCanvas: _clearCanvas,
               ),
 
@@ -156,6 +165,7 @@ class _CompassWorkspaceState extends State<CompassWorkspace> {
                           onToggleHandles: _toggleHandles,
                           ghostVertices: _ghostVertices, // <--- NEW
                           onToggleGhostVertices: _toggleGhostVertices, // <--- NEW
+                          showFpsOverlay: _showFpsOverlay,
                         ),
                       ),
                     ),

@@ -15,8 +15,8 @@ import 'models/geometry/circle.dart';
 import 'models/geometry/spiral.dart';
 import 'models/geometry/spline.dart';
 import 'models/geometry/rectangle.dart';
-import 'models/geometry/rhombus.dart'; // <--- NEW: rhombus shape
 import 'models/geometry/mesh.dart';
+import 'models/geometry/image.dart';
 import 'models/layer.dart';
 import 'models/reference_layer.dart';
 
@@ -86,11 +86,64 @@ class CompassEngine extends ChangeNotifier {
 
   CompassShape? get selectedShape => _selectedShape;
 
+  // Monotonic document/UI revision used by render caches. Point notifiers are
+  // wired directly to notifyListeners(), so geometry drags increment this too.
+  int _renderRevision = 0;
+  int get renderRevision => _renderRevision;
+
+  // The live document painter listens here. UI-only state (selection, expanded
+  // hierarchy rows, node labels) continues through the engine ChangeNotifier
+  // without forcing the document pixels to repaint.
+  final ChangeNotifier _documentRepaintNotifier = ChangeNotifier();
+  Listenable get documentRepaint => _documentRepaintNotifier;
+
+  int _notificationBatchDepth = 0;
+  bool _notificationPending = false;
+
+  /// Coalesces the many coordinate/listener notifications produced by one
+  /// pointer update into a single render invalidation. Constraints still run
+  /// synchronously; only the outward ChangeNotifier emission is deferred.
+  T runNotificationBatch<T>(T Function() action) {
+    _notificationBatchDepth++;
+    try {
+      return action();
+    } finally {
+      _notificationBatchDepth--;
+      if (_notificationBatchDepth == 0 && _notificationPending) {
+        _notificationPending = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  @override
+  void notifyListeners() {
+    if (_notificationBatchDepth > 0) {
+      _notificationPending = true;
+      return;
+    }
+
+    _renderRevision++;
+    _documentRepaintNotifier.notifyListeners();
+    super.notifyListeners();
+  }
+
+  /// Emits panel/overlay state without invalidating document raster content.
+  void notifyUiListeners() {
+    super.notifyListeners();
+  }
+
   @override
   void dispose() {
     // New Project swaps the whole engine out; unbind everything so the discarded
     // constraint graph is fully inert (no listener can fire during teardown).
     unbindAllConstraints();
+    for (final layer in layers) {
+      for (final shape in layer.shapes) {
+        if (shape is CompassImage) shape.image?.dispose();
+      }
+    }
+    _documentRepaintNotifier.dispose();
     super.dispose();
   }
 
@@ -147,8 +200,8 @@ class CompassEngine extends ChangeNotifier {
       pts.addAll([shape.center, shape.startPoint]);
     } else if (shape is CompassRectangle) {
       pts.addAll([shape.p1, shape.p2]);
-    } else if (shape is CompassRhombus) {
-      pts.addAll([shape.p1, shape.p2, shape.p3, shape.p4]);
+    } else if (shape is CompassImage) {
+      pts.addAll([shape.origin, shape.xHandle, shape.yHandle]);
     } else if (shape is CompassXSpline) {
       pts.addAll(shape.nodes.map((n) => n.point));
       if (shape.anchorPoint != null) pts.add(shape.anchorPoint!);
@@ -167,7 +220,7 @@ class CompassEngine extends ChangeNotifier {
 
   void toggleNodeIndices(bool show) {
     showNodeIndices = show;
-    notifyListeners();
+    notifyUiListeners();
   }
 
   void applyUniformWidth(CompassXSpline spline, double width) {
@@ -333,6 +386,114 @@ class CompassEngine extends ChangeNotifier {
     }
   }
 
+  Future<ui.Image?> _decodeRasterImage(String path) async {
+    final lower = path.toLowerCase();
+    if (!(lower.endsWith('.png') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg'))) {
+      return null;
+    }
+
+    final file = File(path);
+    if (!await file.exists()) return null;
+
+    final bytes = await file.readAsBytes();
+    final codec = await ui.instantiateImageCodec(bytes);
+    try {
+      final frame = await codec.getNextFrame();
+      return frame.image;
+    } finally {
+      codec.dispose();
+    }
+  }
+
+  /// Reloads the runtime pixels for an existing IMG object without changing its
+  /// geometry or creating an undo state. Used after project deserialization.
+  Future<bool> decodeImageShape(
+    CompassImage shape, {
+    bool notify = true,
+  }) async {
+    try {
+      final decoded = await _decodeRasterImage(shape.imagePath);
+      if (decoded == null) return false;
+
+      final isStillLive = layers.any((layer) => layer.shapes.contains(shape));
+      if (!isStillLive) {
+        decoded.dispose();
+        return false;
+      }
+
+      shape.image?.dispose();
+      shape.image = decoded;
+      if (notify) notifyListeners();
+      return true;
+    } catch (e) {
+      debugPrint('Failed to decode IMG object: $e');
+      return false;
+    }
+  }
+
+  /// Imports a PNG/JPG as a normal ordered IMG object on a fresh layer.
+  ///
+  /// The three points form an affine frame: origin, X edge, and Y edge. The
+  /// origin owns the two edge points in the attachment graph, so dragging it
+  /// translates the whole image while the existing point/rotation tools can
+  /// reshape or rotate the frame naturally.
+  Future<CompassImage?> importImageLayer(String path) async {
+    ui.Image? decoded;
+    try {
+      decoded = await _decodeRasterImage(path);
+      if (decoded == null) return null;
+
+      final maxDimension = max(decoded.width, decoded.height).toDouble();
+      final displayScale = maxDimension > 900.0 ? 900.0 / maxDimension : 1.0;
+      final width = decoded.width * displayScale;
+      final height = decoded.height * displayScale;
+
+      final origin = CompassPoint(x: -width / 2.0, y: -height / 2.0);
+      final xHandle = CompassPoint(x: width / 2.0, y: -height / 2.0);
+      final yHandle = CompassPoint(x: -width / 2.0, y: height / 2.0);
+
+      origin.attach(xHandle);
+      origin.attach(yHandle);
+
+      for (final point in [origin, xHandle, yHandle]) {
+        points.add(point);
+        point.x.addListener(notifyListeners);
+        point.y.addListener(notifyListeners);
+      }
+
+      final imageShape = CompassImage(
+        imagePath: path,
+        origin: origin,
+        xHandle: xHandle,
+        yHandle: yHandle,
+        image: decoded,
+      );
+      decoded = null; // Ownership transferred to the document shape.
+
+      final safeName = imageShape.displayName
+          .replaceAll(RegExp(r'[,\r\n]'), ' ')
+          .trim();
+      final layer = CompassLayer(
+        name: safeName.isEmpty ? 'IMG' : 'IMG · $safeName',
+      );
+      layer.shapes.add(imageShape);
+      layers.add(layer);
+      activeLayer = layer;
+      _selectedShape = imageShape;
+      selectedPoints.clear();
+
+      saveSnapshot();
+      notifyListeners();
+      return imageShape;
+    } catch (e) {
+      decoded?.dispose();
+      debugPrint('Failed to import IMG layer: $e');
+      return null;
+    }
+  }
+
   void addLayer(String name) {
     final newLayer = CompassLayer(name: name);
     layers.add(newLayer);
@@ -395,6 +556,9 @@ class CompassEngine extends ChangeNotifier {
     }
 
     final deadShapes = List<CompassShape>.from(layer.shapes);
+    for (final shape in deadShapes) {
+      if (shape is CompassImage) shape.image?.dispose();
+    }
     layers.remove(layer);
     
     if (activeLayer == layer) {
@@ -432,12 +596,31 @@ class CompassEngine extends ChangeNotifier {
     if (!layer.isLocked) {
       activeLayer = layer;
       _selectedShape = null; 
-      notifyListeners();
+      notifyUiListeners();
     }
   }
   
   void toggleLayerExpanded(CompassLayer layer) {
     layer.isExpanded = !layer.isExpanded;
+    notifyUiListeners();
+  }
+
+  /// Toggles a layer's document visibility and invalidates the document painter.
+  ///
+  /// Layer visibility changes the rasterized artwork, so it must not travel
+  /// through the UI-only selection notification path used by [selectLayer].
+  void toggleLayerVisibility(CompassLayer layer) {
+    layer.isVisible = !layer.isVisible;
+
+    // Preserve the visibility-button's existing behavior of activating the
+    // clicked layer when it is editable. Hidden layers can remain active so
+    // they are easy to reveal again from the hierarchy.
+    if (!layer.isLocked) {
+      activeLayer = layer;
+      _selectedShape = null;
+    }
+
+    saveSnapshot();
     notifyListeners();
   }
 
@@ -476,7 +659,7 @@ class CompassEngine extends ChangeNotifier {
       }
     }
     _selectedShape = shape;
-    notifyListeners();
+    notifyUiListeners();
   }
 
   // ===========================================================================
@@ -519,6 +702,8 @@ class CompassEngine extends ChangeNotifier {
     }
 
     if (removed) {
+      if (shape is CompassImage) shape.image?.dispose();
+
       for (var c in constraints) {
         if (_constraintHasShape(c, shape)) {
           final rider = _constraintRider(c);
@@ -554,8 +739,9 @@ class CompassEngine extends ChangeNotifier {
         if (s is CompassLine && (s.start == p || s.end == p)) isUsed = true;
         else if (s is CompassCircle && (s.center == p || s.radiusPoint == p)) isUsed = true;
         else if (s is CompassSpiral && (s.center == p || s.startPoint == p)) isUsed = true;
-        else if (s is CompassRectangle && (s.p1 == p || s.p2 == p)) isUsed = true; 
-        else if (s is CompassRhombus && (s.p1 == p || s.p2 == p || s.p3 == p || s.p4 == p)) isUsed = true; // <--- NEW
+        else if (s is CompassRectangle && (s.p1 == p || s.p2 == p)) isUsed = true;
+        else if (s is CompassImage &&
+            (s.origin == p || s.xHandle == p || s.yHandle == p)) isUsed = true;
         else if (s is CompassXSpline && (s.nodes.any((n) => n.point == p) || s.anchorPoint == p)) isUsed = true;
         else if (s is CompassMesh && (s.containsNode(p) || s.anchorPoint == p)) isUsed = true;
 
@@ -804,7 +990,7 @@ class CompassEngine extends ChangeNotifier {
     if (shape is CompassSpiral) return shape.center;
     if (shape is CompassLine) return shape.start;
     if (shape is CompassRectangle) return shape.p1;
-    if (shape is CompassRhombus) return shape.p1;
+    if (shape is CompassImage) return shape.origin;
     if (shape is CompassXSpline) {
       return shape.anchorPoint ??
           (shape.nodes.isNotEmpty ? shape.nodes.first.point : null);
@@ -827,9 +1013,8 @@ class CompassEngine extends ChangeNotifier {
       return Offset((shape.p1.x.value + shape.p2.x.value) / 2,
           (shape.p1.y.value + shape.p2.y.value) / 2);
     }
-    if (shape is CompassRhombus) {
-      return Offset((shape.p1.x.value + shape.p3.x.value) / 2,
-          (shape.p1.y.value + shape.p3.y.value) / 2);
+    if (shape is CompassImage) {
+      return shape.getPath().getBounds().center;
     }
     if (shape is CompassXSpline) {
       if (shape.anchorPoint != null) {
@@ -1061,6 +1246,14 @@ class CompassEngine extends ChangeNotifier {
 
   void changeShapeOperation(CompassShape shape, CompassBooleanOp op) {
     shape.operation = op;
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  void setImageOpacity(CompassImage image, double opacity) {
+    final next = opacity.clamp(0.0, 1.0).toDouble();
+    if ((image.opacity - next).abs() < 1e-9) return;
+    image.opacity = next;
     saveSnapshot();
     notifyListeners();
   }
@@ -1731,7 +1924,7 @@ class CompassEngine extends ChangeNotifier {
   ///
   /// Shape-death rules, matching the old removePoint exactly, applied per shape
   /// against the whole set:
-  ///   * line / circle / spiral / rectangle / rhombus: dies if ANY defining
+  ///   * line / circle / spiral / rectangle: dies if ANY defining
   ///     point is a target.
   ///   * mesh: dies if ANY grid node or its anchor is a target (whole-mesh
   ///     death, as before).
@@ -1777,10 +1970,10 @@ class CompassEngine extends ChangeNotifier {
           remove = targets.contains(shape.center) || targets.contains(shape.startPoint);
         } else if (shape is CompassRectangle) {
           remove = targets.contains(shape.p1) || targets.contains(shape.p2);
-        } else if (shape is CompassRhombus) {
-          // <--- NEW: Rhombus GC
-          remove = targets.contains(shape.p1) || targets.contains(shape.p2) ||
-              targets.contains(shape.p3) || targets.contains(shape.p4);
+        } else if (shape is CompassImage) {
+          remove = targets.contains(shape.origin) ||
+              targets.contains(shape.xHandle) ||
+              targets.contains(shape.yHandle);
         } else if (shape is CompassMesh) {
           // Whole-mesh death on any node/anchor hit (was a removeShape delegate
           // in the old removePoint; now handled uniformly in this sweep).
@@ -1802,6 +1995,7 @@ class CompassEngine extends ChangeNotifier {
         }
 
         if (remove) {
+          if (shape is CompassImage) shape.image?.dispose();
           deadShapes.add(shape);
           orphanCandidates.addAll(_pointsOfShape(shape));
         }
@@ -1898,11 +2092,6 @@ class CompassEngine extends ChangeNotifier {
       return shape is CompassCircle && identical(c.targetRadius, shape.radius);
     }
     if (c is SquareConstraint) return c.rect == shape;
-    if (c is ParallelogramConstraint) {
-      return shape is CompassRhombus &&
-          c.p1 == shape.p1 && c.p2 == shape.p2 &&
-          c.p3 == shape.p3 && c.p4 == shape.p4;
-    }
     return false;
   }
 
@@ -1937,6 +2126,10 @@ class CompassEngine extends ChangeNotifier {
 
   void finalizePointDrag() {
     saveSnapshot();
+    // Drag-quality spline outlines are intentionally coarse while any point is
+    // flagged as active. The gesture handler clears those flags immediately
+    // before finalizing, so schedule one exact final repaint here.
+    notifyListeners();
   }
 
   String toProjectData() {
@@ -1944,6 +2137,12 @@ class CompassEngine extends ChangeNotifier {
   }
 
   void loadProjectData(String data) {
+    for (final layer in layers) {
+      for (final shape in layer.shapes) {
+        if (shape is CompassImage) shape.image?.dispose();
+      }
+    }
+
     // A load (file open OR undo) replaces the entire point pool; anything still
     // selected is a dead object from the previous world. Clear before load so no
     // interaction can touch stale points mid-rebuild, and prune after in case a
@@ -1994,6 +2193,32 @@ class CompassEngine extends ChangeNotifier {
     );
   }
   
+  OBJTextureExport toTexturedOBJ(
+    CompassLayer layer,
+    CompassImage image, {
+    required String materialLibraryFileName,
+    required String textureFileName,
+    double samplingSpacing = 2.0,
+    bool gridMode = false,
+    int gridCount = 48,
+    bool delaunayMode = false,
+    double delaunaySpacing = 25.0,
+    bool skeletonMode = false,
+  }) {
+    return OBJExporter.toTexturedOBJ(
+      layer,
+      image,
+      materialLibraryFileName: materialLibraryFileName,
+      textureFileName: textureFileName,
+      samplingSpacing: samplingSpacing,
+      gridMode: gridMode,
+      gridCount: gridCount,
+      delaunayMode: delaunayMode,
+      delaunaySpacing: delaunaySpacing,
+      skeletonMode: skeletonMode,
+    );
+  }
+
   Future<String?> toASCII({int columns = 100, bool invert = false, bool dither = false}) {
     return ASCIIExporter.toASCII(this, columns: columns, invert: invert, dither: dither);
   }

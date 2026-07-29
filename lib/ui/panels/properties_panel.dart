@@ -3,9 +3,11 @@
 import 'package:flutter/material.dart';
 import '../../engine.dart';
 import '../../models/geometry/shape.dart';  
-import '../../models/geometry/circle.dart'; 
+import '../../models/geometry/circle.dart';
+import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/spline.dart';
-import '../../models/geometry/mesh.dart'; 
+import '../../models/geometry/mesh.dart';
+import '../../models/geometry/image.dart';
 import '../widgets/compass_color_picker.dart';
 
 class PropertiesPanel extends StatefulWidget {
@@ -67,6 +69,12 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
       builder: (context, _) {
         final activeLayer = widget.engine.activeLayer;
         final selectedShape = widget.engine.selectedShape;
+        final CompassShape? strokeShape =
+            selectedShape is CompassCircle ||
+                    selectedShape is CompassRectangle ||
+                    selectedShape is CompassXSpline
+                ? selectedShape
+                : null;
 
         if (activeLayer == null) {
           return const Center(
@@ -186,9 +194,67 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                 },
               ),
 
+              if (selectedShape is CompassImage) ...[
+                const SizedBox(height: 24),
+                const Divider(),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    const Icon(Icons.image_outlined, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'IMG · ${selectedShape.displayName}',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  selectedShape.imagePath,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: theme.textTheme.bodySmall?.color?.withOpacity(0.7),
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const Text('Opacity'),
+                    const Spacer(),
+                    Text('${(selectedShape.opacity * 100).round()}%'),
+                  ],
+                ),
+                Slider(
+                  value: selectedShape.opacity.clamp(0.0, 1.0).toDouble(),
+                  min: 0.0,
+                  max: 1.0,
+                  divisions: 100,
+                  onChanged: (value) =>
+                      widget.engine.setImageOpacity(selectedShape, value),
+                ),
+                Text(
+                  selectedShape.image == null
+                      ? 'Source image is unavailable. The Boolean mask remains editable and exportable.'
+                      : "Pixels render through the layer's live Boolean mask.",
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: selectedShape.image == null
+                        ? Colors.orangeAccent
+                        : theme.textTheme.bodySmall?.color?.withOpacity(0.8),
+                  ),
+                ),
+              ],
+
               // --- STROKE REGIONS SECTION (outward-stacked per-shape stroke stack) ---
-              if (selectedShape is CompassCircle &&
-                  selectedShape.strokeRegions.isNotEmpty) ...[
+              if (strokeShape != null &&
+                  strokeShape.strokeRegions.isNotEmpty) ...[
                 const SizedBox(height: 24),
                 const Divider(),
                 const SizedBox(height: 24),
@@ -211,8 +277,8 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                 ),
                 const SizedBox(height: 8),
 
-                ...List.generate(selectedShape.strokeRegions.length, (i) {
-                  final region = selectedShape.strokeRegions[i];
+                ...List.generate(strokeShape.strokeRegions.length, (i) {
+                  final region = strokeShape.strokeRegions[i];
                   final double sliderVal = region.width.clamp(0.0, 100.0);
                   return Padding(
                     padding: const EdgeInsets.only(top: 8.0),
@@ -251,7 +317,7 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                           divisions: 200,
                           activeColor: _strokeOpColor(region.op),
                           onChanged: (value) {
-                            widget.engine.setStrokeRegionWidth(selectedShape, i, value);
+                            widget.engine.setStrokeRegionWidth(strokeShape, i, value);
                           },
                         ),
                       ],

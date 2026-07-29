@@ -10,16 +10,29 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
-import '../../models/geometry/mesh.dart'; 
+import '../../models/geometry/mesh.dart';
+import '../../models/geometry/image.dart';
 import '../../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient (stop dots + axis)
 import '../../models/layer.dart'; // <--- NEW: MirrorAxis + hasLiftedGradientFill predicate
 
 // Import CompassTool from the canvas controller
 import 'canvas_controller.dart';
+import 'canvas_hit_tester.dart';
 import 'renderer_helpers.dart'; 
 
+enum CompassRendererPass { document, overlay }
+
 class CompassRenderer extends CustomPainter {
+  static bool _isPathEmpty(Path path) {
+    if (path.getBounds() != Rect.zero) return false;
+    return path.computeMetrics().isEmpty;
+  }
+
+  Set<CompassPoint> _cachedGradientStops = const <CompassPoint>{};
+  Set<CompassPoint> _cachedUnlockedPoints = const <CompassPoint>{};
+
   final CompassEngine engine;
+  final CompassRendererPass renderPass;
   final CompassPoint? selectedPoint; 
   final Set<CompassPoint>? selectedPoints; 
   final Offset? rotationPivotOffset;
@@ -78,7 +91,9 @@ class CompassRenderer extends CustomPainter {
   final Rect? selectionBounds; 
 
   CompassRenderer({
-    required this.engine, 
+    required this.engine,
+    this.renderPass = CompassRendererPass.document,
+    Listenable? repaint,
     this.selectedPoint,
     this.selectedPoints,
     this.rotationPivotOffset,
@@ -113,16 +128,25 @@ class CompassRenderer extends CustomPainter {
     this.activeHandleNode,
     this.activeHandleIsOut = false,
     this.selectionBounds, 
-  }) : super(repaint: engine);
+  }) : super(repaint: repaint);
 
   @override
   void paint(Canvas canvas, Size size) {
+    final safeScale = canvasScale.abs() < 1e-9 ? 1.0 : canvasScale;
+    final visibleWorldRect = Rect.fromLTRB(
+      -panOffset.dx / safeScale,
+      -panOffset.dy / safeScale,
+      (size.width - panOffset.dx) / safeScale,
+      (size.height - panOffset.dy) / safeScale,
+    );
+
     canvas.save();
     
     // Apply Global Transformations (Pan and Scale)
     canvas.translate(panOffset.dx, panOffset.dy);
     canvas.scale(canvasScale);
     
+    if (renderPass != CompassRendererPass.overlay) {
     // ==========================================
     // 0. DRAW REFERENCE IMAGE (BOTTOM Z-INDEX)
     // ==========================================
@@ -145,9 +169,23 @@ class CompassRenderer extends CustomPainter {
     // ==========================================
     for (var layer in engine.layers) {
       if (layer.isVisible) {
-        final fillPath = layer.getLayerFillPath();
-        final layerPath = layer.getLayerPath();
-        final strokeAreaPath = layer.getLayerStrokeAreaPath();
+        final layerSignature = layer.geometrySignature;
+        final resolvedGeometry = layer.getRenderGeometry(
+          signature: layerSignature,
+        );
+        final fillPath = resolvedGeometry.fillPath;
+        final layerPath = resolvedGeometry.outlinePath;
+        final strokeAreaPath = resolvedGeometry.strokeAreaPath;
+
+        // Resolved bounds now include visible mesh boundaries, so every layer can
+        // be culled uniformly before any fill, clip, or Vertices work.
+        final layerBounds = resolvedGeometry.bounds;
+        if (layerBounds != Rect.zero) {
+          final paintPadding = max(layer.strokeWidth, 12.0) / safeScale;
+          if (!layerBounds.inflate(paintPadding).overlaps(visibleWorldRect)) {
+            continue;
+          }
+        }
 
         // 1a. Fill Standard Geometry 
         if (layer.color != Colors.transparent) {
@@ -182,11 +220,32 @@ class CompassRenderer extends CustomPainter {
         // exactly that region.
         for (var shape in layer.shapes) {
           if (!shape.isVisible) continue;
+
+          // IMG objects use the same ordered Boolean clip semantics as lifted
+          // gradients, but paint decoded raster pixels through that path.
+          if (shape is CompassImage &&
+              CompassLayer.hasLiftedImageFill(shape)) {
+            final clip = layer.getCachedImagePaintClipPath(shape, layerSignature);
+            if (_isPathEmpty(clip)) continue;
+
+            shape.drawPixels(canvas, clip);
+
+            // Raster content is glued to its affine point frame, so the layer
+            // mirror must transform the clip and pixels together.
+            if (layer.mirrorEnabled) {
+              canvas.save();
+              canvas.transform(layer.mirrorMatrix.storage);
+              shape.drawPixels(canvas, clip);
+              canvas.restore();
+            }
+            continue;
+          }
+
           if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
 
           final g = shape.gradient!;
-          final clip = layer.getLayerGradientClipPath(shape);
-          if (clip.computeMetrics().isEmpty) continue;
+          final clip = layer.getCachedSelfPaintedClipPath(shape, layerSignature);
+          if (_isPathEmpty(clip)) continue;
 
           final gradPaint = Paint()
             ..isAntiAlias = true
@@ -254,8 +313,8 @@ class CompassRenderer extends CustomPainter {
         // Done AFTER the flat fill/stroke but BEFORE the mesh pass, so a gradient
         // mesh still sits above its layer's solid geometry as before.
         if (layer.color != Colors.transparent) {
-          final overpaints = layer.getStrokeAddBandOverpaints(fillPath);
-          for (final (bandPath, bandColor) in overpaints) {
+          for (final (bandPath, bandColor)
+              in resolvedGeometry.strokeOverpaints) {
             final bandPaint = Paint()
               ..color = bandColor
               ..style = PaintingStyle.fill
@@ -276,8 +335,8 @@ class CompassRenderer extends CustomPainter {
           if (!shape.isVisible) continue;
           if (shape.rows < 2 || shape.cols < 2) continue;
 
-          final clip = layer.getLayerMeshClipPath(shape);
-          if (clip.computeMetrics().isEmpty) continue;
+          final clip = layer.getCachedMeshClipPath(shape, layerSignature);
+          if (_isPathEmpty(clip)) continue;
 
           canvas.save();
           canvas.clipPath(clip);
@@ -320,10 +379,12 @@ class CompassRenderer extends CustomPainter {
       }
     }
 
+    }
+
     // ==========================================
     // 2. DRAW SCAFFOLDING (WIREFRAMES & POINTS)
     // ==========================================
-    if (showScaffolding) {
+    if (renderPass != CompassRendererPass.document && showScaffolding) {
       final invScale = 1.0 / canvasScale;
 
       // --- MIRROR MODIFIER AXIS LINES ---
@@ -412,6 +473,8 @@ class CompassRenderer extends CustomPainter {
               RendererHelpers.drawDashedLine(canvas, Offset(shape.center.x.value, shape.center.y.value), Offset(shape.radiusPoint!.x.value, shape.radiusPoint!.y.value), scaffoldPaint, invScale); 
             }
           } else if (shape is CompassRectangle) {
+            shape.paint(canvas, isSelected ? selectedWireframePaint : wireframePaint, showScaffolding: true, isSelected: isSelected);
+          } else if (shape is CompassImage) {
             shape.paint(canvas, isSelected ? selectedWireframePaint : wireframePaint, showScaffolding: true, isSelected: isSelected);
           } else if (shape is CompassLine) {
             canvas.drawLine(Offset(shape.start.x.value, shape.start.y.value), Offset(shape.end.x.value, shape.end.y.value), isSelected ? selectedWireframePaint : wireframePaint);
@@ -1070,7 +1133,9 @@ class CompassRenderer extends CustomPainter {
         // don't ALSO render as generic blue vertex dots, and so an unselected
         // shape's stops stay hidden -- matching how pulleys/handles only appear
         // when their shape is selected.
-        final stopPoints = _gradientStopPoints();
+        _preparePointPaintCache();
+        final stopPoints = _cachedGradientStops;
+        final unlockedPoints = _cachedUnlockedPoints;
 
         final pointPaint = Paint()
           ..color = Colors.blue
@@ -1083,7 +1148,7 @@ class CompassRenderer extends CustomPainter {
 
         for (var point in engine.points) {
           if (stopPoints.contains(point)) continue;
-          if (_isPointUnlocked(point)) {
+          if (unlockedPoints.contains(point)) {
             final offset = Offset(point.x.value, point.y.value);
             canvas.drawCircle(offset, 5.0 * invScale, pointPaint);
             canvas.drawCircle(offset, 5.0 * invScale, pointBorderPaint);
@@ -1149,53 +1214,27 @@ class CompassRenderer extends CustomPainter {
     canvas.restore();
   }
 
-  /// Every gradient stop point across all shapes. Stops are ordinary points in
-  /// engine.points, so the generic blue-dot pass would otherwise draw them as
-  /// plain vertices; they're suppressed there and painted as colored stop dots
-  /// (for the selected shape) instead. Recomputed per paint -- shouldRepaint is
-  /// already unconditional and stop counts are tiny, so there's nothing to cache.
-  Set<CompassPoint> _gradientStopPoints() {
-    final s = <CompassPoint>{};
-    for (var layer in engine.layers) {
-      for (var shape in layer.shapes) {
-        final g = shape.gradient;
-        if (g == null) continue;
-        for (final stop in g.stops) {
-          s.add(stop.point);
-        }
-      }
-    }
-    return s;
-  }
-
-  bool _isPointUnlocked(CompassPoint p) {
-    bool usedInVisibleUnlocked = false;
-    bool usedAnywhere = false;
-
-    for (var layer in engine.layers) {
-      for (var shape in layer.shapes) {
-        bool hasPoint = false;
-        if (shape is CompassLine && (shape.start == p || shape.end == p)) hasPoint = true;
-        else if (shape is CompassCircle && (shape.center == p || shape.radiusPoint == p)) hasPoint = true;
-        else if (shape is CompassSpiral && (shape.center == p || shape.startPoint == p)) hasPoint = true;
-        else if (shape is CompassRectangle && (shape.p1 == p || shape.p2 == p)) hasPoint = true;
-        else if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == p) || shape.anchorPoint == p)) hasPoint = true;
-        else if (shape is CompassMesh && (shape.containsNode(p) || shape.anchorPoint == p)) hasPoint = true;
-
-        if (hasPoint) {
-          usedAnywhere = true;
-          if (layer.isVisible && !layer.isLocked && shape.isVisible) {
-            usedInVisibleUnlocked = true;
-          }
-        }
-      }
-    }
-
-    return usedInVisibleUnlocked || !usedAnywhere;
+  /// Shares the topology-derived interactive-point index with hit testing.
+  /// The index is rebuilt only for document/topology changes or selected-gradient
+  /// ownership changes, never for ordinary empty-space hover.
+  void _preparePointPaintCache() {
+    _cachedGradientStops = CanvasHitTester.gradientStopPoints(engine);
+    _cachedUnlockedPoints = CanvasHitTester.interactivePoints(engine);
   }
 
   @override
   bool shouldRepaint(covariant CompassRenderer oldDelegate) {
-    return true; 
+    if (renderPass != oldDelegate.renderPass || engine != oldDelegate.engine) {
+      return true;
+    }
+
+    if (renderPass == CompassRendererPass.document) {
+      return panOffset != oldDelegate.panOffset ||
+          canvasScale != oldDelegate.canvasScale;
+    }
+
+    // Overlay delegates are rebuilt only for interaction state changes. Document
+    // geometry changes also repaint through the engine Listenable.
+    return true;
   }
 }

@@ -6,6 +6,7 @@ import '../../engine.dart';
 import 'compass_renderer.dart';
 import 'canvas_hud.dart';
 import 'canvas_controller.dart'; 
+import 'fps_overlay.dart';
 
 class CompassCanvas extends StatefulWidget {
   final CompassEngine engine;
@@ -22,6 +23,7 @@ class CompassCanvas extends StatefulWidget {
   // menu so the mode can be flipped without leaving the canvas.
   final bool ghostVertices;
   final VoidCallback onToggleGhostVertices;
+  final bool showFpsOverlay;
 
   const CompassCanvas({
     super.key, 
@@ -32,6 +34,7 @@ class CompassCanvas extends StatefulWidget {
     required this.onToggleHandles, 
     required this.ghostVertices, // <--- NEW
     required this.onToggleGhostVertices, // <--- NEW
+    this.showFpsOverlay = false,
   });
 
   @override
@@ -118,44 +121,73 @@ class _CompassCanvasState extends State<CompassCanvas> {
                     color: Colors.transparent, 
                     width: double.infinity,
                     height: double.infinity,
-                    child: CustomPaint(
-                      painter: CompassRenderer(
-                        engine: widget.engine,
-                        selectedPoint: _controller.selectedPoints.isNotEmpty ? _controller.selectedPoints.first : null,     
-                        selectedPoints: _controller.selectedPoints,
-                        rotationPivotOffset: _controller.rotationPivotOffset,     
-                        isRPressed: _controller.isRPressed,           
-                        isShiftRPressed: _controller.isShiftRPressed,
-                        isCtrlRPressed: _controller.isCtrlRPressed, 
-                        isAPressed: _controller.isAPressed, 
-                        activeFilletNode: _controller.activeFilletNode,
-                        activeFilletSpline: _controller.activeFilletSpline,
-                        activeFilletRadius: _controller.activeFilletRadius,
-                        isFPressed: _controller.isFPressed,
-                        isWPressed: _controller.isWPressed,
-                        activeWidthNode: _controller.activeWidthNode,
-                        activeWidthIsLeft: _controller.activeWidthIsLeft,
-                        addVertexPreviewPos: _controller.addVertexPreviewPos,
-                        addVertexSpline: _controller.addVertexSpline,
-                        addVertexSegmentIndex: _controller.addVertexSegmentIndex,
-                        sliceIsRow: _controller.sliceIsRow,
-                        slicePreviewA: _controller.slicePreviewA,
-                        slicePreviewB: _controller.slicePreviewB,
-                        tensionTargetPoint: _controller.targetTensionNode?.point, 
-                        shapeStartPoint: _controller.shapeStartPoint, 
-                        hoveredPoint: _controller.hoveredPoint,
-                        hoverPosition: _controller.hoverPosition,
-                        currentTool: _controller.currentTool,
-                        showScaffolding: widget.showScaffolding,
-                        showHandles: widget.showHandles, 
-                        ghostVertices: widget.ghostVertices, // <--- NEW
-                        panOffset: _controller.panOffset,
-                        canvasScale: _controller.canvasScale,
-                        pointBorderColor: theme.colorScheme.surface, 
-                        activeHandleNode: _controller.activeHandleNode,
-                        activeHandleIsOut: _controller.activeHandleIsOut,
-                        selectionBounds: _controller.selectionBounds,
-                      ),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        RepaintBoundary(
+                          child: CustomPaint(
+                            painter: CompassRenderer(
+                              engine: widget.engine,
+                              renderPass: CompassRendererPass.document,
+                              repaint: Listenable.merge([
+                                widget.engine.documentRepaint,
+                                _controller.viewportNotifier,
+                              ]),
+                              currentTool: CompassTool.select,
+                              showScaffolding: false,
+                              showHandles: false,
+                              panOffset: _controller.panOffset,
+                              canvasScale: _controller.canvasScale,
+                              pointBorderColor: theme.colorScheme.surface,
+                            ),
+                          ),
+                        ),
+                        RepaintBoundary(
+                          child: CustomPaint(
+                            painter: CompassRenderer(
+                              engine: widget.engine,
+                              renderPass: CompassRendererPass.overlay,
+                              repaint: widget.engine,
+                              selectedPoint: _controller.selectedPoints.isNotEmpty
+                                  ? _controller.selectedPoints.first
+                                  : null,
+                              selectedPoints: _controller.selectedPoints,
+                              rotationPivotOffset: _controller.rotationPivotOffset,
+                              isRPressed: _controller.isRPressed,
+                              isShiftRPressed: _controller.isShiftRPressed,
+                              isCtrlRPressed: _controller.isCtrlRPressed,
+                              isAPressed: _controller.isAPressed,
+                              activeFilletNode: _controller.activeFilletNode,
+                              activeFilletSpline: _controller.activeFilletSpline,
+                              activeFilletRadius: _controller.activeFilletRadius,
+                              isFPressed: _controller.isFPressed,
+                              isWPressed: _controller.isWPressed,
+                              activeWidthNode: _controller.activeWidthNode,
+                              activeWidthIsLeft: _controller.activeWidthIsLeft,
+                              addVertexPreviewPos: _controller.addVertexPreviewPos,
+                              addVertexSpline: _controller.addVertexSpline,
+                              addVertexSegmentIndex: _controller.addVertexSegmentIndex,
+                              sliceIsRow: _controller.sliceIsRow,
+                              slicePreviewA: _controller.slicePreviewA,
+                              slicePreviewB: _controller.slicePreviewB,
+                              tensionTargetPoint: _controller.targetTensionNode?.point,
+                              shapeStartPoint: _controller.shapeStartPoint,
+                              hoveredPoint: _controller.hoveredPoint,
+                              hoverPosition: _controller.hoverPosition,
+                              currentTool: _controller.currentTool,
+                              showScaffolding: widget.showScaffolding,
+                              showHandles: widget.showHandles,
+                              ghostVertices: widget.ghostVertices,
+                              panOffset: _controller.panOffset,
+                              canvasScale: _controller.canvasScale,
+                              pointBorderColor: theme.colorScheme.surface,
+                              activeHandleNode: _controller.activeHandleNode,
+                              activeHandleIsOut: _controller.activeHandleIsOut,
+                              selectionBounds: _controller.selectionBounds,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -181,7 +213,8 @@ class _CompassCanvasState extends State<CompassCanvas> {
 
             // --- Canvas Heads Up Display (HUD) ---
             Positioned.fill(
-              child: CanvasHUD(
+              child: RepaintBoundary(
+                child: CanvasHUD(
                 engine: widget.engine,
                 showScaffolding: widget.showScaffolding,
                 currentTool: _controller.currentTool,
@@ -201,8 +234,16 @@ class _CompassCanvasState extends State<CompassCanvas> {
                 
                 panOffset: _controller.panOffset,
                 canvasScale: _controller.canvasScale,
+                ),
               ),
             ),
+
+            if (widget.showFpsOverlay)
+              const Positioned(
+                top: 12,
+                right: 12,
+                child: FpsOverlay(),
+              ),
           ],
         );
       },

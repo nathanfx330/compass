@@ -11,9 +11,7 @@ import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/spline.dart';
 import '../models/geometry/rectangle.dart';
-import '../models/geometry/rhombus.dart'; 
 import '../models/geometry/mesh.dart'; 
-import '../models/geometry/gradient.dart'; // <--- NEW: Import gradient model
 
 class SVGExporter {
   static String sanitizeId(String rawId) {
@@ -75,66 +73,71 @@ class SVGExporter {
     return sb.toString().trim();
   }
 
-  // ONE band of a circle's stroke stack as an even-odd two-circle SVG path `d`
-  // string: outer ring r + innerOffset + width, inner hole r + innerOffset (inner
-  // omitted if the band reaches the center, matching
-  // CompassCircle.getStrokeOutlinePath(width, innerOffset)). Used in BOTH roles --
-  // black-fill geometry inside a subtract mask, and colored-fill geometry in the
-  // add pass -- so the ring shape for a given band is defined once.
-  static String _circleBandSvgData(
-      CompassCircle circle, double width, double innerOffset) {
-    final r = circle.radius.value;
-    if (r <= 0 || width <= 0) return '';
-
-    final cx = circle.center.x.value;
-    final cy = circle.center.y.value;
-    final inner = r + innerOffset;
-    final outer = inner + width;
-    if (outer <= 0) return '';
-
-    // Two full circles via arc commands; even-odd makes the inner one a hole.
-    final sb = StringBuffer();
-    sb.write('M ${cx - outer} $cy ');
-    sb.write('a $outer $outer 0 1 0 ${outer * 2} 0 ');
-    sb.write('a $outer $outer 0 1 0 ${-outer * 2} 0 ');
-    sb.write('Z ');
-    if (inner > 0) {
-      sb.write('M ${cx - inner} $cy ');
-      sb.write('a $inner $inner 0 1 0 ${inner * 2} 0 ');
-      sb.write('a $inner $inner 0 1 0 ${-inner * 2} 0 ');
-      sb.write('Z ');
-    }
-    return sb.toString().trim();
-  }
-
-  // Walks a circle's OUTWARD-STACKED stroke stack, yielding (region, width,
-  // innerOffset) for each region in order -- the single source of the stacking
-  // geometry for the SVG exporter, mirroring CompassLayer's walk. Region 0 starts
-  // exactly at the shape's boundary (0.0); each later region's inner edge is the 
-  // previous band's outer edge. Zero-width regions are skipped.
+  // Walks any shape's OUTWARD-STACKED stroke stack, yielding the same
+  // (region, width, innerOffset) records used by CompassLayer. Shapes without a
+  // getStrokeOutlinePath override simply yield empty paths later.
   static List<({StrokeRegion region, double width, double innerOffset})>
-      _circleStrokeBands(CompassCircle circle) {
+      _strokeBands(CompassShape shape) {
     final out = <({StrokeRegion region, double width, double innerOffset})>[];
     double offset = 0.0;
-    for (final region in circle.strokeRegions) {
-      final w = region.width;
-      if (w <= 0) continue;
-      out.add((region: region, width: w, innerOffset: offset));
-      offset += w;
+    for (final region in shape.strokeRegions) {
+      final width = region.width;
+      if (width <= 0) continue;
+      out.add((region: region, width: width, innerOffset: offset));
+      offset += width;
     }
     return out;
   }
 
-  // The outermost radius reached by a circle's stroke stack (for bbox widening),
-  // mirroring the PNG exporter.
-  static double _circleStrokeOuterRadius(CompassCircle circle) {
-    double offset = 0.0;
-    for (final region in circle.strokeRegions) {
-      final w = region.width;
-      if (w <= 0) continue;
-      offset += w;
+  static String _strokeBandSvgData(
+    CompassShape shape,
+    double width,
+    double innerOffset,
+  ) {
+    // Preserve exact SVG arcs for circles; arbitrary rectangle and X-spline bands
+    // are flattened from their resolved filled paths below.
+    if (shape is CompassCircle) {
+      final radius = shape.radius.value;
+      if (radius <= 0 || width <= 0) return '';
+
+      final centerX = shape.center.x.value;
+      final centerY = shape.center.y.value;
+      final inner = radius + innerOffset;
+      final outer = inner + width;
+      if (outer <= 0) return '';
+
+      final data = StringBuffer()
+        ..write('M ${centerX - outer} $centerY ')
+        ..write('a $outer $outer 0 1 0 ${outer * 2} 0 ')
+        ..write('a $outer $outer 0 1 0 ${-outer * 2} 0 Z ');
+      if (inner > 0) {
+        data
+          ..write('M ${centerX - inner} $centerY ')
+          ..write('a $inner $inner 0 1 0 ${inner * 2} 0 ')
+          ..write('a $inner $inner 0 1 0 ${-inner * 2} 0 Z ');
+      }
+      return data.toString().trim();
     }
-    return circle.radius.value + offset;
+
+    return _pathToSvgData(shape.getStrokeOutlinePath(width, innerOffset));
+  }
+
+  static Rect? _strokeStackBounds(CompassShape shape) {
+    Rect? bounds;
+    for (final band in _strokeBands(shape)) {
+      final path = shape.getStrokeOutlinePath(band.width, band.innerOffset);
+      if (path.computeMetrics().isEmpty) continue;
+      final next = path.getBounds();
+      bounds = bounds == null
+          ? next
+          : Rect.fromLTRB(
+              min(bounds.left, next.left),
+              min(bounds.top, next.top),
+              max(bounds.right, next.right),
+              max(bounds.bottom, next.bottom),
+            );
+    }
+    return bounds;
   }
 
   static String toSVG(CompassEngine engine) {
@@ -156,10 +159,9 @@ class SVGExporter {
       for (var shape in layer.shapes) {
         if (!shape.isVisible) continue;
         if (shape is CompassCircle) {
-           // Widen to the stroke stack's cumulative OUTER radius (parity with the
-           // PNG exporter). Each band stacks outward, so this is the sum walk in
-           // _circleStrokeOuterRadius (which reduces to r for an empty stack).
-           double r = max(shape.radius.value, _circleStrokeOuterRadius(shape));
+           // The circle's base geometry; generic stroke-stack bounds are
+           // included below for circles, rectangles, and X-splines alike.
+           double r = shape.radius.value;
            double cx = shape.center.x.value;
            double cy = shape.center.y.value;
            if (cx - r < minX) minX = cx - r;
@@ -175,16 +177,6 @@ class SVGExporter {
            if (minYP < minY) minY = minYP;
            if (maxXP > maxX) maxX = maxXP;
            if (maxYP > maxY) maxY = maxYP;
-        } else if (shape is CompassRhombus) {
-           final px1 = shape.p1.x.value; final py1 = shape.p1.y.value;
-           final px2 = shape.p2.x.value; final py2 = shape.p2.y.value;
-           final px3 = shape.p3.x.value; final py3 = shape.p3.y.value;
-           final px4 = shape.p4.x.value; final py4 = shape.p4.y.value;
-           
-           if (min(min(px1, px2), min(px3, px4)) < minX) minX = min(min(px1, px2), min(px3, px4));
-           if (min(min(py1, py2), min(py3, py4)) < minY) minY = min(min(py1, py2), min(py3, py4));
-           if (max(max(px1, px2), max(px3, px4)) > maxX) maxX = max(max(px1, px2), max(px3, px4));
-           if (max(max(py1, py2), max(py3, py4)) > maxY) maxY = max(max(py1, py2), max(py3, py4));
         } else if (shape is CompassXSpline) {
            // A variable-width ribbon bulges past its node points; include its full
            // visual extent so the viewBox can't clip it. Mirrors the PNG exporter.
@@ -204,6 +196,14 @@ class SVGExporter {
            if (bounds.top < minY) minY = bounds.top;
            if (bounds.right > maxX) maxX = bounds.right;
            if (bounds.bottom > maxY) maxY = bounds.bottom;
+        }
+
+        final strokeBounds = _strokeStackBounds(shape);
+        if (strokeBounds != null) {
+          if (strokeBounds.left < minX) minX = strokeBounds.left;
+          if (strokeBounds.top < minY) minY = strokeBounds.top;
+          if (strokeBounds.right > maxX) maxX = strokeBounds.right;
+          if (strokeBounds.bottom > maxY) maxY = strokeBounds.bottom;
         }
       }
     }
@@ -250,11 +250,15 @@ class SVGExporter {
       final subShapes = layer.shapes.where((s) => s.isVisible && s.operation == CompassBooleanOp.subtract).toList();
 
       // --- STROKE-STACK contributors (outline-as-boolean) ---
-      final strokeCircles =
-          layer.shapes.where((s) => s.isVisible && s is CompassCircle).cast<CompassCircle>().toList();
-      bool circleHasSubtractBand(CompassCircle c) =>
-          c.strokeRegions.any((r) => r.op == CompassBooleanOp.subtract && r.width > 0);
-      final strokeSubCircles = strokeCircles.where(circleHasSubtractBand).toList();
+      final strokeShapes = layer.shapes
+          .where((shape) => shape.isVisible && shape.strokeRegions.isNotEmpty)
+          .toList();
+      bool hasSubtractBand(CompassShape shape) => shape.strokeRegions.any(
+            (region) =>
+                region.op == CompassBooleanOp.subtract && region.width > 0,
+          );
+      final strokeSubtractShapes =
+          strokeShapes.where(hasSubtractBand).toList();
 
       // Meshes are `add`, but they are NOT flat-fill shapes -- they're faceted in
       // their own pass below, so pull them out of the normal add-shapes loop (which
@@ -268,7 +272,7 @@ class SVGExporter {
       buffer.writeln('  <!-- Layer: ${layer.name} -->');
 
       // The defs block is needed if ANYTHING carves this layer (masks) OR if we have gradients.
-      final bool needsMask = subShapes.isNotEmpty || strokeSubCircles.isNotEmpty;
+      final bool needsMask = subShapes.isNotEmpty || strokeSubtractShapes.isNotEmpty;
 
       if (needsMask || gradShapes.isNotEmpty) {
         buffer.writeln('  <defs>');
@@ -285,19 +289,20 @@ class SVGExporter {
             } else if (shape is CompassRectangle) { 
               final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
               buffer.writeln('      <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="black" />');
-            } else if (shape is CompassRhombus) {
-              final pts = '${shape.p1.x.value},${shape.p1.y.value} ${shape.p2.x.value},${shape.p2.y.value} ${shape.p3.x.value},${shape.p3.y.value} ${shape.p4.x.value},${shape.p4.y.value}';
-              buffer.writeln('      <polygon points="$pts" fill="black" />');
             } else if (shape is CompassXSpline) {
               buffer.writeln('      <path d="${shape.getSvgPathData()}" fill="black" fill-rule="evenodd" />');
             }
           }
 
-          // Output Circle Subtract Strokes into the Mask
-          for (var circle in strokeSubCircles) {
-            for (final band in _circleStrokeBands(circle)) {
+          // Output subtract stroke regions into the layer mask.
+          for (final shape in strokeSubtractShapes) {
+            for (final band in _strokeBands(shape)) {
               if (band.region.op != CompassBooleanOp.subtract) continue;
-              final d = _circleBandSvgData(circle, band.width, band.innerOffset);
+              final d = _strokeBandSvgData(
+                shape,
+                band.width,
+                band.innerOffset,
+              );
               if (d.isNotEmpty) {
                 buffer.writeln('      <path d="$d" fill="black" fill-rule="evenodd" />');
               }
@@ -306,38 +311,41 @@ class SVGExporter {
           buffer.writeln('    </mask>');
         }
 
-        // --- Output <linearGradient> Definitions ---
+        // --- Output gradient definitions (linear OR radial) ---
+        // Stop positions/colors come from the model's resolvedStops() in BOTH
+        // branches, so the SVG matches buildShader() exactly and can't drift:
+        // for a linear fill that resolver projects each stop onto the axis; for
+        // a circular fill it uses radial distance / radius. (The old hand-rolled
+        // projection here was linear-only, which mis-placed every circular stop.)
+        // gradientUnits="userSpaceOnUse" locks both to our world coordinates, so
+        // the mirror path's untransformed reuse keeps the ramp continuous.
         for (int i = 0; i < gradShapes.length; i++) {
           final shape = gradShapes[i];
           final g = shape.gradient!;
           final gradId = 'grad_${cleanLayerId}_$i';
-          
+
           final axis = g.axis;
-          if (axis != null) {
-            final a = axis.$1;
-            final b = axis.$2;
-            
-            // gradientUnits="userSpaceOnUse" locks the gradient to our coordinate system mathematically
-            buffer.writeln('    <linearGradient id="$gradId" x1="${a.dx}" y1="${a.dy}" x2="${b.dx}" y2="${b.dy}" gradientUnits="userSpaceOnUse">');
-            
-            final axisVec = b - a;
-            final len2 = axisVec.dx * axisVec.dx + axisVec.dy * axisVec.dy;
-            
-            final resolved = <(double, Color)>[];
-            for (final s in g.stops) {
-              double t = 0.0;
-              if (len2 >= 1e-9) {
-                final rel = Offset(s.point.x.value, s.point.y.value) - a;
-                t = ((rel.dx * axisVec.dx + rel.dy * axisVec.dy) / len2).clamp(0.0, 1.0);
-              }
-              resolved.add((t, s.color));
-            }
-            resolved.sort((x, y) => x.$1.compareTo(y.$1));
-            
+          if (axis == null) continue;
+
+          final a = axis.$1;
+          final b = axis.$2;
+
+          final resolved = g.resolvedStops();
+
+          if (g.isCircular) {
+            // Center = first stop (a); radius = |axis|. fx/fy = center means no
+            // focal offset, matching ui.Gradient.radial (which takes no focal).
+            final radius = (b - a).distance;
+            buffer.writeln('    <radialGradient id="$gradId" cx="${a.dx}" cy="${a.dy}" r="$radius" fx="${a.dx}" fy="${a.dy}" gradientUnits="userSpaceOnUse">');
             for (final r in resolved) {
               buffer.writeln('      <stop offset="${(r.$1 * 100).toStringAsFixed(2)}%" stop-color="${toHexOpaque(r.$2)}" />');
             }
-            
+            buffer.writeln('    </radialGradient>');
+          } else {
+            buffer.writeln('    <linearGradient id="$gradId" x1="${a.dx}" y1="${a.dy}" x2="${b.dx}" y2="${b.dy}" gradientUnits="userSpaceOnUse">');
+            for (final r in resolved) {
+              buffer.writeln('      <stop offset="${(r.$1 * 100).toStringAsFixed(2)}%" stop-color="${toHexOpaque(r.$2)}" />');
+            }
             buffer.writeln('    </linearGradient>');
           }
         }
@@ -360,8 +368,31 @@ class SVGExporter {
         
         // Look up our Dynamic Fills (Gradient URL vs Base Hex Color)
         if (CompassLayer.hasLiftedGradientFill(shape)) {
-          final idx = gradShapes.indexOf(shape);
-          shapeFillHex = 'url(#grad_${cleanLayerId}_$idx)';
+          // A lifted gradient with <2 stops has no usable axis, so no gradient
+          // DEF is emitted for it (see the defs loop's `axis == null` skip). It
+          // renders as a SOLID of its seed color on the canvas (buildShader ->
+          // null -> solidColor), so mirror that here instead of referencing a
+          // def that doesn't exist -- a url(#grad) to a missing id renders as
+          // black (or nothing) in most viewers.
+          final g = shape.gradient!;
+          if (g.axis == null) {
+            final solid = g.solidColor;
+            shapeFillHex = solid != null ? toHexOpaque(solid) : fillHex;
+          } else if (layer.mirrorEnabled) {
+            // MIRROR SPLIT: a lifted gradient fill must NOT ride the reflected
+            // <use> -- that transform drags the userSpaceOnUse gradient axis with
+            // the geometry and folds the ramp at the seam. So on a mirrored layer
+            // the shape stays in the group as HAIRLINE ONLY (fill=none, its stroke
+            // still reflects correctly through the <use>), and the gradient fill is
+            // emitted separately below as standalone master + reflected-clip paths
+            // that share the SAME untransformed gradient -- the ramp then flows
+            // straight across the seam, matching the renderer. On a NON-mirrored
+            // layer nothing changes: the inline url(#grad) fill is emitted as before.
+            shapeFillHex = 'none';
+          } else {
+            final idx = gradShapes.indexOf(shape);
+            shapeFillHex = 'url(#grad_${cleanLayerId}_$idx)';
+          }
         } else if (shape.gradient != null && shape.gradient!.solidColor != null) {
           shapeFillHex = toHexOpaque(shape.gradient!.solidColor!);
         }
@@ -386,9 +417,6 @@ class SVGExporter {
         } else if (shape is CompassRectangle) { 
           final rect = Rect.fromPoints(Offset(shape.p1.x.value, shape.p1.y.value), Offset(shape.p2.x.value, shape.p2.y.value));
           buffer.writeln('    <rect x="${rect.left}" y="${rect.top}" width="${rect.width}" height="${rect.height}" rx="${shape.cornerRadius.value}" ry="${shape.cornerRadius.value}" fill="$shapeFillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
-        } else if (shape is CompassRhombus) {
-          final pts = '${shape.p1.x.value},${shape.p1.y.value} ${shape.p2.x.value},${shape.p2.y.value} ${shape.p3.x.value},${shape.p3.y.value} ${shape.p4.x.value},${shape.p4.y.value}';
-          buffer.writeln('    <polygon points="$pts" fill="$shapeFillHex" stroke="$strokeHex" stroke-width="$sWidth" />');
         } else if (shape is CompassXSpline) {
           if (shape.hasWidthProfile) {
             if (shape.isClosed && shapeFillHex != 'none') {
@@ -401,11 +429,15 @@ class SVGExporter {
         }
       }
 
-      // --- STROKE-ADD bands (filled ring as standalone geometry) ---
-      for (var circle in strokeCircles) {
-        for (final band in _circleStrokeBands(circle)) {
+      // --- STROKE-ADD bands (filled regions as standalone geometry) ---
+      for (final shape in strokeShapes) {
+        for (final band in _strokeBands(shape)) {
           if (band.region.op != CompassBooleanOp.add) continue;
-          final d = _circleBandSvgData(circle, band.width, band.innerOffset);
+          final d = _strokeBandSvgData(
+            shape,
+            band.width,
+            band.innerOffset,
+          );
           if (d.isEmpty) continue;
           final bandColor = band.region.color;
           final bandFill = bandColor != null ? toHexOpaque(bandColor) : fillHex;
@@ -493,15 +525,57 @@ class SVGExporter {
       // Reflect the ENTIRE rendered layer by instantiating its content group
       // through a transformed <use>. This is the SVG analogue of the renderer's
       // "replay the whole pass through canvas.transform(mirrorMatrix)" -- the one
-      // <use> transform maps flat fills, masked subtractions, userSpaceOnUse
-      // gradients (axis reflects with the geometry), stroke-add bands, and mesh
-      // clip+facets all together, so a subtract on the master half carves the
-      // reflected half symmetrically. Emitting both href and xlink:href covers
-      // modern and legacy renderers. Nothing here duplicates ids: the content is
-      // written once and merely referenced.
+      // <use> transform maps flat fills, masked subtractions, stroke-add bands,
+      // and mesh clip+facets all together, so a subtract on the master half
+      // carves the reflected half symmetrically. Emitting both href and
+      // xlink:href covers modern and legacy renderers. Nothing here duplicates
+      // ids: the content is written once and merely referenced.
+      //
+      // GRADIENT FILLS ARE THE ONE EXCEPTION and are handled OUTSIDE this <use>.
+      // A userSpaceOnUse linear/radial gradient is a WORLD-SPACE ramp; if its
+      // shape's fill rode the <use>, the transform would carry the gradient axis
+      // along and FOLD the ramp at the seam. The renderer instead reflects only
+      // the clip GEOMETRY and reuses the same world-space shader, so the color
+      // flows straight across the seam as if the shape simply grew. We reproduce
+      // that here: each lifted-gradient shape was emitted fill=none inside the
+      // group (stroke only), and its fill is drawn as TWO standalone paths that
+      // both reference the SAME untransformed gradient def --
+      //   * MASTER: getLayerGradientClipPath(shape) (the boolean-carved master
+      //     silhouette, already accounting for shapes above it -- so it needs no
+      //     layer mask, exactly as on the canvas);
+      //   * REFLECTED: that same clip transformed by mirrorMatrix.
+      // The two mirror halves are disjoint across the axis, so their paint order
+      // relative to the <use> is immaterial; we bracket the <use> for readability.
       if (layer.mirrorEnabled) {
+        // Master-half gradient fills (world-space shader, unmirrored clip).
+        for (final shape in gradShapes) {
+          if (!shape.isVisible) continue;
+          // A <2-stop gradient has no def and rendered as a solid inside the
+          // group (so it already reflects through the <use>); no standalone
+          // gradient path for it, or we'd emit a dangling url(#grad).
+          if (shape.gradient!.axis == null) continue;
+          final idx = gradShapes.indexOf(shape);
+          final clip = layer.getLayerGradientClipPath(shape);
+          final d = _pathToSvgData(clip);
+          if (d.isEmpty) continue;
+          buffer.writeln('  <path d="$d" fill="url(#grad_${cleanLayerId}_$idx)" fill-rule="evenodd" stroke="none" />');
+        }
+
         final t = _mirrorTransform(layer);
         buffer.writeln('  <use xlink:href="#$contentId" href="#$contentId" transform="$t" />');
+
+        // Reflected-half gradient fills: SAME gradient (no gradientTransform), so
+        // the ramp continues across the seam; only the clip geometry is mirrored.
+        for (final shape in gradShapes) {
+          if (!shape.isVisible) continue;
+          if (shape.gradient!.axis == null) continue;
+          final idx = gradShapes.indexOf(shape);
+          final clip = layer.getLayerGradientClipPath(shape);
+          final reflected = clip.transform(layer.mirrorMatrix.storage);
+          final d = _pathToSvgData(reflected);
+          if (d.isEmpty) continue;
+          buffer.writeln('  <path d="$d" fill="url(#grad_${cleanLayerId}_$idx)" fill-rule="evenodd" stroke="none" />');
+        }
       }
     }
 

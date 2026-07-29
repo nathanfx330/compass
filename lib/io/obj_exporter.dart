@@ -6,8 +6,45 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart'; // debugPrint (diagnostics; harmless to keep)
 
 import '../models/layer.dart';
+import '../models/geometry/image.dart';
 import 'medial_axis.dart';
 import 'delaunay.dart';
+
+/// A portable textured OBJ export package.
+///
+/// [objData] references [materialLibraryFileName], while [mtlData] references
+/// [textureFileName]. The caller writes both text files beside a copy of
+/// [textureSourcePath].
+class OBJTextureExport {
+  final String objData;
+  final String mtlData;
+  final String materialLibraryFileName;
+  final String textureFileName;
+  final String textureSourcePath;
+  final String? error;
+
+  const OBJTextureExport({
+    required this.objData,
+    required this.mtlData,
+    required this.materialLibraryFileName,
+    required this.textureFileName,
+    required this.textureSourcePath,
+    this.error,
+  });
+
+  bool get isEmpty => objData.isEmpty;
+
+  factory OBJTextureExport.empty(String message) {
+    return OBJTextureExport(
+      objData: '',
+      mtlData: '',
+      materialLibraryFileName: '',
+      textureFileName: '',
+      textureSourcePath: '',
+      error: message,
+    );
+  }
+}
 
 /// Exports a SINGLE layer's resolved boolean fill to a Wavefront .obj mesh,
 /// flat on the Z=0 plane. This is the "layer -> object" export: it takes what
@@ -79,7 +116,7 @@ import 'delaunay.dart';
 /// its own lattice weld, exactly as the medial kernel does). Only the walking
 /// differs.
 ///
-/// Source path: layer.getLayerFillPath() -- the fill silhouette, which already
+/// Source path: layer.getLayerMeshExportPath(useExportImageMasks: true) -- the fill silhouette, which already
 /// drops construction/stroke geometry and folds a closed width-spline's centerline
 /// into the fill, so "what gets exported" matches "what you see filled on canvas."
 /// The skeleton is extracted from this SAME silhouette, so holes shape the
@@ -145,7 +182,9 @@ class OBJExporter {
     double skeletonLambda = 20.0,
   }) {
     // Combine the standard fill with the variable-width ribbons
-    Path path = layer.getLayerFillPath();
+    Path path = layer.getLayerMeshExportPath(
+      useExportImageMasks: true,
+    );
     final areaPath = layer.getLayerStrokeAreaPath();
 
     if (areaPath.computeMetrics().isNotEmpty) {
@@ -391,6 +430,214 @@ class OBJExporter {
       buffer.writeln('f ${f[0]} ${f[1]} ${f[2]}');
     }
     return buffer.toString();
+  }
+
+  /// Exports one IMG object's resolved Boolean mask as a textured OBJ surface.
+  ///
+  /// The mesh boundary is the mask: image pixels can only appear where triangles
+  /// exist. Each emitted vertex is projected back through the IMG object's affine
+  /// frame to generate a matching OBJ `vt` coordinate. The original JPG/PNG is
+  /// referenced by a companion MTL file; the caller is responsible for copying it
+  /// beside the OBJ using the filenames supplied here.
+  ///
+  /// Textured skeleton output is intentionally unsupported because skeleton mode
+  /// emits loose edges rather than faces. Mirrored layers are also rejected for
+  /// now: a fused mirrored silhouette needs a UV seam/material-ownership pass
+  /// rather than one globally invertible image projection.
+  static OBJTextureExport toTexturedOBJ(
+    CompassLayer layer,
+    CompassImage image, {
+    required String materialLibraryFileName,
+    required String textureFileName,
+    double samplingSpacing = 2.0,
+    int minSamplesPerContour = 24,
+    int maxSamplesPerContour = 4000,
+    bool gridMode = false,
+    int gridCount = 48,
+    bool delaunayMode = false,
+    double delaunaySpacing = 25.0,
+    bool skeletonMode = false,
+  }) {
+    if (skeletonMode) {
+      return OBJTextureExport.empty(
+        'IMG textures require a filled mesh; Skeleton mode exports edges only.',
+      );
+    }
+
+    if (layer.mirrorEnabled) {
+      return OBJTextureExport.empty(
+        'Textured OBJ export does not yet support the layer Mirror Modifier.',
+      );
+    }
+
+    if (!image.isVisible || !CompassLayer.hasLiftedImageFill(image)) {
+      return OBJTextureExport.empty(
+        'The selected IMG is not a visible Add object.',
+      );
+    }
+
+    if (image.worldToUv(image.originOffset) == null) {
+      return OBJTextureExport.empty(
+        'The selected IMG frame is degenerate and cannot generate UV coordinates.',
+      );
+    }
+
+    // Reconstruct the exact export surface instead of trusting the raw IMG
+    // footprint. This guarantees a lone circle INTERSECT exports a circular
+    // mesh (and multiple intersections still union into disconnected islands).
+    final path = layer.getLayerImageExportMaskPath(image)
+      ..fillType = PathFillType.evenOdd;
+
+    final contours = <List<Offset>>[];
+    for (final metric in path.computeMetrics()) {
+      if (metric.length < 1e-3) continue;
+      final pts = _sampleContour(
+        metric,
+        samplingSpacing,
+        minSamplesPerContour,
+        maxSamplesPerContour,
+      );
+      if (pts.length >= 3) contours.add(pts);
+    }
+
+    if (contours.isEmpty) {
+      return OBJTextureExport.empty(
+        'The selected IMG mask has no filled area to export.',
+      );
+    }
+
+    double minX = double.infinity, minY = double.infinity;
+    double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+    for (final poly in contours) {
+      for (final p in poly) {
+        if (p.dx < minX) minX = p.dx;
+        if (p.dy < minY) minY = p.dy;
+        if (p.dx > maxX) maxX = p.dx;
+        if (p.dy > maxY) maxY = p.dy;
+      }
+    }
+
+    final cx = (minX + maxX) / 2.0;
+    final cy = (minY + maxY) / 2.0;
+    final verts = <Offset>[];
+    final faces = <List<int>>[];
+
+    if (delaunayMode) {
+      final tri = DelaunayTriangulator.triangulate(
+        contours,
+        interiorSpacing: delaunaySpacing,
+      );
+      if (tri.isEmpty) {
+        return OBJTextureExport.empty(
+          'The selected IMG mask could not be triangulated.',
+        );
+      }
+
+      verts.addAll(tri.verts);
+      for (final t in tri.tris) {
+        faces.add([t.$1 + 1, t.$2 + 1, t.$3 + 1]);
+      }
+    } else {
+      final vIndex = <String, int>{};
+
+      int vid(double x, double y) {
+        final key = '${(x / _weld).round()}_${(y / _weld).round()}';
+        final existing = vIndex[key];
+        if (existing != null) return existing;
+        verts.add(Offset(x, y));
+        final id = verts.length;
+        vIndex[key] = id;
+        return id;
+      }
+
+      if (gridMode) {
+        _tessellateGrid(
+          contours,
+          minX,
+          minY,
+          maxX,
+          maxY,
+          gridCount,
+          vid,
+          faces,
+        );
+      } else {
+        _tessellateScanline(contours, vid, faces);
+      }
+    }
+
+    if (verts.isEmpty || faces.isEmpty) {
+      return OBJTextureExport.empty(
+        'The selected IMG mask has no triangulated faces to export.',
+      );
+    }
+
+    final uvs = <Offset>[];
+    for (final vertex in verts) {
+      final uv = image.worldToUv(vertex);
+      if (uv == null) {
+        return OBJTextureExport.empty(
+          'The selected IMG frame became degenerate while generating UVs.',
+        );
+      }
+      uvs.add(uv);
+    }
+
+    final objectName = _sanitizeName('${layer.name}_${image.displayName}');
+    final materialName = '${objectName}_material';
+    final modeLabel = delaunayMode
+        ? 'delaunay (spacing $delaunaySpacing px)'
+        : (gridMode ? 'grid ($gridCount across)' : 'scanline');
+
+    final obj = StringBuffer();
+    obj.writeln('# Exported from Compass');
+    obj.writeln('# Layer: ${layer.name}');
+    obj.writeln('# IMG: ${image.displayName}');
+    obj.writeln('# ${verts.length} vertices, ${faces.length} textured triangles');
+    obj.writeln('# $modeLabel tessellation; IMG Boolean mask is the mesh boundary');
+    obj.writeln('mtllib $materialLibraryFileName');
+    obj.writeln('o $objectName');
+
+    for (final vertex in verts) {
+      final ex = vertex.dx - cx;
+      final ey = -(vertex.dy - cy);
+      obj.writeln('v $ex $ey 0');
+    }
+    for (final uv in uvs) {
+      obj.writeln('vt ${uv.dx} ${uv.dy}');
+    }
+
+    obj.writeln('usemtl $materialName');
+    obj.writeln('s off');
+    for (final face in faces) {
+      obj.writeln(
+        'f ${face[0]}/${face[0]} ${face[1]}/${face[1]} ${face[2]}/${face[2]}',
+      );
+    }
+
+    final alpha = image.opacity.clamp(0.0, 1.0).toDouble();
+    final mtl = StringBuffer();
+    mtl.writeln('# Exported from Compass');
+    mtl.writeln('newmtl $materialName');
+    mtl.writeln('Ka 0.000000 0.000000 0.000000');
+    mtl.writeln('Kd 1.000000 1.000000 1.000000');
+    mtl.writeln('Ks 0.000000 0.000000 0.000000');
+    mtl.writeln('d $alpha');
+    mtl.writeln('illum 1');
+    mtl.writeln('map_Kd $textureFileName');
+    // Importers that honor MTL opacity maps can preserve a transparent PNG.
+    // Do not use a JPG as map_d: its luminance would incorrectly become alpha.
+    if (textureFileName.toLowerCase().endsWith('.png')) {
+      mtl.writeln('map_d $textureFileName');
+    }
+
+    return OBJTextureExport(
+      objData: obj.toString(),
+      mtlData: mtl.toString(),
+      materialLibraryFileName: materialLibraryFileName,
+      textureFileName: textureFileName,
+      textureSourcePath: image.imagePath,
+    );
   }
 
   // ===========================================================================

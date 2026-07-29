@@ -26,6 +26,10 @@ enum CompassTool { select, addPoint, addLine, addCircle, addSpiral, addPen, addR
 class CanvasController extends ChangeNotifier {
   final CompassEngine engine;
 
+  /// Pan/zoom changes repaint both document and overlay. Ordinary controller
+  /// notifications (hover, tool previews, selection) repaint only the overlay.
+  final ChangeNotifier viewportNotifier = ChangeNotifier();
+
   CanvasController(this.engine) {
     HardwareKeyboard.instance.addHandler(_onKeyEvent);
   }
@@ -33,7 +37,13 @@ class CanvasController extends ChangeNotifier {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_onKeyEvent);
+    viewportNotifier.dispose();
     super.dispose();
+  }
+
+  void notifyViewportChanged() {
+    viewportNotifier.notifyListeners();
+    notifyListeners();
   }
 
   bool _onKeyEvent(KeyEvent event) {
@@ -262,7 +272,7 @@ class CanvasController extends ChangeNotifier {
     currentTool = CompassTool.select;
 
     notifyListeners();
-    engine.notifyListeners();
+    engine.notifyUiListeners();
   }
 
   void removePointFromSelection(CompassPoint point) {

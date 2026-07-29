@@ -12,6 +12,7 @@ import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/mesh.dart'; // <--- NEW: gradient mesh
+import '../../models/geometry/image.dart';
 
 class CanvasGeometry {
   /// Extracts all structural points from a given shape.
@@ -20,6 +21,9 @@ class CanvasGeometry {
     if (shape is CompassCircle) return [shape.center, if (shape.radiusPoint != null) shape.radiusPoint!];
     if (shape is CompassSpiral) return [shape.center, shape.startPoint];
     if (shape is CompassRectangle) return [shape.p1, shape.p2];
+    if (shape is CompassImage) {
+      return [shape.origin, shape.xHandle, shape.yHandle];
+    }
     if (shape is CompassXSpline) {
       final points = shape.nodes.map((n) => n.point).toList();
       if (shape.anchorPoint != null) points.add(shape.anchorPoint!);
@@ -75,6 +79,8 @@ class CanvasGeometry {
       return Offset(shape.center.x.value, shape.center.y.value);
     } else if (shape is CompassRectangle) {
       return Offset((shape.p1.x.value + shape.p2.x.value) / 2, (shape.p1.y.value + shape.p2.y.value) / 2);
+    } else if (shape is CompassImage) {
+      return shape.getPath().getBounds().center;
     } else if (shape is CompassLine) {
       return Offset((shape.start.x.value + shape.end.x.value) / 2, (shape.start.y.value + shape.end.y.value) / 2);
     }

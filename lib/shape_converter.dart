@@ -53,6 +53,7 @@ class ShapeConverter {
 
     final spline = CompassXSpline(isClosed: true, anchorPoint: circle.center)
       ..operation = circle.operation
+      ..strokeRegions = circle.strokeRegions.map((region) => region.copy()).toList()
       ..isVisible = circle.isVisible;
 
     final cx = circle.center.x.value;
@@ -122,6 +123,7 @@ class ShapeConverter {
 
     final spline = CompassXSpline(isClosed: true, anchorPoint: anchor)
       ..operation = rect.operation
+      ..strokeRegions = rect.strokeRegions.map((region) => region.copy()).toList()
       ..isVisible = rect.isVisible;
 
     final left = min(rect.p1.x.value, rect.p2.x.value);
@@ -267,7 +269,7 @@ class ShapeConverter {
     final int srcIndex = engine.layers.indexOf(layer);
     if (srcIndex == -1) return;
 
-    Path masterPath = layer.getLayerFillPath();
+    Path masterPath = layer.getLayerMeshExportPath();
     final areaPath = layer.getLayerStrokeAreaPath();
     
     if (areaPath.computeMetrics().isNotEmpty) {
@@ -275,42 +277,6 @@ class ShapeConverter {
         masterPath = areaPath;
       } else {
         masterPath = Path.combine(PathOperation.union, masterPath, areaPath);
-      }
-    }
-
-    // --- LIFTED-GRADIENT SILHOUETTES (else "nothing to bake") ---
-    // getLayerFillPath() deliberately SKIPS every hasLiftedGradientFill shape:
-    // its interior is painted separately by the renderer (compass_renderer 1a'),
-    // not unioned into the flat fill. So a layer whose fillable geometry lives in
-    // a gradient shape hands an EMPTY path to the baker -> contours.isEmpty ->
-    // "nothing to bake". This is the real cause of the mirror-bake failure (a
-    // mirrored NON-gradient layer bakes fine, because getLayerFillPath already
-    // bakes the mirror into flat geometry).
-    //
-    // Re-introduce each gradient shape's boolean-carved silhouette here.
-    // getLayerGradientClipPath(shape) is the SAME per-shape clip the renderer
-    // fills, so subtracts/holes carved by shapes above are already baked into it.
-    //
-    // MIRROR: these clips come back as the UNMIRRORED master half only -- exactly
-    // as in the renderer, where the reflected half is drawn by transforming the
-    // clip, not the canvas. So we reflect each clip the same way
-    // (clip.transform(mirrorMatrix)) and union it in, fusing master + reflection
-    // into the single "borg" silhouette the baker then walks as ONE shape -- the
-    // spline outline flips and morphs into the extended form, as intended.
-    for (final shape in layer.shapes) {
-      if (!shape.isVisible) continue;
-      if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
-
-      final clip = layer.getLayerGradientClipPath(shape);
-      if (clip.computeMetrics().isEmpty) continue;
-
-      masterPath = masterPath.computeMetrics().isEmpty
-          ? clip
-          : Path.combine(PathOperation.union, masterPath, clip);
-
-      if (layer.mirrorEnabled) {
-        final reflected = clip.transform(layer.mirrorMatrix.storage);
-        masterPath = Path.combine(PathOperation.union, masterPath, reflected);
       }
     }
 
@@ -423,7 +389,7 @@ class ShapeConverter {
     final int srcIndex = engine.layers.indexOf(layer);
     if (srcIndex == -1) return;
 
-    Path masterPath = layer.getLayerFillPath();
+    Path masterPath = layer.getLayerMeshExportPath();
     final areaPath = layer.getLayerStrokeAreaPath();
     
     if (areaPath.computeMetrics().isNotEmpty) {

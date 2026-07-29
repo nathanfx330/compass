@@ -26,6 +26,17 @@ class CompassMesh extends CompassShape {
 
   CompassPoint? anchorPoint;
 
+  // Geometry-heavy mesh products are immutable between node edits. Cache the
+  // Coons tangents, boundary/scaffolding paths, and tessellated Vertices so a
+  // stable mesh allocates nothing during ordinary repaints. The mirrored pass
+  // reuses the same Vertices object under a canvas transform.
+  int? _geometryCacheSignature;
+  int? _colorCacheSignature;
+  (List<List<Offset>>, List<List<Offset>>)? _tangentCache;
+  Path? _boundaryPathCache;
+  Path? _scaffoldingPathCache;
+  final Map<int, Vertices> _verticesCache = {};
+
   CompassMesh({
     required this.rows,
     required this.cols,
@@ -42,7 +53,10 @@ class CompassMesh extends CompassShape {
 
   CompassSplineNode node(int r, int c) => nodes[r * cols + c];
   Color colorAt(int r, int c) => colors[r * cols + c];
-  void setColorAt(int r, int c, Color color) => colors[r * cols + c] = color;
+  void setColorAt(int r, int c, Color color) {
+    colors[r * cols + c] = color;
+    _invalidateColorCache();
+  }
 
   Offset _nodeOffset(int r, int c) {
     final p = node(r, c).point;
@@ -62,7 +76,54 @@ class CompassMesh extends CompassShape {
     final i = indexOfPoint(p);
     if (i == -1) return false;
     colors[i] = color;
+    _invalidateColorCache();
     return true;
+  }
+
+  int _computeGeometrySignature() {
+    var signature = Object.hash(rows, cols, nodes.length);
+    for (final node in nodes) {
+      signature = Object.hash(
+        signature,
+        node.point.x.value,
+        node.point.y.value,
+        node.tension.value,
+      );
+    }
+    return signature;
+  }
+
+  int _computeColorSignature() {
+    var signature = Object.hash(colors.length, 0);
+    for (final color in colors) {
+      signature = Object.hash(signature, color.value);
+    }
+    return signature;
+  }
+
+  int _syncGeometryCache() {
+    final signature = _computeGeometrySignature();
+    if (_geometryCacheSignature != signature) {
+      _geometryCacheSignature = signature;
+      _tangentCache = null;
+      _boundaryPathCache = null;
+      _scaffoldingPathCache = null;
+      _verticesCache.clear();
+    }
+    return signature;
+  }
+
+  void _syncColorCache() {
+    final signature = _computeColorSignature();
+    if (_colorCacheSignature != signature) {
+      _colorCacheSignature = signature;
+      _verticesCache.clear();
+    }
+  }
+
+  void _invalidateColorCache() {
+    _colorCacheSignature = null;
+    _verticesCache.clear();
   }
 
   // ---------------------------------------------------------------------------
@@ -73,6 +134,10 @@ class CompassMesh extends CompassShape {
   /// its physical neighbors and its live Tension value.
   /// Returns a tuple of (HorizontalTangents, VerticalTangents).
   (List<List<Offset>>, List<List<Offset>>) _computeTangents() {
+    _syncGeometryCache();
+    final cached = _tangentCache;
+    if (cached != null) return cached;
+
     final tx = List.generate(rows, (_) => List.filled(cols, Offset.zero));
     final ty = List.generate(rows, (_) => List.filled(cols, Offset.zero));
 
@@ -104,7 +169,9 @@ class CompassMesh extends CompassShape {
         }
       }
     }
-    return (tx, ty);
+    final result = (tx, ty);
+    _tangentCache = result;
+    return result;
   }
 
   Offset _cubic(Offset p0, Offset p1, Offset p2, Offset p3, double t) {
@@ -318,8 +385,15 @@ class CompassMesh extends CompassShape {
 
   @override
   Path getPath() {
+    _syncGeometryCache();
+    final cached = _boundaryPathCache;
+    if (cached != null) return cached;
+
     final path = Path();
-    if (rows < 2 || cols < 2) return path;
+    if (rows < 2 || cols < 2) {
+      _boundaryPathCache = path;
+      return path;
+    }
 
     final tangents = _computeTangents();
     final tx = tangents.$1;
@@ -365,6 +439,7 @@ class CompassMesh extends CompassShape {
     }
 
     path.close();
+    _boundaryPathCache = path;
     return path;
   }
 
@@ -379,6 +454,11 @@ class CompassMesh extends CompassShape {
 
   Vertices buildVertices({int subdivisions = 8}) {
     final int sub = subdivisions < 1 ? 1 : (subdivisions > 64 ? 64 : subdivisions);
+    _syncGeometryCache();
+    _syncColorCache();
+
+    final cached = _verticesCache[sub];
+    if (cached != null) return cached;
 
     final positions = <Offset>[];
     final vertexColors = <Color>[];
@@ -427,12 +507,14 @@ class CompassMesh extends CompassShape {
       }
     }
 
-    return Vertices(
+    final vertices = Vertices(
       VertexMode.triangles,
       positions,
       colors: vertexColors,
       indices: indices,
     );
+    _verticesCache[sub] = vertices;
+    return vertices;
   }
 
   // ---------------------------------------------------------------------------
@@ -445,6 +527,13 @@ class CompassMesh extends CompassShape {
       ..color = paint.color
       ..strokeWidth = paint.strokeWidth
       ..style = PaintingStyle.stroke;
+
+    _syncGeometryCache();
+    final cachedPath = _scaffoldingPathCache;
+    if (cachedPath != null) {
+      canvas.drawPath(cachedPath, linePaint);
+      return;
+    }
 
     final tangents = _computeTangents();
     final tx = tangents.$1;
@@ -476,6 +565,7 @@ class CompassMesh extends CompassShape {
       }
     }
     
+    _scaffoldingPathCache = path;
     canvas.drawPath(path, linePaint);
   }
 }

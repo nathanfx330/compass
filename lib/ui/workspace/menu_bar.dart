@@ -20,6 +20,9 @@ class CompassMenuBar extends StatelessWidget {
   final bool ghostVertices;
   final VoidCallback onToggleGhostVertices;
 
+  final bool showFpsOverlay;
+  final VoidCallback onToggleFpsOverlay;
+
   final VoidCallback onClearCanvas;
 
   const CompassMenuBar({
@@ -32,6 +35,8 @@ class CompassMenuBar extends StatelessWidget {
     required this.onToggleHandles, 
     required this.ghostVertices, // <--- NEW
     required this.onToggleGhostVertices, // <--- NEW
+    required this.showFpsOverlay,
+    required this.onToggleFpsOverlay,
     required this.onClearCanvas,
   });
 
@@ -98,6 +103,11 @@ class CompassMenuBar extends StatelessWidget {
                       child: const Text('Save Project...'),
                     ),
                     const CustomMenuItemDivider(),
+                    MenuItemButton(
+                      onPressed: () => CompassDialogs.showImportImageLayer(context, engine),
+                      leadingIcon: const Icon(Icons.image_outlined),
+                      child: const Text('Import IMG Layer...'),
+                    ),
                     MenuItemButton(
                       onPressed: () => CompassDialogs.showLoadReferenceImage(context, engine),
                       leadingIcon: const Icon(Icons.add_photo_alternate_outlined),
@@ -198,6 +208,22 @@ class CompassMenuBar extends StatelessWidget {
                     ),
                   ],
                   child: const Text('View'),
+                ),
+                SubmenuButton(
+                  menuChildren: [
+                    MenuItemButton(
+                      onPressed: onToggleFpsOverlay,
+                      leadingIcon: Icon(
+                        Icons.speed,
+                      ),
+                      child: Text(
+                        showFpsOverlay
+                            ? 'Hide FPS Overlay'
+                            : 'Show FPS Overlay',
+                      ),
+                    ),
+                  ],
+                  child: const Text('Debug'),
                 ),
               ],
             ),

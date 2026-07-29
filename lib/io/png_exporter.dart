@@ -13,10 +13,9 @@ import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
 import '../models/geometry/spiral.dart';
 import '../models/geometry/rectangle.dart';
-import '../models/geometry/rhombus.dart'; 
 import '../models/geometry/spline.dart';
 import '../models/geometry/mesh.dart';
-import '../models/geometry/gradient.dart'; 
+import '../models/geometry/image.dart';
 
 enum PngExportStyle { standard, dithered, bubbleJet }
 
@@ -26,14 +25,26 @@ enum PngExportStyle { standard, dithered, bubbleJet }
 /// are kept deliberately parallel to SVGExporter and CompassRenderer so the
 /// three outputs stay visually consistent.
 class PNGExporter {
-  /// The outermost radius reached by a circle's OUTWARD-STACKED stroke stack.
-  static double _circleStrokeOuterRadius(CompassCircle circle, CompassLayer layer) {
-    double offset = 0.0;
-    for (final region in circle.strokeRegions) {
-      if (region.width <= 0) continue;
-      offset += region.width;
+  static Rect? _strokeStackBounds(CompassShape shape) {
+    Rect? bounds;
+    var innerOffset = 0.0;
+    for (final region in shape.strokeRegions) {
+      final width = region.width;
+      if (width <= 0) continue;
+      final band = shape.getStrokeOutlinePath(width, innerOffset);
+      innerOffset += width;
+      if (band.computeMetrics().isEmpty) continue;
+      final next = band.getBounds();
+      bounds = bounds == null
+          ? next
+          : Rect.fromLTRB(
+              min(bounds.left, next.left),
+              min(bounds.top, next.top),
+              max(bounds.right, next.right),
+              max(bounds.bottom, next.bottom),
+            );
     }
-    return circle.radius.value + offset;
+    return bounds;
   }
 
   /// Renders the engine to PNG bytes at the given pixel scale (1.0 = artwork's
@@ -64,7 +75,7 @@ class PNGExporter {
         if (!shape.isVisible) continue;
         if (shape is CompassCircle) {
           final r = shape.radius.value;
-          final effR = max(r, _circleStrokeOuterRadius(shape, layer));
+          final effR = r;
           final cx = shape.center.x.value;
           final cy = shape.center.y.value;
           if (cx - effR < minX) minX = cx - effR;
@@ -80,16 +91,12 @@ class PNGExporter {
           if (minYP < minY) minY = minYP;
           if (maxXP > maxX) maxX = maxXP;
           if (maxYP > maxY) maxY = maxYP;
-        } else if (shape is CompassRhombus) {
-          final px1 = shape.p1.x.value; final py1 = shape.p1.y.value;
-          final px2 = shape.p2.x.value; final py2 = shape.p2.y.value;
-          final px3 = shape.p3.x.value; final py3 = shape.p3.y.value;
-          final px4 = shape.p4.x.value; final py4 = shape.p4.y.value;
-          
-          if (min(min(px1, px2), min(px3, px4)) < minX) minX = min(min(px1, px2), min(px3, px4));
-          if (min(min(py1, py2), min(py3, py4)) < minY) minY = min(min(py1, py2), min(py3, py4));
-          if (max(max(px1, px2), max(px3, px4)) > maxX) maxX = max(max(px1, px2), max(px3, px4));
-          if (max(max(py1, py2), max(py3, py4)) > maxY) maxY = max(max(py1, py2), max(py3, py4));
+        } else if (shape is CompassImage) {
+          final bounds = shape.getPath().getBounds();
+          if (bounds.left < minX) minX = bounds.left;
+          if (bounds.top < minY) minY = bounds.top;
+          if (bounds.right > maxX) maxX = bounds.right;
+          if (bounds.bottom > maxY) maxY = bounds.bottom;
         } else if (shape is CompassXSpline) {
           if (shape.hasWidthProfile) {
             final bounds = shape.getPath().getBounds();
@@ -104,6 +111,14 @@ class PNGExporter {
           if (bounds.top < minY) minY = bounds.top;
           if (bounds.right > maxX) maxX = bounds.right;
           if (bounds.bottom > maxY) maxY = bounds.bottom;
+        }
+
+        final strokeBounds = _strokeStackBounds(shape);
+        if (strokeBounds != null) {
+          if (strokeBounds.left < minX) minX = strokeBounds.left;
+          if (strokeBounds.top < minY) minY = strokeBounds.top;
+          if (strokeBounds.right > maxX) maxX = strokeBounds.right;
+          if (strokeBounds.bottom > maxY) maxY = strokeBounds.bottom;
         }
       }
     }
@@ -149,10 +164,27 @@ class PNGExporter {
       // 1a'. Per-shape LINEAR FILL GRADIENTS
       for (var shape in layer.shapes) {
         if (!shape.isVisible) continue;
+
+        if (shape is CompassImage &&
+            CompassLayer.hasLiftedImageFill(shape)) {
+          final clip = layer.getLayerImagePaintClipPath(shape);
+          if (clip.computeMetrics().isEmpty) continue;
+
+          shape.drawPixels(canvas, clip);
+
+          if (layer.mirrorEnabled) {
+            canvas.save();
+            canvas.transform(layer.mirrorMatrix.storage);
+            shape.drawPixels(canvas, clip);
+            canvas.restore();
+          }
+          continue;
+        }
+
         if (!CompassLayer.hasLiftedGradientFill(shape)) continue;
 
         final g = shape.gradient!;
-        final clip = layer.getLayerGradientClipPath(shape);
+        final clip = layer.getLayerSelfPaintedClipPath(shape);
         if (clip.computeMetrics().isEmpty) continue;
 
         final gradPaint = Paint()
@@ -171,10 +203,8 @@ class PNGExporter {
         canvas.drawPath(clip, gradPaint);
 
         if (layer.mirrorEnabled) {
-          canvas.save();
-          canvas.transform(layer.mirrorMatrix.storage);
-          canvas.drawPath(clip, gradPaint);
-          canvas.restore();
+          final reflectedClip = clip.transform(layer.mirrorMatrix.storage);
+          canvas.drawPath(reflectedClip, gradPaint);
         }
       }
 

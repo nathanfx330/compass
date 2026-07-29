@@ -33,8 +33,8 @@ class CompassCircle extends CompassShape {
 
   /// The circle's stroke as a filled ANNULUS forming ONE band of the outward stack.
   /// The band spans radii [r + innerOffset .. r + innerOffset + width], so:
-  ///   * region 0 (layer passes innerOffset = -width/2) straddles the circumference
-  ///     exactly as the single-stroke design did -- inner r - w/2, outer r + w/2;
+  ///   * region 0 (layer passes innerOffset = 0) begins at the circumference and
+  ///     expands outward -- inner r, outer r + w;
   ///   * each later region (layer passes the previous band's OUTER edge as
   ///     innerOffset) butts outward from the last band with no gap or overlap.
   ///

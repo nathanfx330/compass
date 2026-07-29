@@ -11,6 +11,7 @@ import '../../models/geometry/spiral.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/mesh.dart';
+import '../../models/geometry/image.dart';
 import '../widgets/compass_color_picker.dart';
 
 /// The drag payload for a shape row: the shape being dragged plus the layer it
@@ -213,6 +214,9 @@ class _ShapeRowState extends State<ShapeRow> {
     } else if (shape is CompassMesh) {
       shapeName = 'Gradient Mesh';
       shapeIcon = Icons.grid_on;
+    } else if (shape is CompassImage) {
+      shapeName = 'IMG · ${shape.displayName}';
+      shapeIcon = Icons.image_outlined;
     }
 
     final bool dim = !(shape.isVisible && !layer.isLocked);

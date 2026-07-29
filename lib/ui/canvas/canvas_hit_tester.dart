@@ -10,154 +10,185 @@ import '../../models/geometry/circle.dart';
 import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
-import '../../models/geometry/rhombus.dart';
 import '../../models/geometry/mesh.dart';
+import '../../models/geometry/image.dart';
+
+class _InteractivePointIndex {
+  final int renderRevision;
+  final CompassShape? selectedShape;
+  final Set<CompassPoint> interactivePoints;
+  final Set<CompassPoint> gradientStops;
+  final Map<(int, int), List<CompassPoint>> cells;
+  final Map<CompassPoint, int> zOrder;
+
+  const _InteractivePointIndex({
+    required this.renderRevision,
+    required this.selectedShape,
+    required this.interactivePoints,
+    required this.gradientStops,
+    required this.cells,
+    required this.zOrder,
+  });
+}
 
 class CanvasHitTester {
-  /// Whether [shape] uses [point] as part of its ordinary editable geometry.
-  ///
-  /// Gradient stops are intentionally handled separately. Their visibility is
-  /// contextual: only stops belonging to the selected shape are drawn and
-  /// therefore only those stops should be interactive.
-  static bool _isStructuralPoint(
-    CompassShape shape,
-    CompassPoint point,
-  ) {
+  static const double _cellSize = 64.0;
+  static final Expando<_InteractivePointIndex> _indices =
+      Expando<_InteractivePointIndex>('compassInteractivePointIndex');
+
+  static Iterable<CompassPoint> _structuralPoints(CompassShape shape) sync* {
     if (shape is CompassLine) {
-      return shape.start == point || shape.end == point;
+      yield shape.start;
+      yield shape.end;
+    } else if (shape is CompassCircle) {
+      yield shape.center;
+      final radiusPoint = shape.radiusPoint;
+      if (radiusPoint != null) yield radiusPoint;
+    } else if (shape is CompassSpiral) {
+      yield shape.center;
+      yield shape.startPoint;
+    } else if (shape is CompassRectangle) {
+      yield shape.p1;
+      yield shape.p2;
+    } else if (shape is CompassImage) {
+      yield shape.origin;
+      yield shape.xHandle;
+      yield shape.yHandle;
+    } else if (shape is CompassXSpline) {
+      for (final node in shape.nodes) {
+        yield node.point;
+      }
+      final anchor = shape.anchorPoint;
+      if (anchor != null) yield anchor;
+    } else if (shape is CompassMesh) {
+      for (final node in shape.nodes) {
+        yield node.point;
+      }
+      final anchor = shape.anchorPoint;
+      if (anchor != null) yield anchor;
     }
-
-    if (shape is CompassCircle) {
-      return shape.center == point || shape.radiusPoint == point;
-    }
-
-    if (shape is CompassSpiral) {
-      return shape.center == point || shape.startPoint == point;
-    }
-
-    if (shape is CompassRectangle) {
-      return shape.p1 == point || shape.p2 == point;
-    }
-
-    if (shape is CompassRhombus) {
-      return shape.p1 == point ||
-          shape.p2 == point ||
-          shape.p3 == point ||
-          shape.p4 == point;
-    }
-
-    if (shape is CompassXSpline) {
-      return shape.anchorPoint == point ||
-          shape.nodes.any((node) => node.point == point);
-    }
-
-    if (shape is CompassMesh) {
-      return shape.anchorPoint == point || shape.containsNode(point);
-    }
-
-    return false;
   }
 
-  /// Whether [point] is a linear-gradient stop owned by [shape].
-  static bool _isGradientStop(
-    CompassShape shape,
-    CompassPoint point,
-  ) {
-    final gradient = shape.gradient;
+  static (int, int) _cellFor(Offset point) => (
+        (point.dx / _cellSize).floor(),
+        (point.dy / _cellSize).floor(),
+      );
 
-    if (gradient == null) {
-      return false;
+  static _InteractivePointIndex _indexFor(CompassEngine engine) {
+    final cached = _indices[engine];
+    if (cached != null &&
+        cached.renderRevision == engine.renderRevision &&
+        identical(cached.selectedShape, engine.selectedShape)) {
+      return cached;
     }
 
-    return gradient.stops.any((stop) => stop.point == point);
-  }
-
-  /// Returns whether [point] must be excluded from direct canvas interaction.
-  ///
-  /// This includes more than literal layer locking:
-  ///
-  /// - points used only by locked geometry;
-  /// - points used only by hidden layers or hidden shapes;
-  /// - gradient stops belonging to an unselected shape.
-  ///
-  /// Gradient-stop dots are drawn only for the selected shape. Treating every
-  /// stop in `engine.points` as interactive would allow invisible stops to steal
-  /// hover, click, drag, context-menu, and selection-box input.
-  ///
-  /// A point shared with visible, unlocked structural geometry remains
-  /// interactive even if it is also referenced by locked or hidden geometry.
-  /// A genuinely loose point that belongs to no shape also remains interactive.
-  static bool isPointLocked(
-    CompassEngine engine,
-    CompassPoint point,
-  ) {
-    var hasDocumentUse = false;
-    var hasVisibleUnlockedStructuralUse = false;
-    var hasVisibleSelectedUnlockedGradientUse = false;
+    final usedAnywhere = <CompassPoint>{};
+    final interactive = <CompassPoint>{};
+    final gradientStops = <CompassPoint>{};
 
     for (final layer in engine.layers) {
       for (final shape in layer.shapes) {
-        final isStructural = _isStructuralPoint(shape, point);
-        final isGradientStop = _isGradientStop(shape, point);
+        final editable = layer.isVisible && !layer.isLocked && shape.isVisible;
 
-        if (!isStructural && !isGradientStop) {
-          continue;
+        for (final point in _structuralPoints(shape)) {
+          usedAnywhere.add(point);
+          if (editable) interactive.add(point);
         }
 
-        hasDocumentUse = true;
-
-        if (!layer.isVisible || !shape.isVisible) {
-          continue;
-        }
-
-        if (isStructural && !layer.isLocked) {
-          hasVisibleUnlockedStructuralUse = true;
-        }
-
-        if (isGradientStop &&
-            !layer.isLocked &&
-            identical(shape, engine.selectedShape)) {
-          hasVisibleSelectedUnlockedGradientUse = true;
-        }
-
-        if (hasVisibleUnlockedStructuralUse ||
-            hasVisibleSelectedUnlockedGradientUse) {
-          return false;
+        final gradient = shape.gradient;
+        if (gradient != null) {
+          for (final stop in gradient.stops) {
+            gradientStops.add(stop.point);
+            usedAnywhere.add(stop.point);
+            if (editable && identical(shape, engine.selectedShape)) {
+              interactive.add(stop.point);
+            }
+          }
         }
       }
     }
 
-    // Loose points are still ordinary editable points. Any point owned by the
-    // document but lacking a visible, unlocked interaction surface is excluded.
-    return hasDocumentUse;
+    // Loose points remain directly editable.
+    for (final point in engine.points) {
+      if (!usedAnywhere.contains(point)) interactive.add(point);
+    }
+
+    final cells = <(int, int), List<CompassPoint>>{};
+    final zOrder = <CompassPoint, int>{};
+    for (var index = 0; index < engine.points.length; index++) {
+      final point = engine.points[index];
+      zOrder[point] = index;
+      if (!interactive.contains(point)) continue;
+      final key = _cellFor(Offset(point.x.value, point.y.value));
+      cells.putIfAbsent(key, () => <CompassPoint>[]).add(point);
+    }
+
+    final built = _InteractivePointIndex(
+      renderRevision: engine.renderRevision,
+      selectedShape: engine.selectedShape,
+      interactivePoints: interactive,
+      gradientStops: gradientStops,
+      cells: cells,
+      zOrder: zOrder,
+    );
+    _indices[engine] = built;
+    return built;
   }
 
+  /// Points currently available to ordinary canvas interaction. This is shared
+  /// with the overlay painter so point visibility and hit testing use one
+  /// topology walk rather than independent document scans.
+  static Set<CompassPoint> interactivePoints(CompassEngine engine) =>
+      _indexFor(engine).interactivePoints;
+
+  /// Every gradient-stop point in the document. The overlay paints selected
+  /// stops in their dedicated pass and excludes them from generic blue dots.
+  static Set<CompassPoint> gradientStopPoints(CompassEngine engine) =>
+      _indexFor(engine).gradientStops;
+
+  static bool isPointLocked(
+    CompassEngine engine,
+    CompassPoint point,
+  ) =>
+      !_indexFor(engine).interactivePoints.contains(point);
+
   /// Finds the topmost interactive point within [threshold] world-space units.
-  ///
-  /// Points are checked from newest to oldest so visually foregrounded points,
-  /// such as gradient stops and mesh nodes, win over older structural anchors
-  /// when they occupy the same position.
+  /// A uniform spatial grid limits the distance checks to nearby cells; z-order
+  /// still follows engine.points so newer overlapping points win as before.
   static CompassPoint? hitTestPoint(
     CompassEngine engine,
     Offset logicalPosition,
     double threshold,
   ) {
+    final index = _indexFor(engine);
     final thresholdSquared = threshold * threshold;
+    final minCellX = ((logicalPosition.dx - threshold) / _cellSize).floor();
+    final maxCellX = ((logicalPosition.dx + threshold) / _cellSize).floor();
+    final minCellY = ((logicalPosition.dy - threshold) / _cellSize).floor();
+    final maxCellY = ((logicalPosition.dy + threshold) / _cellSize).floor();
 
-    for (final point in engine.points.reversed) {
-      if (isPointLocked(engine, point)) {
-        continue;
-      }
+    CompassPoint? best;
+    var bestOrder = -1;
 
-      final dx = point.x.value - logicalPosition.dx;
-      final dy = point.y.value - logicalPosition.dy;
-      final distanceSquared = dx * dx + dy * dy;
+    for (var cellX = minCellX; cellX <= maxCellX; cellX++) {
+      for (var cellY = minCellY; cellY <= maxCellY; cellY++) {
+        final candidates = index.cells[(cellX, cellY)];
+        if (candidates == null) continue;
 
-      if (distanceSquared < thresholdSquared) {
-        return point;
+        for (final point in candidates) {
+          final dx = point.x.value - logicalPosition.dx;
+          final dy = point.y.value - logicalPosition.dy;
+          if (dx * dx + dy * dy >= thresholdSquared) continue;
+
+          final order = index.zOrder[point] ?? -1;
+          if (order > bestOrder) {
+            best = point;
+            bestOrder = order;
+          }
+        }
       }
     }
 
-    return null;
+    return best;
   }
 }

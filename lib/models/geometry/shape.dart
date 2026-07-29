@@ -16,9 +16,9 @@ enum CompassBooleanOp { add, subtract, intersect, none }
 /// [color]. They are NOT keyed off the layer stroke width or fill color.
 ///
 /// GEOMETRY -- the stack marches OUTWARD from the shape's outline. The layer feeds
-/// each region a running inner offset: region 0 straddles the outline (inner edge
-/// at r - w0/2 via the primitive's own centering... see below), and each later
-/// region's inner edge butts against the previous region's outer edge. The exact
+/// each region a running inner offset: region 0 begins exactly at the shape
+/// outline, and each later region's inner edge butts against the previous region's
+/// outer edge. The exact
 /// placement is the primitive's job in getStrokeOutlinePath(width, innerOffset);
 /// for a circle the band is the annulus [r + innerOffset .. r + innerOffset + w].
 ///
@@ -119,19 +119,19 @@ abstract class CompassShape {
   /// the [innerOffset] is what lets the layer stack regions outward -- it passes
   /// the cumulative outer reach of the regions already placed.
   ///
-  /// For region 0 the layer passes innerOffset = -width/2, so the first band
-  /// straddles the outline (inner edge r - w/2, outer edge r + w/2) exactly as the
-  /// single-stroke design did. For each later region the layer passes the previous
-  /// region's outer edge, so bands butt outward with no gap or overlap.
+  /// For region 0 the layer passes innerOffset = 0, so the first band begins at
+  /// the shape boundary and expands outward. For each later region the layer passes
+  /// the previous region's outer edge, so bands butt with no gap or overlap.
   ///
   /// Base implementation returns an EMPTY Path: a shape gains stroke-region
   /// behavior only once it overrides this. The layer's boolean walk treats an empty
   /// contribution as a no-op, so a shape that has not overridden this contributes
   /// nothing no matter how many regions are in its list.
   ///
-  /// Each primitive builds this exactly -- circle -> annulus, rect -> outer rrect
-  /// minus inner, line -> capsule, spiral/xspline -> constant-width ribbon -- since
-  /// dart:ui exposes no public stroke-to-fill.
+  /// Each primitive supplies the best geometry for its silhouette -- circle ->
+  /// exact annulus, rectangle -> expanded rounded-rectangle band, X-spline ->
+  /// sampled outward dilation of its filled curve or variable-width ribbon --
+  /// because dart:ui exposes no public stroke-to-fill conversion.
   Path getStrokeOutlinePath(double width, double innerOffset) => Path();
 
   void paint(Canvas canvas, Paint paint, {bool showScaffolding = false, bool isSelected = false});

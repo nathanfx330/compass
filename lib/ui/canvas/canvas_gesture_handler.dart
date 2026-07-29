@@ -16,6 +16,7 @@ import '../../models/geometry/spiral.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/mesh.dart';
+import '../../models/geometry/image.dart';
 import '../../models/layer.dart'; // <--- NEW: mirror-axis drag (CompassLayer, MirrorAxis)
 
 import 'canvas_controller.dart';
@@ -101,30 +102,14 @@ class CanvasGestureHandler {
     );
   }
 
-  /// Whether [point] belongs to any ordinary shape's linear fill gradient.
-  ///
-  /// Gradient-stop points live in the global point pool, but their dots are
-  /// drawn only for the selected shape. Without this check, an invisible stop
-  /// belonging to another shape can steal hover, click, and drag hit tests.
+  /// Whether [point] belongs to any ordinary shape gradient. The shared
+  /// interaction index answers this without rescanning every layer and shape.
   static bool _isGradientStopPoint(
     CompassEngine engine,
     CompassPoint point,
-  ) {
-    for (final layer in engine.layers) {
-      for (final shape in layer.shapes) {
-        final gradient = shape.gradient;
-        if (gradient == null) {
-          continue;
-        }
+  ) =>
+      CanvasHitTester.gradientStopPoints(engine).contains(point);
 
-        if (gradient.stops.any((stop) => stop.point == point)) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
 
   /// Hit-tests an ordinary editable point.
   ///
@@ -167,7 +152,7 @@ class CanvasGestureHandler {
   static void updateCanvasPan(CanvasController controller, Offset delta) {
     if (controller.isPanningCanvas) {
       controller.panOffset += delta;
-      controller.notifyListeners();
+      controller.notifyViewportChanged();
     }
   }
 
@@ -195,7 +180,7 @@ class CanvasGestureHandler {
       
       controller.canvasScale = newScale;
       controller.panOffset = localPosition - logicalPoint * controller.canvasScale;
-      controller.notifyListeners();
+      controller.notifyViewportChanged();
     }
   }
 
@@ -205,6 +190,20 @@ class CanvasGestureHandler {
 
   static void onHover(CanvasController controller, CompassEngine engine, PointerHoverEvent event, BuildContext context, bool showScaffolding) {
     if (!showScaffolding) return;
+
+    final oldHoveredPoint = controller.hoveredPoint;
+    final oldHoverPosition = controller.hoverPosition;
+    final oldAddSpline = controller.addVertexSpline;
+    final oldAddSegment = controller.addVertexSegmentIndex;
+    final oldAddPreview = controller.addVertexPreviewPos;
+    final oldSliceMesh = controller.sliceMesh;
+    final oldSliceIsRow = controller.sliceIsRow;
+    final oldSliceGap = controller.sliceGap;
+    final oldSliceT = controller.sliceT;
+    final oldSliceA = controller.slicePreviewA;
+    final oldSliceB = controller.slicePreviewB;
+    final oldRotationPivot = controller.rotationPivotOffset;
+    final oldTensionTarget = controller.targetTensionNode;
 
     final RenderBox renderBox = context.findRenderObject() as RenderBox;
     final localPosition = renderBox.globalToLocal(event.position);
@@ -219,47 +218,94 @@ class CanvasGestureHandler {
     );
 
     controller.updateAddVertexHover(logicalPosition);
-    controller.updateMeshSliceHover(logicalPosition); 
-    
-    if ((controller.isRPressed || controller.isShiftRPressed || controller.isCtrlRPressed) && controller.rotationPivotOffset == null && controller.hoveredPoint != null) {
-      controller.setupRotationState(hierarchy: controller.isShiftRPressed, handlesOnly: controller.isCtrlRPressed);
+    controller.updateMeshSliceHover(logicalPosition);
+
+    if ((controller.isRPressed || controller.isShiftRPressed || controller.isCtrlRPressed) &&
+        controller.rotationPivotOffset == null &&
+        controller.hoveredPoint != null) {
+      controller.setupRotationState(
+        hierarchy: controller.isShiftRPressed,
+        handlesOnly: controller.isCtrlRPressed,
+      );
     }
 
-    if (controller.isAPressed && controller.targetTensionNode == null && controller.hoveredPoint != null && controller.activeTensionNode == null) {
+    if (controller.isAPressed &&
+        controller.targetTensionNode == null &&
+        controller.hoveredPoint != null &&
+        controller.activeTensionNode == null) {
+      outer:
       for (var layer in engine.layers) {
-        if (!layer.isVisible || layer.isLocked) continue; 
+        if (!layer.isVisible || layer.isLocked) continue;
         for (var shape in layer.shapes) {
           if (!shape.isVisible) continue;
-          
+
           if (shape is CompassXSpline) {
             for (var node in shape.nodes) {
               if (node.point == controller.hoveredPoint) {
                 controller.targetTensionNode = node;
-                controller.notifyListeners();
-                return;
+                break outer;
               }
             }
           } else if (shape is CompassMesh) {
             for (var node in shape.nodes) {
               if (node.point == controller.hoveredPoint) {
                 controller.targetTensionNode = node;
-                controller.notifyListeners();
-                return;
+                break outer;
               }
             }
           }
         }
       }
     }
-    
-    controller.notifyListeners();
+
+    // Free pointer position matters only while a tool/modifier has a live preview.
+    // In ordinary Select hover, moving between two empty pixels should not rebuild
+    // the HUD or repaint even the lightweight overlay.
+    final usesContinuousHover =
+        controller.currentTool != CompassTool.select ||
+        controller.shapeStartPoint != null ||
+        controller.activeSpline != null ||
+        controller.isQPressed ||
+        controller.isXPressed ||
+        controller.isRPressed ||
+        controller.isShiftRPressed ||
+        controller.isCtrlRPressed ||
+        controller.isAPressed ||
+        controller.isFPressed ||
+        controller.isWPressed;
+
+    final changed =
+        controller.hoveredPoint != oldHoveredPoint ||
+        (usesContinuousHover && controller.hoverPosition != oldHoverPosition) ||
+        controller.addVertexSpline != oldAddSpline ||
+        controller.addVertexSegmentIndex != oldAddSegment ||
+        controller.addVertexPreviewPos != oldAddPreview ||
+        controller.sliceMesh != oldSliceMesh ||
+        controller.sliceIsRow != oldSliceIsRow ||
+        controller.sliceGap != oldSliceGap ||
+        controller.sliceT != oldSliceT ||
+        controller.slicePreviewA != oldSliceA ||
+        controller.slicePreviewB != oldSliceB ||
+        controller.rotationPivotOffset != oldRotationPivot ||
+        controller.targetTensionNode != oldTensionTarget;
+
+    if (changed) {
+      controller.notifyListeners();
+    }
   }
 
   static void clearHover(CanvasController controller) {
+    final hadHoverState = controller.hoverPosition != null ||
+        controller.hoveredPoint != null ||
+        controller.addVertexPreviewPos != null ||
+        controller.slicePreviewA != null ||
+        controller.slicePreviewB != null;
+    if (!hadHoverState) return;
+
     controller.hoverPosition = null;
     controller.hoveredPoint = null;
     controller.clearAddVertexHover();
-    controller.clearMeshSliceHover(); 
+    controller.clearMeshSliceHover();
     controller.notifyListeners();
   }
 
@@ -363,6 +409,8 @@ class CanvasGestureHandler {
             final distToCenter = sqrt(pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2));
             if (distToCenter <= initialR * CompassSpiral.phi * 4) { clickedShape = shape; break; }
           } else if (shape is CompassRectangle) {
+             if (shape.getPath().contains(logicalPosition)) { clickedShape = shape; break; }
+          } else if (shape is CompassImage) {
              if (shape.getPath().contains(logicalPosition)) { clickedShape = shape; break; }
           } else if (shape is CompassMesh) {
              if (shape.getPath().contains(logicalPosition)) { clickedShape = shape; break; }
@@ -481,7 +529,9 @@ class CanvasGestureHandler {
               if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; } 
               else if (shape is CompassMesh && (shape.containsNode(hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
               else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) { ownerShape = shape; break; } 
-              else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; }
+              else if (shape is CompassImage &&
+                  (shape.origin == hitPoint || shape.xHandle == hitPoint || shape.yHandle == hitPoint)) { ownerShape = shape; break; }
               else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) { ownerShape = shape; break; } 
               else if (shape is CompassSpiral && (shape.center == hitPoint || shape.startPoint == hitPoint)) { ownerShape = shape; break; }
             }
@@ -521,6 +571,8 @@ class CanvasGestureHandler {
             final distToCenter = sqrt(pow(logicalPosition.dx - cx, 2) + pow(logicalPosition.dy - cy, 2));
             if (distToCenter <= initialR * CompassSpiral.phi * 4) { hitShape = shape; break; }
           } else if (shape is CompassRectangle) { 
+             if (shape.getPath().contains(logicalPosition)) { hitShape = shape; break; }
+          } else if (shape is CompassImage) {
              if (shape.getPath().contains(logicalPosition)) { hitShape = shape; break; }
           } else if (shape is CompassMesh) {
              if (shape.getPath().contains(logicalPosition)) { hitShape = shape; break; }
@@ -810,7 +862,9 @@ class CanvasGestureHandler {
               if (shape is CompassXSpline && (shape.nodes.any((n) => n.point == hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; } 
               else if (shape is CompassMesh && (shape.containsNode(hitPoint) || shape.anchorPoint == hitPoint)) { ownerShape = shape; break; }
               else if (shape is CompassCircle && (shape.center == hitPoint || shape.radiusPoint == hitPoint)) { ownerShape = shape; break; } 
-              else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; } 
+              else if (shape is CompassRectangle && (shape.p1 == hitPoint || shape.p2 == hitPoint)) { ownerShape = shape; break; }
+              else if (shape is CompassImage &&
+                  (shape.origin == hitPoint || shape.xHandle == hitPoint || shape.yHandle == hitPoint)) { ownerShape = shape; break; }
               else if (shape is CompassLine && (shape.start == hitPoint || shape.end == hitPoint)) { ownerShape = shape; break; } 
               else if (shape is CompassSpiral && (shape.center == hitPoint || shape.startPoint == hitPoint)) { ownerShape = shape; break; }
             }
@@ -1047,6 +1101,7 @@ class CanvasGestureHandler {
 
     if (controller.isAPressed && controller.targetTensionNode != null) {
       controller.activeTensionNode = controller.targetTensionNode;
+      controller.activeTensionNode!.point.isBeingDragged = true;
       return;
     }
 
@@ -1080,6 +1135,7 @@ class CanvasGestureHandler {
           final center = Offset(node.point.x.value, node.point.y.value);
           if ((logicalPosition - center).distance < handleThreshold) {
             controller.activeWidthNode = node;
+            node.point.isBeingDragged = true;
             controller.activeWidthIsLeft = true; 
             controller.isUnifiedWidthPull = true;
             controller.activeWidthSpline = selForHandles; 
@@ -1092,6 +1148,7 @@ class CanvasGestureHandler {
         final leftDot = CanvasGeometry.getWidthHandlePosition(node, true, selForHandles); 
         if (leftDot != null && (logicalPosition - leftDot).distance < handleThreshold) {
           controller.activeWidthNode = node;
+          node.point.isBeingDragged = true;
           controller.activeWidthIsLeft = true;
           controller.isUnifiedWidthPull = false;
           controller.activeWidthSpline = selForHandles; 
@@ -1102,6 +1159,7 @@ class CanvasGestureHandler {
         final rightDot = CanvasGeometry.getWidthHandlePosition(node, false, selForHandles); 
         if (rightDot != null && (logicalPosition - rightDot).distance < handleThreshold) {
           controller.activeWidthNode = node;
+          node.point.isBeingDragged = true;
           controller.activeWidthIsLeft = false;
           controller.isUnifiedWidthPull = false;
           controller.activeWidthSpline = selForHandles; 
@@ -1121,6 +1179,7 @@ class CanvasGestureHandler {
         if (outDot != null && (logicalPosition - outDot).distance < handleThreshold) {
           engine.commitNodeToBezierEdit(node);
           controller.activeHandleNode = node;
+          node.point.isBeingDragged = true;
           controller.activeHandleIsOut = true;
           controller.notifyListeners();
           return;
@@ -1130,6 +1189,7 @@ class CanvasGestureHandler {
         if (inDot != null && (logicalPosition - inDot).distance < handleThreshold) {
           engine.commitNodeToBezierEdit(node);
           controller.activeHandleNode = node;
+          node.point.isBeingDragged = true;
           controller.activeHandleIsOut = false;
           controller.notifyListeners();
           return;
@@ -1145,6 +1205,7 @@ class CanvasGestureHandler {
             final dist = (logicalPosition - handlePt).distance;
             if (dist < (15.0 / controller.canvasScale)) {
               controller.activeTensionNode = node;
+              node.point.isBeingDragged = true;
               return; 
             }
          }
@@ -1155,6 +1216,7 @@ class CanvasGestureHandler {
             final dist = (logicalPosition - handlePt).distance;
             if (dist < (15.0 / controller.canvasScale)) {
               controller.activeTensionNode = node;
+              node.point.isBeingDragged = true;
               return; 
             }
          }
@@ -1189,6 +1251,18 @@ class CanvasGestureHandler {
   }
 
   static void onPanUpdate(CanvasController controller, CompassEngine engine, DragUpdateDetails details, BuildContext context, bool showScaffolding) {
+    engine.runNotificationBatch(() {
+      _onPanUpdateImpl(
+        controller,
+        engine,
+        details,
+        context,
+        showScaffolding,
+      );
+    });
+  }
+
+  static void _onPanUpdateImpl(CanvasController controller, CompassEngine engine, DragUpdateDetails details, BuildContext context, bool showScaffolding) {
     if (controller.currentTool != CompassTool.select || controller.lastPanPosition == null) return;
 
     final RenderBox renderBox = context.findRenderObject() as RenderBox;
@@ -1204,8 +1278,13 @@ class CanvasGestureHandler {
       }
     }
 
-    controller.hoverPosition = logicalPosition; 
-    controller.notifyListeners();
+    // Geometry drags repaint through CompassEngine. Rebuilding the entire
+    // CompassCanvas through the controller here duplicated every drag frame:
+    // one controller-driven CustomPaint replacement plus one engine-driven
+    // repaint after the coordinates changed. Keep the logical hover position
+    // current, but notify the controller only for interactions whose preview
+    // state is controller-only (selection box / fillet below).
+    controller.hoverPosition = logicalPosition;
 
     final dx = logicalPosition.dx - controller.lastPanPosition!.dx;
     final dy = logicalPosition.dy - controller.lastPanPosition!.dy;
@@ -1377,6 +1456,8 @@ class CanvasGestureHandler {
       controller.activeFilletRadius += dx;
       if (controller.activeFilletRadius < 0.0) controller.activeFilletRadius = 0.0;
       controller.lastPanPosition = logicalPosition;
+      // Fillet radius is transient controller state; no model notifier fires.
+      controller.notifyListeners();
       return;
     }
 
@@ -1515,12 +1596,14 @@ class CanvasGestureHandler {
       controller.activeFilletRadius = 0.0;
       controller.notifyListeners();
     } else if (controller.activeWidthNode != null) { 
+      controller.activeWidthNode!.point.isBeingDragged = false;
       controller.activeWidthNode = null;
       controller.isUnifiedWidthPull = false;
       controller.activeWidthSpline = null;
       engine.finalizePointDrag();
       controller.notifyListeners();
     } else if (controller.activeHandleNode != null) {
+      controller.activeHandleNode!.point.isBeingDragged = false;
       controller.activeHandleNode = null;
       engine.finalizePointDrag();
       controller.notifyListeners();
@@ -1534,6 +1617,7 @@ class CanvasGestureHandler {
       for (var p in controller.transformingPoints) p.isBeingDragged = false;
       engine.finalizePointDrag();
     } else if (controller.activeTensionNode != null) {
+      controller.activeTensionNode!.point.isBeingDragged = false;
       controller.activeTensionNode = null;
       engine.finalizePointDrag(); 
     }
@@ -1569,6 +1653,15 @@ class CanvasGestureHandler {
     }
     controller.activeCornerCircleNode = null;
     _mirrorDragLayer = null; // <--- NEW: abandon a mirror-axis drag cleanly
+    if (controller.activeHandleNode != null) {
+      controller.activeHandleNode!.point.isBeingDragged = false;
+    }
+    if (controller.activeWidthNode != null) {
+      controller.activeWidthNode!.point.isBeingDragged = false;
+    }
+    if (controller.activeTensionNode != null) {
+      controller.activeTensionNode!.point.isBeingDragged = false;
+    }
     controller.activeHandleNode = null;
     controller.activeWidthNode = null; 
     controller.isUnifiedWidthPull = false;
@@ -1589,5 +1682,11 @@ class CanvasGestureHandler {
     controller.pendingSelectPress = null;
     controller.lastPanPosition = null;
     controller.dragStartLogicalPosition = null;
+
+    // A cancelled drag can leave the final coordinates unchanged while toggling
+    // isBeingDragged from true to false. Force one document invalidation so
+    // stroke caches replace the lightweight interactive contour with full quality.
+    controller.engine.notifyListeners();
+    controller.notifyListeners();
   }
 }
