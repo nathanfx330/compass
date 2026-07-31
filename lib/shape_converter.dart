@@ -183,6 +183,43 @@ class ShapeConverter {
     engine.notifyListeners();
   }
 
+  /// Converts a rectangle into a Coons gradient mesh.
+  ///
+  /// A MESH OWNS ITS LAYER, always. The mesh is moved to a NEW layer inserted
+  /// directly above the source, and if that leaves the source empty it is
+  /// dropped. One path, no special cases.
+  ///
+  /// WHY ISOLATION IS THE MODEL, not a Z-order fix:
+  ///
+  /// A mesh is not a shape among shapes -- it is a layer's APPEARANCE, closer
+  /// to the layer fill color than to a circle. Three facts in the existing
+  /// engine already say so:
+  ///
+  ///   * every boolean walk skips meshes (`if (shape is CompassMesh) continue`
+  ///     in getLayerFillPath, getLayerPath, getLayerMeshExportPath), so a mesh
+  ///     has never contributed a silhouette;
+  ///   * CompassMesh.operation is dead weight -- getLayerMeshClipPath never
+  ///     reads the mesh's own op, so setting a mesh to Subtract has always been
+  ///     a no-op;
+  ///   * the renderer paints meshes LAST within a layer (pass 1d, after fills,
+  ///     stroke areas, and colored bands).
+  ///
+  /// That last point is what made an ADD shape stacked "above" a mesh vanish
+  /// beneath it: getLayerMeshClipPath applies subtract and intersect from every
+  /// shape in the layer, but never removes a later ADD occluder -- unlike
+  /// getLayerSelfPaintedClipPath (gradients) and _applyImageForegroundOcclusion
+  /// (IMG), which both do. Rather than teach the mesh clip about Z-order,
+  /// isolation removes the question: alone in its layer, a mesh has nothing to
+  /// order itself against, and cross-layer stacking is already well-defined and
+  /// draggable in the hierarchy panel.
+  ///
+  /// Z-ORDER IS PRESERVED across the split. The mesh already painted last in
+  /// the source layer, so promoting it to a layer immediately above renders
+  /// identically -- the conversion changes structure, not appearance.
+  ///
+  /// The new layer inherits the source's fill/stroke colors, so the mesh's seed
+  /// color (which reads the layer fill) and any later shapes added to the mesh
+  /// layer behave as they did before the split.
   static void convertRectangleToMesh(
     CompassEngine engine,
     CompassRectangle rect, {
@@ -252,10 +289,44 @@ class ShapeConverter {
       colors: colors,
       anchorPoint: anchor,
     )
-      ..operation = rect.operation
+      // operation is deliberately NOT carried over from the rectangle. A mesh's
+      // own op is never read by any walk, and leaving a stale `subtract` on it
+      // would show a misleading badge in the hierarchy panel. `add` is the
+      // honest default: it is what a mesh has always effectively been.
       ..isVisible = rect.isVisible;
 
-    targetLayer.shapes[shapeIndex] = mesh;
+    // ALWAYS ITS OWN LAYER. One path, no special cases: the mesh leaves the
+    // source layer and lands in a fresh one directly above it.
+    //
+    // Directly above is the position that renders identically to before the
+    // split, because a mesh already painted last within its layer (renderer
+    // pass 1d, after fills, stroke areas, and colored bands). The conversion
+    // changes structure, not appearance.
+    targetLayer.shapes.removeAt(shapeIndex);
+
+    final meshLayer = CompassLayer(
+      name: '${targetLayer.name} Mesh',
+      color: targetLayer.color,
+      strokeColor: targetLayer.strokeColor,
+      strokeWidth: targetLayer.strokeWidth,
+    );
+    meshLayer.shapes.add(mesh);
+    meshLayer.isExpanded = true;
+
+    final srcIndex = engine.layers.indexOf(targetLayer);
+    engine.layers.insert(srcIndex + 1, meshLayer);
+    engine.activeLayer = meshLayer;
+
+    // If the rectangle was the source layer's only occupant, that layer is now
+    // an empty husk -- drop it rather than leaving one behind on every
+    // conversion. Removed inline, not through engine.removeLayer: there is no
+    // geometry left to garbage-collect, and removeLayer would take its own undo
+    // snapshot and re-seed a replacement layer mid-conversion. The guard is
+    // belt-and-braces; meshLayer was just inserted, so the list cannot be empty.
+    if (targetLayer.shapes.isEmpty && engine.layers.length > 1) {
+      engine.layers.remove(targetLayer);
+    }
+
     if (engine.selectedShape == rect) engine.selectShape(mesh);
 
     engine.checkAndGCPoint(rect.p1);

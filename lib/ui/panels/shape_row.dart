@@ -222,6 +222,19 @@ class _ShapeRowState extends State<ShapeRow> {
     final bool dim = !(shape.isVisible && !layer.isLocked);
     final int strokeCount = shape.strokeRegions.length;
 
+    // MESH-OWNED LAYER: a visible gradient mesh claims its layer, and every
+    // other shape in it may only CARVE (subtract / intersect). The engine
+    // enforces this by coercion -- see CompassEngine.coerceOperationForLayer --
+    // so the menu below only needs to stop OFFERING what would be silently
+    // rewritten. Offering ADD and then quietly turning it into SUBTRACT is the
+    // one outcome worth avoiding: the user would be told they did something
+    // other than what they did.
+    //
+    // The mesh itself is exempt (it is the owner), and `none` stays available
+    // for everyone: construction geometry neither paints nor carves.
+    final bool meshOwnedLayer = engine.isMeshOwnedLayer(layer);
+    final bool opsRestricted = meshOwnedLayer && shape is! CompassMesh;
+
     // --- Grip + shape icon, the row's leading cluster. ---
     // On an unlocked layer the grip is a Draggable<ShapeDragData> handle (immediate
     // drag, grab-and-pull) sitting just left of the shape icon -- the shape drag's
@@ -307,15 +320,37 @@ class _ShapeRowState extends State<ShapeRow> {
                 child: Icon(Icons.donut_large, size: 12, color: Colors.orangeAccent.withOpacity(0.9)),
               ),
             ],
+            // OWNERSHIP BADGE, on the mesh itself. The restriction shows up on
+            // every OTHER row in the layer, so the one row that CAUSES it
+            // should say so -- otherwise the rule appears everywhere except
+            // where it originates.
+            if (shape is CompassMesh && shape.isVisible) ...[
+              const SizedBox(width: 6),
+              Tooltip(
+                message:
+                    'This mesh owns the layer — other shapes here can only carve it',
+                child: Icon(Icons.layers,
+                    size: 12, color: Colors.tealAccent.withOpacity(0.9)),
+              ),
+            ],
           ],
         ),
         subtitle: Text(
-          shape.operation.name.toUpperCase(),
+          // A MESH'S OWN OP IS DEAD DATA: no boolean walk reads it (every one
+          // opens with `if (shape is CompassMesh) continue`), and
+          // getLayerMeshClipPath never consults the mesh's own operation. Show
+          // what it actually does instead of an ADD/SUBTRACT badge that
+          // promises behavior the engine will not deliver.
+          shape is CompassMesh ? 'MESH FILL' : shape.operation.name.toUpperCase(),
           style: TextStyle(
             fontSize: 10,
             color: isSelectedShape
                 ? theme.colorScheme.primary
-                : (dim ? theme.disabledColor : widget.opColor),
+                : (dim
+                    ? theme.disabledColor
+                    : (shape is CompassMesh
+                        ? Colors.tealAccent.withOpacity(0.9)
+                        : widget.opColor)),
             fontWeight: FontWeight.bold,
           ),
         ),
@@ -357,22 +392,60 @@ class _ShapeRowState extends State<ShapeRow> {
                   ),
                   const SizedBox(width: 4),
                   // Quick Operation Toggle (FILL op of the shape itself)
-                  PopupMenuButton<CompassBooleanOp>(
-                    initialValue: shape.operation,
-                    tooltip: 'Change Operation',
-                    child: Padding(
-                      padding: const EdgeInsets.all(4.0),
-                      child: Icon(Icons.tune, size: 16, color: theme.iconTheme.color?.withOpacity(0.7)),
+                  // NO OP MENU FOR A MESH. Its operation is never read: every
+                  // boolean walk skips meshes outright, and
+                  // getLayerMeshClipPath consults the other shapes' ops but
+                  // never the mesh's own. A working-looking control that
+                  // changes nothing is worse than no control, and the subtitle
+                  // already says MESH FILL.
+                  if (shape is! CompassMesh) ...[
+                    PopupMenuButton<CompassBooleanOp>(
+                      initialValue: shape.operation,
+                      tooltip: opsRestricted
+                          ? 'Change Operation (mesh layer: carve only)'
+                          : 'Change Operation',
+                      child: Padding(
+                        padding: const EdgeInsets.all(4.0),
+                        child: Icon(Icons.tune, size: 16, color: theme.iconTheme.color?.withOpacity(0.7)),
+                      ),
+                      onSelected: (op) => engine.changeShapeOperation(shape, op),
+                      itemBuilder: (context) {
+                        final ops = CompassBooleanOp.values
+                            .where((op) =>
+                                !opsRestricted || op != CompassBooleanOp.add)
+                            .toList();
+
+                        return [
+                          // A header, not a disabled item: a greyed-out ADD
+                          // would still read as "temporarily unavailable, try
+                          // again", when in fact it can never apply here.
+                          // Naming the rule once is shorter and truer than a
+                          // tooltip per row.
+                          if (opsRestricted)
+                            const PopupMenuItem<CompassBooleanOp>(
+                              enabled: false,
+                              height: 28,
+                              child: Text(
+                                'Mesh layer — carve only',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.orangeAccent,
+                                ),
+                              ),
+                            ),
+                          ...ops.map((op) {
+                            return PopupMenuItem(
+                              value: op,
+                              child: Text(op.name.toUpperCase(),
+                                  style: const TextStyle(fontSize: 12)),
+                            );
+                          }),
+                        ];
+                      },
                     ),
-                    onSelected: (op) => engine.changeShapeOperation(shape, op),
-                    itemBuilder: (context) => CompassBooleanOp.values.map((op) {
-                      return PopupMenuItem(
-                        value: op,
-                        child: Text(op.name.toUpperCase(), style: const TextStyle(fontSize: 12)),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(width: 4),
+                    const SizedBox(width: 4),
+                  ],
                   // Delete Button
                   IconButton(
                     iconSize: 16,
@@ -480,28 +553,49 @@ class _ShapeRowState extends State<ShapeRow> {
                           ),
                         ),
                         // --- Cut / Fill binary toggle. Tap flips between the two.
+                        // In a MESH-OWNED layer there is nothing to flip to: a
+                        // Fill ring is flat paint, which is exactly what such a
+                        // layer excludes. The chip becomes a static CUT label
+                        // rather than a toggle that silently refuses -- the
+                        // engine coerces either way, so an interactive control
+                        // here would just lie about what the tap did.
                         GestureDetector(
-                          onTap: () => engine.setStrokeRegionOp(
-                            shape,
-                            i,
-                            isFill ? CompassBooleanOp.subtract : CompassBooleanOp.add,
-                          ),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: (isFill ? Colors.green : Colors.redAccent).withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(
-                                color: (isFill ? Colors.green : Colors.redAccent).withOpacity(0.7),
-                                width: 1,
+                          onTap: opsRestricted
+                              ? null
+                              : () => engine.setStrokeRegionOp(
+                                    shape,
+                                    i,
+                                    isFill
+                                        ? CompassBooleanOp.subtract
+                                        : CompassBooleanOp.add,
+                                  ),
+                          child: Tooltip(
+                            message: opsRestricted
+                                ? 'Mesh layer — rings can only carve'
+                                : (isFill
+                                    ? 'Fill ring — tap to make it cut'
+                                    : 'Cut ring — tap to make it fill'),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: (isFill ? Colors.green : Colors.redAccent)
+                                    .withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(
+                                  color:
+                                      (isFill ? Colors.green : Colors.redAccent)
+                                          .withOpacity(opsRestricted ? 0.4 : 0.7),
+                                  width: 1,
+                                ),
                               ),
-                            ),
-                            child: Text(
-                              isFill ? 'FILL' : 'CUT',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                                color: isFill ? Colors.green : Colors.redAccent,
+                              child: Text(
+                                isFill ? 'FILL' : 'CUT',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  color: isFill ? Colors.green : Colors.redAccent,
+                                ),
                               ),
                             ),
                           ),

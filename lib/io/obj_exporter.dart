@@ -9,6 +9,7 @@ import '../models/layer.dart';
 import '../models/geometry/image.dart';
 import 'medial_axis.dart';
 import 'delaunay.dart';
+import 'obj_material.dart';
 
 /// A portable textured OBJ export package.
 ///
@@ -41,6 +42,62 @@ class OBJTextureExport {
       materialLibraryFileName: '',
       textureFileName: '',
       textureSourcePath: '',
+      error: message,
+    );
+  }
+}
+
+/// A portable MULTI-MATERIAL OBJ export package: the generalization of
+/// [OBJTextureExport] from "one IMG texture" to "this layer's whole appearance."
+///
+/// [objData] references [materialLibraryFileName]; [mtlData] references whatever
+/// texture filenames appear in [sidecars]. The caller writes the two text files
+/// and then every sidecar (baked gradient ramps as bytes, IMG textures as file
+/// copies) into the same directory.
+///
+/// [warnings] is non-fatal: a mirrored layer still exports its flat and gradient
+/// geometry correctly and merely notes that its IMG regions were skipped, so the
+/// caller should surface warnings AND write the files rather than treating a
+/// warning as a failure. Only a non-null [error] means nothing was produced.
+class ObjMaterialExport {
+  final String objData;
+  final String mtlData;
+  final String materialLibraryFileName;
+  final List<ObjSidecarFile> sidecars;
+  final List<String> warnings;
+
+  /// Full developer trace: the collector's per-shape decisions followed by this
+  /// exporter's flatten/tessellate/emit counts. Populated on EVERY return path,
+  /// including the empty ones -- an export that produced nothing is precisely
+  /// when the trace is worth having.
+  final List<String> diagnostics;
+
+  final String? error;
+
+  const ObjMaterialExport({
+    required this.objData,
+    required this.mtlData,
+    required this.materialLibraryFileName,
+    required this.sidecars,
+    required this.warnings,
+    this.diagnostics = const [],
+    this.error,
+  });
+
+  bool get isEmpty => objData.isEmpty;
+
+  factory ObjMaterialExport.empty(
+    String message, {
+    List<String> warnings = const [],
+    List<String> diagnostics = const [],
+  }) {
+    return ObjMaterialExport(
+      objData: '',
+      mtlData: '',
+      materialLibraryFileName: '',
+      sidecars: const [],
+      warnings: warnings,
+      diagnostics: diagnostics,
       error: message,
     );
   }
@@ -129,7 +186,7 @@ class OBJTextureExport {
 /// with a fill export (any fill mode) of the same layer in Blender.
 ///
 /// Pure: depends only on dart:ui geometry + math (+ the equally pure
-/// medial_axis.dart and delaunay.dart kernels).
+/// medial_axis.dart, delaunay.dart, and obj_material.dart kernels).
 class OBJExporter {
   // Weld tolerance (logical px) for collapsing coincident emitted vertices into a
   // single OBJ index. Design geometry spans hundreds-to-thousands of units, so
@@ -641,6 +698,360 @@ class OBJExporter {
   }
 
   // ===========================================================================
+  // MULTI-MATERIAL MODE  (the layer's whole appearance, not just one IMG)
+  // ===========================================================================
+
+  /// Exports [layer]'s full APPEARANCE -- flat fill, gradient fills, stroke
+  /// area, colored stroke bands, and IMG masks -- as one multi-material OBJ.
+  ///
+  /// This generalizes [toTexturedOBJ]. That method worked because an IMG's
+  /// appearance is a single globally invertible affine map, so every vertex
+  /// resolves to one correct UV no matter which tessellator produced it. The
+  /// same property holds for every other fill Compass paints (a flat fill is a
+  /// constant function of world position; a gradient is `projectPosition`), so
+  /// the only real difference here is that there are SEVERAL such functions,
+  /// each owning a disjoint slice of the layer.
+  ///
+  /// All of that -- region collection, disjointness, ramp baking, MTL text --
+  /// lives in obj_material.dart. This method does nothing but TESSELLATE what
+  /// the collector hands back and serialize it. The split is deliberate: the
+  /// material domain never touches triangles, and the mesh domain never touches
+  /// color.
+  ///
+  /// WHAT MAKES THIS SAFE TO WELD: UVs are computed from the SOURCE-space
+  /// vertex, BEFORE the recenter and Y-flip, because both projectors
+  /// (`projectPosition`, `worldToUv`) are defined in Compass world coordinates.
+  /// Two coincident vertices therefore always resolve to the same UV, so the
+  /// per-region weld map can collapse them freely.
+  ///
+  /// ONE GLOBAL BBOX, one recenter offset, shared by every region -- otherwise
+  /// each region would recenter on its own bounds and the layer would explode
+  /// into misregistered pieces. In GRID mode that same global bbox is also fed
+  /// to every region's lattice, so cells align ACROSS material boundaries
+  /// instead of each region starting its own grid at a different origin.
+  ///
+  /// VERTICES ARE WELDED PER REGION, not globally. Regions are disjoint but
+  /// share boundaries; welding across them would fuse two triangles that carry
+  /// different materials and different UVs into one vertex. The seam duplicate
+  /// is correct.
+  ///
+  /// EVERY face emits as `v/vt`, including flat ones -- flat regions get a
+  /// planar unwrap over the global bbox rather than being left UV-less. That
+  /// keeps the face format uniform for picky importers and leaves a usable
+  /// default unwrap if someone assigns a texture downstream in Blender.
+  ///
+  /// SKELETON MODE IS NOT AVAILABLE here: it emits `l` edges, which cannot
+  /// carry faces and therefore cannot carry materials. Callers route skeleton
+  /// exports to [toOBJ].
+  ///
+  /// [fileStem] seeds material and sidecar filenames; pass the OBJ's sanitized
+  /// base filename. [materialLibraryFileName] is written into `mtllib`.
+  static Future<ObjMaterialExport> toMaterialOBJ(
+    CompassLayer layer, {
+    required String fileStem,
+    required String materialLibraryFileName,
+    double samplingSpacing = 2.0,
+    int minSamplesPerContour = 24,
+    int maxSamplesPerContour = 4000,
+    bool gridMode = false,
+    int gridCount = 48,
+    bool delaunayMode = false,
+    double delaunaySpacing = 25.0,
+  }) async {
+    final materialSet = await ObjMaterialCollector.collect(
+      layer,
+      fileStem: fileStem,
+    );
+
+    // Seeded from the collector so ONE log carries the whole story end to end:
+    // which shapes became regions, then what tessellation did with them.
+    final diagnostics = <String>[...materialSet.diagnostics];
+    void log(String line) {
+      diagnostics.add(line);
+      debugPrint('[OBJ-MAT] $line');
+    }
+
+    if (materialSet.isEmpty) {
+      return ObjMaterialExport.empty(
+        'Nothing to export — this layer has no painted area.',
+        warnings: materialSet.warnings,
+        diagnostics: diagnostics,
+      );
+    }
+
+    final modeLabel = delaunayMode
+        ? 'delaunay (spacing $delaunaySpacing px)'
+        : (gridMode ? 'grid ($gridCount across)' : 'scanline');
+    log('tessellation mode: $modeLabel, curve resolution: $samplingSpacing px');
+
+    // ---- 1. Flatten every region's contours ONCE. ----
+    // Done up front because the global bbox (step 2) must see every region
+    // before any of them tessellates.
+    final flattened = <(ObjMaterialRegion, List<List<Offset>>)>[];
+
+    for (final region in materialSet.regions) {
+      final path = Path.from(region.path)..fillType = PathFillType.evenOdd;
+      final contours = <List<Offset>>[];
+
+      for (final metric in path.computeMetrics()) {
+        if (metric.length < 1e-3) continue;
+        final pts = _sampleContour(
+          metric,
+          samplingSpacing,
+          minSamplesPerContour,
+          maxSamplesPerContour,
+        );
+        if (pts.length >= 3) contours.add(pts);
+      }
+
+      if (contours.isEmpty) {
+        log('flatten "${region.label}": DROPPED — no contour survived '
+            '(needs >= 3 samples; sub-1e-3-length contours are ignored)');
+        continue;
+      }
+
+      var sampleCount = 0;
+      for (final poly in contours) {
+        sampleCount += poly.length;
+      }
+      log('flatten "${region.label}": ${contours.length} contour(s), '
+          '$sampleCount boundary sample(s)');
+
+      flattened.add((region, contours));
+    }
+
+    if (flattened.isEmpty) {
+      return ObjMaterialExport.empty(
+        'Nothing to export — no region survived flattening at this curve resolution.',
+        warnings: materialSet.warnings,
+        diagnostics: diagnostics,
+      );
+    }
+
+    // ---- 2. GLOBAL bounding box across every region. ----
+    double minX = double.infinity, minY = double.infinity;
+    double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+    for (final entry in flattened) {
+      for (final poly in entry.$2) {
+        for (final p in poly) {
+          if (p.dx < minX) minX = p.dx;
+          if (p.dy < minY) minY = p.dy;
+          if (p.dx > maxX) maxX = p.dx;
+          if (p.dy > maxY) maxY = p.dy;
+        }
+      }
+    }
+
+    final cx = (minX + maxX) / 2.0;
+    final cy = (minY + maxY) / 2.0;
+    final spanX = maxX - minX;
+    final spanY = maxY - minY;
+
+    log('global bbox: (${minX.toStringAsFixed(1)}, ${minY.toStringAsFixed(1)})'
+        '-(${maxX.toStringAsFixed(1)}, ${maxY.toStringAsFixed(1)}), '
+        'recenter offset (${cx.toStringAsFixed(1)}, ${cy.toStringAsFixed(1)}) -> origin');
+
+    // ---- 3. Tessellate each region into its own local mesh. ----
+    final meshes = <_MaterialRegionMesh>[];
+
+    for (final entry in flattened) {
+      final region = entry.$1;
+      final contours = entry.$2;
+
+      final verts = <Offset>[];
+      final faces = <List<int>>[];
+
+      if (delaunayMode) {
+        final tri = DelaunayTriangulator.triangulate(
+          contours,
+          interiorSpacing: delaunaySpacing,
+        );
+        if (tri.isEmpty) continue;
+
+        verts.addAll(tri.verts);
+        for (final t in tri.tris) {
+          // Kernel indices are 0-based; the local convention below is 1-based.
+          faces.add([t.$1 + 1, t.$2 + 1, t.$3 + 1]);
+        }
+      } else {
+        final vIndex = <String, int>{};
+
+        int vid(double x, double y) {
+          final key = '${(x / _weld).round()}_${(y / _weld).round()}';
+          final existing = vIndex[key];
+          if (existing != null) return existing;
+          verts.add(Offset(x, y));
+          final id = verts.length; // 1-based, local to this region
+          vIndex[key] = id;
+          return id;
+        }
+
+        if (gridMode) {
+          // GLOBAL bbox on purpose -- see the doc comment. The sweep visits
+          // cells outside this region, but _pointInRegion rejects them, so the
+          // only cost is empty iterations on a one-shot export.
+          _tessellateGrid(
+            contours,
+            minX,
+            minY,
+            maxX,
+            maxY,
+            gridCount,
+            vid,
+            faces,
+          );
+        } else {
+          _tessellateScanline(contours, vid, faces);
+        }
+      }
+
+      if (verts.isEmpty || faces.isEmpty) {
+        log('tessellate "${region.label}": DROPPED — '
+            '${verts.length} vert(s), ${faces.length} face(s)');
+        continue;
+      }
+
+      // ---- UVs, computed in SOURCE space (pre-recenter, pre-Y-flip). ----
+      final uvs = <Offset>[];
+      final projector = region.uv;
+
+      for (final vertex in verts) {
+        if (projector == null) {
+          // Planar unwrap over the global bbox. Y is inverted to match the
+          // Y-flip applied to the geometry, so the unwrap reads upright.
+          final u = spanX > 1e-9 ? (vertex.dx - minX) / spanX : 0.0;
+          final v = spanY > 1e-9 ? (vertex.dy - minY) / spanY : 0.0;
+          uvs.add(Offset(u, 1.0 - v));
+          continue;
+        }
+
+        final uv = projector(vertex);
+        if (uv == null) {
+          // Only reachable for an IMG whose frame went degenerate after the
+          // collector's pre-check. Abort rather than emit garbage UVs.
+          log('tessellate "${region.label}": ABORT — UV projector returned null');
+          return ObjMaterialExport.empty(
+            'A textured region became degenerate while generating UV coordinates.',
+            warnings: materialSet.warnings,
+            diagnostics: diagnostics,
+          );
+        }
+        uvs.add(uv);
+      }
+
+      log('tessellate "${region.label}": ${verts.length} vert(s), '
+          '${faces.length} tri(s), material ${region.material.name}'
+          '${projector == null ? " (planar UV)" : " (projected UV)"}');
+
+      meshes.add(_MaterialRegionMesh(
+        region: region,
+        verts: verts,
+        uvs: uvs,
+        faces: faces,
+      ));
+    }
+
+    if (meshes.isEmpty) {
+      return ObjMaterialExport.empty(
+        'Nothing to export — no region produced triangulated faces.',
+        warnings: materialSet.warnings,
+        diagnostics: diagnostics,
+      );
+    }
+
+    // ---- 4. Prune materials/sidecars orphaned by tessellation. ----
+    // The collector already pruned regions killed by the disjointness pass;
+    // this catches a region that survived as a path but tessellated to nothing.
+    final liveMaterials = <ObjMaterial>{for (final m in meshes) m.region.material};
+    final materials = materialSet.materials
+        .where(liveMaterials.contains)
+        .toList(growable: false);
+    final liveTextures = <String>{
+      for (final m in materials)
+        if (m.textureFileName != null) m.textureFileName!,
+    };
+    final sidecars = materialSet.sidecars
+        .where((s) => liveTextures.contains(s.fileName))
+        .toList(growable: false);
+
+    // ---- 5. Emit. ----
+    // All `v`, then all `vt`, then the material groups. Declaring the full
+    // vertex and texture blocks before any face means no importer has to
+    // tolerate forward references, and group order still reads as paint order.
+    int totalVerts = 0;
+    int totalFaces = 0;
+    for (final mesh in meshes) {
+      totalVerts += mesh.verts.length;
+      totalFaces += mesh.faces.length;
+    }
+
+    log('RESULT: $totalVerts vert(s), $totalFaces tri(s), '
+        '${meshes.length} region(s), ${materials.length} material(s), '
+        '${sidecars.length} sidecar(s)');
+    for (final sidecar in sidecars) {
+      log('  sidecar: ${sidecar.fileName} '
+          '${sidecar.isCopy ? "(copy of ${sidecar.sourcePath})" : "(baked ramp)"}');
+    }
+
+    final name = _sanitizeName(layer.name);
+    final obj = StringBuffer();
+    obj.writeln('# Exported from Compass');
+    obj.writeln('# Layer: ${layer.name}');
+    obj.writeln('# $totalVerts vertices, $totalFaces triangles, '
+        '${meshes.length} regions, ${materials.length} materials');
+    obj.writeln('# $modeLabel tessellation; layer appearance as disjoint '
+        'material regions; recentered, flat on Z=0');
+    obj.writeln('mtllib $materialLibraryFileName');
+    obj.writeln('o $name');
+
+    for (final mesh in meshes) {
+      for (final vertex in mesh.verts) {
+        final ex = vertex.dx - cx;
+        final ey = -(vertex.dy - cy); // Y-up for OBJ/Blender
+        obj.writeln('v $ex $ey 0');
+      }
+    }
+
+    for (final mesh in meshes) {
+      for (final uv in mesh.uvs) {
+        obj.writeln('vt ${uv.dx} ${uv.dy}');
+      }
+    }
+
+    obj.writeln('s off');
+
+    // Local indices are 1-based within their region; the running base converts
+    // them to global 1-based indices. Vertex and texture bases advance in
+    // lockstep because every region emits exactly one vt per v.
+    int base = 0;
+    for (final mesh in meshes) {
+      obj.writeln('g ${name}_${mesh.region.label}');
+      obj.writeln('usemtl ${mesh.region.material.name}');
+
+      for (final face in mesh.faces) {
+        final a = base + face[0];
+        final b = base + face[1];
+        final c = base + face[2];
+        obj.writeln('f $a/$a $b/$b $c/$c');
+      }
+
+      base += mesh.verts.length;
+    }
+
+    return ObjMaterialExport(
+      objData: obj.toString(),
+      // Static writer, because pruning happened AFTER tessellation: by now the
+      // region list is stale, and building a throwaway ObjMaterialSet just to
+      // reach its toMtl() would be dishonest about what the data represents.
+      mtlData: ObjMaterialSet.materialsToMtl(materials),
+      materialLibraryFileName: materialLibraryFileName,
+      sidecars: sidecars,
+      warnings: materialSet.warnings,
+      diagnostics: diagnostics,
+    );
+  }
+
+  // ===========================================================================
   // SCANLINE MODE  (the proven default -- robust, follows the curve, ugly topo)
   // ===========================================================================
 
@@ -982,6 +1393,27 @@ class OBJExporter {
         .replaceAll(RegExp(r'[^A-Za-z0-9_\-.]'), '');
     return cleaned.isEmpty ? 'layer' : cleaned;
   }
+}
+
+// One tessellated material region, held between the tessellation pass and the
+// emission pass. Vertex indices inside [faces] are 1-BASED and LOCAL to this
+// region -- the emitter adds a running base to make them global.
+//
+// [uvs] is index-parallel to [verts]: every region emits exactly one `vt` per
+// `v`, so the vertex and texture bases advance together and a face's texture
+// index always equals its vertex index.
+class _MaterialRegionMesh {
+  final ObjMaterialRegion region;
+  final List<Offset> verts;
+  final List<Offset> uvs;
+  final List<List<int>> faces;
+
+  const _MaterialRegionMesh({
+    required this.region,
+    required this.verts,
+    required this.uvs,
+    required this.faces,
+  });
 }
 
 // A non-horizontal contour edge, normalized so yTop < yBottom (scanline mode).

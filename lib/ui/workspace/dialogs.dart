@@ -7,6 +7,7 @@ import '../../engine.dart';
 import '../../models/layer.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/image.dart';
+import '../../models/geometry/mesh.dart';
 import '../../io/png_exporter.dart'; // <--- NEW: Import for PngExportStyle
 
 // The OBJ exporter's four output modes as the dialog presents them. Local to
@@ -14,6 +15,16 @@ import '../../io/png_exporter.dart'; // <--- NEW: Import for PngExportStyle
 // skeletonMode) for backward compatibility, and _ObjExportMode maps onto them
 // at save time.
 enum _ObjExportMode { scanline, grid, delaunay, skeleton }
+
+// The OBJ dialog's "material" dropdown is an int channel with two sentinels;
+// any NON-NEGATIVE value indexes into the layer's visible-Add IMG list.
+//
+// A plain enum would be tidier, but the third case genuinely carries a payload
+// (which IMG), and DropdownButtonFormField wants one value type. Two named
+// constants beat either a record or a parallel index variable that can silently
+// disagree with the enum.
+const int _objMaterialGeometryOnly = -1;
+const int _objMaterialLayerAppearance = -2;
 
 class CompassDialogs {
   static void showAboutDialog(BuildContext context) {
@@ -300,6 +311,44 @@ class CompassDialogs {
     );
   }
 
+  /// Appends one timestamped block to `compass_export_log.txt` and returns its
+  /// absolute path, or null if the write failed.
+  ///
+  /// APPEND, not truncate: the reason this exists is comparing one export
+  /// attempt against the next, which a file that resets every run makes
+  /// impossible. Plain text, a few hundred bytes per export.
+  ///
+  /// WHERE "./" LANDS: [Directory.current] -- wherever the process was launched
+  /// from, so the project root under `flutter run` and the bundle directory if
+  /// started from a file manager. That is the same convention ThemeManager
+  /// already uses for compass_settings.json, so the two files turn up together
+  /// instead of following two different rules.
+  ///
+  /// NEVER THROWS. A diagnostics log that can break an otherwise successful
+  /// export would be worse than no log at all, so every failure is swallowed
+  /// and surfaces as a null return, which callers render as "log unavailable".
+  static Future<String?> _writeObjExportLog(List<String> lines) async {
+    try {
+      final file = File('compass_export_log.txt').absolute;
+      final buffer = StringBuffer();
+      buffer.writeln('=== ${DateTime.now().toIso8601String()} '
+          '=========================');
+      for (final line in lines) {
+        buffer.writeln(line);
+      }
+      buffer.writeln();
+
+      await file.writeAsString(
+        buffer.toString(),
+        mode: FileMode.append,
+        flush: true,
+      );
+      return file.path;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Layer-to-object export. Scoped to ONE layer (the "what a shot turns into"
   // unit), unlike the whole-document SVG/PNG exporters. Mirrors showExportPNG's
   // structure -- StatefulBuilder + filename + controls -- with these specifics:
@@ -346,10 +395,16 @@ class CompassDialogs {
             image.isVisible && CompassLayer.hasLiftedImageFill(image))
         .toList();
 
-    // -1 preserves the existing geometry-only export. With one IMG, default to
-    // the textured surface because its mask has unambiguous material ownership.
-    int textureImageIndex =
-        textureImages.isNotEmpty && !layer.mirrorEnabled ? 0 : -1;
+    // DEFAULTS ARE DELIBERATELY UNCHANGED from the IMG-only era: geometry-only,
+    // or the single IMG when the layer has one and is not mirrored. "Layer
+    // appearance" is strictly more complete (it covers the IMG too, alongside
+    // every fill, gradient, and stroke band), but defaulting to it would
+    // silently start emitting MTL + sidecar files for anyone who has been
+    // exporting bare geometry. Opt-in via the dropdown; flip this line if the
+    // richer default is wanted later.
+    int materialChoice = textureImages.isNotEmpty && !layer.mirrorEnabled
+        ? 0
+        : _objMaterialGeometryOnly;
 
     String basename(String path) =>
         path.replaceAll('\\', '/').split('/').last;
@@ -400,16 +455,24 @@ class CompassDialogs {
             final double lamValue = skeletonLambda.clamp(lamMin, lamMax);
 
             final selectedTextureImage =
-                textureImageIndex >= 0 &&
-                        textureImageIndex < textureImages.length
-                    ? textureImages[textureImageIndex]
+                materialChoice >= 0 &&
+                        materialChoice < textureImages.length
+                    ? textureImages[materialChoice]
                     : null;
+
+            final isLayerAppearance =
+                materialChoice == _objMaterialLayerAppearance;
 
             String headerText;
             if (selectedTextureImage != null) {
               headerText = 'Exports the selected IMG Boolean mask as a textured '
                   'triangle mesh. The mesh itself hides every pixel outside the '
                   'mask; Compass writes OBJ + MTL + a copy of the source image.';
+            } else if (isLayerAppearance) {
+              headerText = 'Exports this layer\'s whole appearance as disjoint '
+                  'material regions — flat fill, gradients, stroke area, colored '
+                  'bands, and IMG masks. Compass writes OBJ + MTL plus a small '
+                  'texture beside them for each gradient and image.';
             } else {
               switch (mode) {
               case _ObjExportMode.skeleton:
@@ -448,53 +511,65 @@ class CompassDialogs {
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<int>(
-                      value: textureImageIndex,
+                      value: materialChoice,
                       decoration: const InputDecoration(
                         border: OutlineInputBorder(),
                         labelText: 'OBJ material',
                       ),
                       items: [
                         const DropdownMenuItem<int>(
-                          value: -1,
+                          value: _objMaterialGeometryOnly,
                           child: Text('Geometry only'),
                         ),
-                        for (var i = 0; i < textureImages.length; i++)
-                          DropdownMenuItem<int>(
-                            value: i,
-                            child: Text(
-                              'IMG texture — ${textureImages[i].displayName}',
-                              overflow: TextOverflow.ellipsis,
+                        const DropdownMenuItem<int>(
+                          value: _objMaterialLayerAppearance,
+                          child: Text('Layer appearance (fill, gradients, strokes)'),
+                        ),
+                        // IMG items are OMITTED rather than disabled under the
+                        // Mirror Modifier: one affine frame cannot invert across
+                        // a reflection, so there is no valid IMG-only export to
+                        // offer. Layer appearance stays available and simply
+                        // skips IMG regions with a warning.
+                        if (!layer.mirrorEnabled)
+                          for (var i = 0; i < textureImages.length; i++)
+                            DropdownMenuItem<int>(
+                              value: i,
+                              child: Text(
+                                'IMG texture — ${textureImages[i].displayName}',
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                          ),
                       ],
-                      onChanged: mode == _ObjExportMode.skeleton ||
-                              layer.mirrorEnabled
+                      onChanged: mode == _ObjExportMode.skeleton
                           ? null
                           : (value) {
                               setLocalState(() {
-                                textureImageIndex = value ?? -1;
+                                materialChoice =
+                                    value ?? _objMaterialGeometryOnly;
                               });
                             },
                     ),
-                    if (layer.mirrorEnabled) ...[
+                    if (mode == _ObjExportMode.skeleton) ...[
                       const SizedBox(height: 6),
                       Text(
-                        'IMG texture export is currently disabled while the '
-                        'Mirror Modifier is enabled. Geometry-only OBJ remains '
-                        'available.',
+                        'Skeleton mode exports loose edges, which carry no faces '
+                        'and therefore no materials.',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
-                    ] else if (mode == _ObjExportMode.skeleton) ...[
+                    ] else if (layer.mirrorEnabled) ...[
                       const SizedBox(height: 6),
                       Text(
-                        'Skeleton mode exports loose edges, so it cannot carry '
-                        'an image texture.',
+                        'IMG texture export is unavailable while the Mirror '
+                        'Modifier is enabled. Layer appearance still exports flat '
+                        'and gradient regions correctly across the seam; any IMG '
+                        'regions are skipped.',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ] else if (textureImages.isEmpty) ...[
                       const SizedBox(height: 6),
                       Text(
-                        'No visible Add IMG object exists on this layer.',
+                        'No visible Add IMG object exists on this layer, so only '
+                        'geometry and layer appearance are available.',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -547,8 +622,12 @@ class CompassDialogs {
                       onSelectionChanged: (newSelection) {
                         setLocalState(() {
                           mode = newSelection.first;
+                          // Skeleton emits `l` edges: no faces, so no materials.
+                          // Snap the dropdown back rather than disabling the
+                          // mode -- matching how the IMG selection has always
+                          // behaved here, and keeping Skeleton reachable.
                           if (mode == _ObjExportMode.skeleton) {
-                            textureImageIndex = -1;
+                            materialChoice = _objMaterialGeometryOnly;
                           }
                         });
                       },
@@ -671,15 +750,140 @@ class CompassDialogs {
                     if (!filename.endsWith('.obj')) {
                       filename += '.obj';
                     }
+
+                    // Preamble written for EVERY outcome, so a log block always
+                    // records what was attempted even when the attempt threw
+                    // before producing anything.
+                    final logLines = <String>[
+                      'layer: ${layer.name}',
+                      'target: $filename',
+                      'mode: ${mode.name}',
+                      'curve resolution: $samplingSpacing px',
+                      if (mode == _ObjExportMode.grid ||
+                          mode == _ObjExportMode.skeleton)
+                        'cells across: ${gridCount.round()}',
+                      if (mode == _ObjExportMode.delaunay)
+                        'delaunay spacing: $delaunaySpacing px',
+                      if (mode == _ObjExportMode.skeleton)
+                        'skeleton lambda: ${lamValue.toStringAsFixed(1)}',
+                      'material: ${materialChoice == _objMaterialGeometryOnly ? 'geometry only' : materialChoice == _objMaterialLayerAppearance ? 'layer appearance' : 'IMG texture'}',
+                      'shapes in layer: ${layer.shapes.length}',
+                      'mirror: ${layer.mirrorEnabled ? layer.mirrorAxis.name : 'off'}',
+                      '',
+                    ];
+
                     try {
                       final objFile = File(filename).absolute;
                       await objFile.parent.create(recursive: true);
 
+                      final separator = Platform.pathSeparator;
+                      final outputDir = objFile.parent.path;
+                      final outputStem = safeSidecarStem(
+                        withoutExtension(basename(objFile.path)),
+                      );
+
                       final selectedTexture =
-                          textureImageIndex >= 0 &&
-                                  textureImageIndex < textureImages.length
-                              ? textureImages[textureImageIndex]
+                          materialChoice >= 0 &&
+                                  materialChoice < textureImages.length
+                              ? textureImages[materialChoice]
                               : null;
+
+                      // ---- LAYER APPEARANCE: multi-material export ----------
+                      // Checked before the geometry-only branch because its
+                      // sentinel is also "no selected IMG"; the difference is
+                      // that here every painted region becomes its own material.
+                      if (materialChoice == _objMaterialLayerAppearance) {
+                        final mtlFileName = '$outputStem.mtl';
+
+                        final export = await engine.toMaterialOBJ(
+                          layer,
+                          fileStem: outputStem,
+                          materialLibraryFileName: mtlFileName,
+                          samplingSpacing: samplingSpacing,
+                          gridMode: mode == _ObjExportMode.grid,
+                          gridCount: gridCount.round(),
+                          delaunayMode: mode == _ObjExportMode.delaunay,
+                          delaunaySpacing: delaunaySpacing,
+                        );
+
+                        if (export.isEmpty) {
+                          logLines.addAll(export.diagnostics);
+                          logLines.add('');
+                          logLines.add('OUTCOME: FAILED — ${export.error}');
+                          final logPath = await _writeObjExportLog(logLines);
+
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '${export.error ?? 'Nothing to export — this layer has no painted area.'}'
+                                  '\n${logPath == null ? 'Log unavailable.' : 'Details: $logPath'}',
+                                ),
+                              ),
+                            );
+                          }
+                          return;
+                        }
+
+                        // Sidecars first: an OBJ that references a missing map
+                        // is worse than no OBJ at all, so if a texture copy
+                        // throws we bail before writing the .obj/.mtl pair.
+                        for (final sidecar in export.sidecars) {
+                          final target =
+                              File('$outputDir$separator${sidecar.fileName}');
+
+                          if (sidecar.isCopy) {
+                            final source = File(sidecar.sourcePath!);
+                            if (!await source.exists()) {
+                              throw FileSystemException(
+                                'IMG source file is missing',
+                                sidecar.sourcePath!,
+                              );
+                            }
+                            if (source.absolute.path != target.absolute.path) {
+                              await source.copy(target.path);
+                            }
+                          } else {
+                            await target.writeAsBytes(sidecar.bytes!);
+                          }
+                        }
+
+                        await File('$outputDir$separator$mtlFileName')
+                            .writeAsString(export.mtlData);
+                        await objFile.writeAsString(export.objData);
+
+                        logLines.addAll(export.diagnostics);
+                        logLines.add('');
+                        for (final warning in export.warnings) {
+                          logLines.add('WARNING: $warning');
+                        }
+                        logLines.add('OUTCOME: OK — wrote ${objFile.path}, '
+                            '$mtlFileName, and ${export.sidecars.length} sidecar(s)');
+                        final logPath = await _writeObjExportLog(logLines);
+
+                        if (context.mounted) {
+                          final sidecarCount = export.sidecars.length;
+                          final buffer = StringBuffer(
+                            'Saved OBJ, MTL, and $sidecarCount texture '
+                            'file${sidecarCount == 1 ? '' : 's'} to $outputDir',
+                          );
+                          // WARNINGS ARE NOT FAILURES: a mirrored layer still
+                          // exported its flat and gradient geometry correctly.
+                          // Report them alongside the success, never instead.
+                          for (final warning in export.warnings) {
+                            buffer.write('\n$warning');
+                          }
+                          if (logPath != null) {
+                            buffer.write('\nLog: $logPath');
+                          }
+
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(buffer.toString())),
+                          );
+                          Navigator.of(context).pop();
+                        }
+                        return;
+                      }
 
                       if (selectedTexture == null) {
                         final objData = engine.toOBJ(
@@ -693,12 +897,32 @@ class CompassDialogs {
                           skeletonLambda: lamValue,
                         );
                         if (objData.isEmpty) {
+                          final reason = mode == _ObjExportMode.skeleton
+                              ? 'Nothing to export — no skeleton survived. Try lowering branch pruning or check the layer has filled area.'
+                              : 'Nothing to export — this layer has no filled area.';
+
+                          // toOBJ has no diagnostics channel of its own, so
+                          // reconstruct the two facts that actually decide the
+                          // outcome. A mesh-only layer reads as "0 non-mesh
+                          // shapes", which is the answer in one line.
+                          final meshCount = layer.shapes
+                              .where((s) => s is CompassMesh && s.isVisible)
+                              .length;
+                          logLines.add(
+                            'toOBJ() returned empty. visible shapes: '
+                            '${layer.shapes.where((s) => s.isVisible).length}, '
+                            'of which gradient meshes (never exportable): $meshCount',
+                          );
+                          logLines.add('OUTCOME: FAILED — $reason');
+                          final logPath = await _writeObjExportLog(logLines);
+
                           if (context.mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
-                                content: Text(mode == _ObjExportMode.skeleton
-                                    ? 'Nothing to export — no skeleton survived. Try lowering branch pruning or check the layer has filled area.'
-                                    : 'Nothing to export — this layer has no filled area.'),
+                                content: Text(
+                                  '$reason'
+                                  '\n${logPath == null ? 'Log unavailable.' : 'Details: $logPath'}',
+                                ),
                               ),
                             );
                           }
@@ -706,11 +930,17 @@ class CompassDialogs {
                         }
 
                         await objFile.writeAsString(objData);
+                        logLines.add(
+                          'OUTCOME: OK — wrote ${objData.length} bytes to ${objFile.path}',
+                        );
+                        final logPath = await _writeObjExportLog(logLines);
+
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
                               content: Text(
-                                'Successfully saved to ${objFile.path}!',
+                                'Successfully saved to ${objFile.path}!'
+                                '${logPath == null ? '' : '\nLog: $logPath'}',
                               ),
                             ),
                           );
@@ -727,9 +957,6 @@ class CompassDialogs {
                         );
                       }
 
-                      final outputStem = safeSidecarStem(
-                        withoutExtension(basename(objFile.path)),
-                      );
                       final sourceExtension =
                           extensionOf(basename(sourceTexture.path));
                       final textureExtension =
@@ -756,12 +983,16 @@ class CompassDialogs {
                       );
 
                       if (export.isEmpty) {
+                        logLines.add('IMG: ${selectedTexture.displayName}');
+                        logLines.add('OUTCOME: FAILED — ${export.error}');
+                        final logPath = await _writeObjExportLog(logLines);
+
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
                               content: Text(
-                                export.error ??
-                                    'Nothing to export from the selected IMG mask.',
+                                '${export.error ?? 'Nothing to export from the selected IMG mask.'}'
+                                '\n${logPath == null ? 'Log unavailable.' : 'Details: $logPath'}',
                               ),
                             ),
                           );
@@ -769,12 +1000,11 @@ class CompassDialogs {
                         return;
                       }
 
-                      final separator = Platform.pathSeparator;
                       final mtlFile = File(
-                        '${objFile.parent.path}$separator${export.materialLibraryFileName}',
+                        '$outputDir$separator${export.materialLibraryFileName}',
                       );
                       final textureFile = File(
-                        '${objFile.parent.path}$separator${export.textureFileName}',
+                        '$outputDir$separator${export.textureFileName}',
                       );
 
                       if (sourceTexture.absolute.path !=
@@ -784,21 +1014,41 @@ class CompassDialogs {
                       await mtlFile.writeAsString(export.mtlData);
                       await objFile.writeAsString(export.objData);
 
+                      logLines.add('IMG: ${selectedTexture.displayName}');
+                      logLines.add(
+                        'OUTCOME: OK — wrote ${objFile.path}, '
+                        '${export.materialLibraryFileName}, '
+                        '${export.textureFileName}',
+                      );
+                      final logPath = await _writeObjExportLog(logLines);
+
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
                             content: Text(
-                              'Saved textured OBJ, MTL, and image to '
-                              '${objFile.parent.path}',
+                              'Saved textured OBJ, MTL, and image to $outputDir'
+                              '${logPath == null ? '' : '\nLog: $logPath'}',
                             ),
                           ),
                         );
                         Navigator.of(context).pop();
                       }
-                    } catch (e) {
+                    } catch (e, stack) {
+                      // The throw sites are all file I/O (missing IMG source,
+                      // permission, disk). Log the stack too -- an exception is
+                      // the one outcome where the preamble alone says nothing.
+                      logLines.add('OUTCOME: THREW — $e');
+                      logLines.add(stack.toString());
+                      final logPath = await _writeObjExportLog(logLines);
+
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Error saving file: $e')),
+                          SnackBar(
+                            content: Text(
+                              'Error saving file: $e'
+                              '${logPath == null ? '' : '\nDetails: $logPath'}',
+                            ),
+                          ),
                         );
                       }
                     }

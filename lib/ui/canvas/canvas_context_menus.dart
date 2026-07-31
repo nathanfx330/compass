@@ -522,28 +522,84 @@ class CanvasContextMenus {
     else if (clickedShape != null) {
       engine.selectShape(clickedShape);
 
+      // MESH-OWNED LAYER: a visible gradient mesh claims its layer, and every
+      // other shape in it may only CARVE (subtract / intersect). The engine
+      // coerces ADD -> SUBTRACT regardless (see
+      // CompassEngine.coerceOperationForLayer), so this menu's job is simply to
+      // stop offering a choice that would be silently rewritten.
+      //
+      // The mesh itself is exempt: its own operation is never read by any
+      // boolean walk, so restricting it would be theatre.
+      CompassLayer? clickedLayer;
+      for (final layer in engine.layers) {
+        if (layer.shapes.contains(clickedShape)) {
+          clickedLayer = layer;
+          break;
+        }
+      }
+      final bool isMeshShape = clickedShape is CompassMesh;
+      final bool opsRestricted =
+          !isMeshShape && engine.isMeshOwnedLayer(clickedLayer);
+
       final menuItems = <PopupMenuEntry<String>>[
         const PopupMenuItem(
           value: 'add_point',
           child: Text('Add Point to Shape'),
         ),
         const PopupMenuDivider(),
-        const PopupMenuItem(
-          value: 'add',
-          child: Text('Union (Add)'),
-        ),
-        const PopupMenuItem(
-          value: 'subtract',
-          child: Text('Subtract'),
-        ),
-        const PopupMenuItem(
-          value: 'intersect',
-          child: Text('Intersect'),
-        ),
-        const PopupMenuItem(
-          value: 'none',
-          child: Text('None (Construction)'),
-        ),
+        if (isMeshShape)
+          // A MESH HAS NO USABLE OPERATION. Every boolean walk skips meshes,
+          // and getLayerMeshClipPath reads the OTHER shapes' ops but never the
+          // mesh's own -- so offering four choices here would be four no-ops.
+          // Matches the hierarchy row, which shows MESH FILL and hides its op
+          // menu for the same reason.
+          const PopupMenuItem(
+            enabled: false,
+            height: 28,
+            child: Text(
+              'Mesh fill — owns this layer',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+                color: Colors.tealAccent,
+              ),
+            ),
+          )
+        else ...[
+          if (opsRestricted)
+            // A header rather than a disabled ADD row: a greyed-out entry
+            // reads as "unavailable right now", when in fact ADD can never
+            // apply in a mesh layer. State the rule once instead.
+            const PopupMenuItem(
+              enabled: false,
+              height: 28,
+              child: Text(
+                'Mesh layer — carve only',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.orangeAccent,
+                ),
+              ),
+            )
+          else
+            const PopupMenuItem(
+              value: 'add',
+              child: Text('Union (Add)'),
+            ),
+          const PopupMenuItem(
+            value: 'subtract',
+            child: Text('Subtract'),
+          ),
+          const PopupMenuItem(
+            value: 'intersect',
+            child: Text('Intersect'),
+          ),
+          const PopupMenuItem(
+            value: 'none',
+            child: Text('None (Construction)'),
+          ),
+        ],
         const PopupMenuDivider(),
       ];
 
@@ -556,9 +612,21 @@ class CanvasContextMenus {
         }
       }
 
+      // INSERTION POINT for the per-type items below: immediately before the
+      // trailing divider that closes the boolean-op block.
+      //
+      // Computed, not the literal 6 this used to be. That constant silently
+      // encoded "add_point, divider, add, subtract, intersect, none" -- so the
+      // IMG branch above (which removes two leading entries) and the
+      // mesh-layer swap now in place would both shift it out from under the
+      // inserts. `length - 1` is correct in every one of those shapes, because
+      // the trailing divider is the last element at this point in construction
+      // and consecutive inserts each land after the previous one.
+      int opsInsertIndex() => menuItems.length - 1;
+
       if (clickedShape is CompassXSpline) {
         menuItems.insert(
-          6,
+          opsInsertIndex(),
           PopupMenuItem(
             value: 'toggle_closed',
             child: Text(
@@ -570,7 +638,7 @@ class CanvasContextMenus {
         );
       } else if (clickedShape is CompassRectangle) {
         menuItems.insert(
-          6,
+          opsInsertIndex(),
           const PopupMenuItem(
             value: 'convert_to_spline',
             child: Text('Convert to X-Spline'),
@@ -578,7 +646,7 @@ class CanvasContextMenus {
         );
 
         menuItems.insert(
-          7,
+          opsInsertIndex(),
           const PopupMenuItem(
             value: 'convert_to_mesh',
             child: Text('Convert to Gradient Mesh'),
@@ -586,7 +654,7 @@ class CanvasContextMenus {
         );
       } else if (clickedShape is CompassCircle) {
         menuItems.insert(
-          6,
+          opsInsertIndex(),
           const PopupMenuItem(
             value: 'convert_to_spline',
             child: Text('Convert to X-Spline'),

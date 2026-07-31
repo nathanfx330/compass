@@ -855,6 +855,12 @@ class CompassEngine extends ChangeNotifier {
     CompassLayer toLayer,
     int insertIndex,
   ) {
+    // Dragging an ADD shape into a mesh-owned layer coerces it to SUBTRACT.
+    // Applied BEFORE the move so the shape lands already legal and the
+    // hierarchy row never flickers through an invalid state. Refusing the drop
+    // instead would be a dead-end gesture with no explanation attached.
+    shape.operation = coerceOperationForLayer(toLayer, shape, shape.operation);
+
     HierarchyOps.moveShapeToLayer(this, shape, fromLayer, toLayer, insertIndex);
   }
 
@@ -1244,8 +1250,59 @@ class CompassEngine extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ===========================================================================
+  // MESH LAYER OWNERSHIP
+  // ===========================================================================
+  //
+  // A GRADIENT MESH OWNS ITS LAYER. Nothing else in that layer may paint --
+  // shapes may only CARVE it (subtract / intersect). The rule is enforced here,
+  // at the engine, rather than only in the menus, so no path can route around
+  // it: a drag between layers, a tool creating a shape, a future scripted edit.
+  //
+  // WHY, in one line: the renderer paints meshes LAST within a layer (pass 1d),
+  // and getLayerMeshClipPath -- unlike the gradient and IMG clip getters --
+  // never removes a later ADD occluder, so an "add" shape stacked above a mesh
+  // silently disappears beneath it. Isolation dissolves the question instead of
+  // patching the clip: alone in its layer, a mesh has nothing to order itself
+  // against, and cross-layer stacking is already well-defined.
+  //
+  // See ShapeConverter.convertRectangleToMesh for the fuller argument and for
+  // the conversion that establishes the invariant in the first place.
+
+  /// True when [layer] is owned by a visible gradient mesh, and therefore only
+  /// accepts carving shapes.
+  ///
+  /// Keyed on VISIBLE meshes: hiding the mesh releases the layer, so a layer
+  /// whose mesh is toggled off behaves like any other and its shapes paint
+  /// normally again. That is the same "hidden means absent" rule the boolean
+  /// walks already use.
+  bool isMeshOwnedLayer(CompassLayer? layer) {
+    if (layer == null) return false;
+    return layer.shapes.any((s) => s is CompassMesh && s.isVisible);
+  }
+
+  /// The operation [shape] may legally carry in [layer].
+  ///
+  /// COERCES rather than rejects. A refused drag or a silently-ignored menu
+  /// click teaches nothing; landing on `subtract` does the thing the user
+  /// almost certainly meant -- carve the mesh -- and the hierarchy row shows
+  /// the result immediately.
+  ///
+  /// `none` (construction geometry) passes through untouched: an invisible
+  /// guide neither paints nor carves, so it breaks no invariant.
+  CompassBooleanOp coerceOperationForLayer(
+    CompassLayer? layer,
+    CompassShape shape,
+    CompassBooleanOp op,
+  ) {
+    if (shape is CompassMesh) return op; // the owner itself is exempt
+    if (op != CompassBooleanOp.add) return op;
+    if (!isMeshOwnedLayer(layer)) return op;
+    return CompassBooleanOp.subtract;
+  }
+
   void changeShapeOperation(CompassShape shape, CompassBooleanOp op) {
-    shape.operation = op;
+    shape.operation = coerceOperationForLayer(_layerOfShape(shape), shape, op);
     saveSnapshot();
     notifyListeners();
   }
@@ -1262,9 +1319,21 @@ class CompassEngine extends ChangeNotifier {
   // STROKE-REGION STACK ACTIONS
   // ===========================================================================
 
+  // STROKE RINGS OBEY THE MESH-LAYER RULE TOO. A ring whose op is `add` is a
+  // FILL ring: it goes through _applyPrimaryStrokeStack into getLayerFillPath
+  // and paints flat layer color -- the same flat paint that shape fills were
+  // just barred from in a mesh-owned layer. Leaving rings unrestricted would
+  // reopen the hole one level down, and a Fill ring is easy to reach (the
+  // Cut/Fill toggle is one click in the hierarchy row).
+  //
+  // Both entry points route through coerceOperationForLayer, so a ring can only
+  // ever CUT in a mesh layer -- which is the useful thing anyway, since carving
+  // a mesh with an offset ring is exactly what an outline-as-boolean is for.
+
   void addStrokeRegion(CompassShape shape,
       {CompassBooleanOp op = CompassBooleanOp.add, double width = 8.0}) {
-    shape.strokeRegions.add(StrokeRegion(op: op, width: width));
+    final resolved = coerceOperationForLayer(_layerOfShape(shape), shape, op);
+    shape.strokeRegions.add(StrokeRegion(op: resolved, width: width));
     saveSnapshot();
     notifyListeners();
   }
@@ -1278,7 +1347,8 @@ class CompassEngine extends ChangeNotifier {
 
   void setStrokeRegionOp(CompassShape shape, int index, CompassBooleanOp op) {
     if (index < 0 || index >= shape.strokeRegions.length) return;
-    shape.strokeRegions[index].op = op;
+    shape.strokeRegions[index].op =
+        coerceOperationForLayer(_layerOfShape(shape), shape, op);
     saveSnapshot();
     notifyListeners();
   }
@@ -2054,6 +2124,13 @@ class CompassEngine extends ChangeNotifier {
 
   void addShape(CompassShape s) {
     if (activeLayer != null) {
+      // A shape drawn into a mesh-owned layer defaults to SUBTRACT. Without
+      // this it would be created with CompassShape's `add` default, paint
+      // nothing (the mesh covers it), and give the user no hint why -- the
+      // worst of the available outcomes. Carving is the only thing a shape can
+      // usefully do in a mesh layer, so that is what a new one does.
+      s.operation = coerceOperationForLayer(activeLayer, s, s.operation);
+
       activeLayer!.shapes.add(s);
       _selectedShape = s;
       activeLayer!.isExpanded = true;
@@ -2216,6 +2293,46 @@ class CompassEngine extends ChangeNotifier {
       delaunayMode: delaunayMode,
       delaunaySpacing: delaunaySpacing,
       skeletonMode: skeletonMode,
+    );
+  }
+
+  /// Exports [layer]'s full APPEARANCE -- flat fill, gradient fills, stroke
+  /// area, colored stroke bands, and IMG masks -- as one multi-material OBJ
+  /// package. The generalization of [toTexturedOBJ] from "one IMG texture" to
+  /// "everything this layer paints."
+  ///
+  /// ASYNC, unlike the other OBJ delegates, because a gradient fill bakes to a
+  /// small ramp PNG through the raster pipeline (PictureRecorder -> toImage) --
+  /// the same reason [toPNG] is async. Layers with no gradients still return a
+  /// Future; the await simply resolves immediately.
+  ///
+  /// The result carries SIDECAR FILES (baked ramps as bytes, IMG textures as
+  /// paths to copy) that the caller must write beside the .obj/.mtl pair, plus
+  /// non-fatal WARNINGS -- a mirrored layer exports its flat and gradient
+  /// geometry correctly and merely reports that its IMG regions were skipped,
+  /// so a warning is something to surface, not a reason to withhold the files.
+  ///
+  /// No skeleton mode: it emits `l` edges, which carry no faces and therefore
+  /// no materials. Callers route skeleton exports to [toOBJ].
+  Future<ObjMaterialExport> toMaterialOBJ(
+    CompassLayer layer, {
+    required String fileStem,
+    required String materialLibraryFileName,
+    double samplingSpacing = 2.0,
+    bool gridMode = false,
+    int gridCount = 48,
+    bool delaunayMode = false,
+    double delaunaySpacing = 25.0,
+  }) {
+    return OBJExporter.toMaterialOBJ(
+      layer,
+      fileStem: fileStem,
+      materialLibraryFileName: materialLibraryFileName,
+      samplingSpacing: samplingSpacing,
+      gridMode: gridMode,
+      gridCount: gridCount,
+      delaunayMode: delaunayMode,
+      delaunaySpacing: delaunaySpacing,
     );
   }
 
