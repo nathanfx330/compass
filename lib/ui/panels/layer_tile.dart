@@ -6,6 +6,7 @@ import 'package:flutter/services.dart'; // <--- NEW: Escape-to-cancel on the ren
 import '../../engine.dart';
 import '../../shape_converter.dart'; // <--- Import ShapeConverter for Sci-Fi bake
 import '../../models/layer.dart';
+import '../../models/fill_pattern.dart';
 import '../../models/geometry/shape.dart';
 import '../../models/geometry/point.dart';
 import '../../models/geometry/line.dart';
@@ -487,6 +488,16 @@ class _LayerTileState extends State<LayerTile> {
                               child: layer.color == Colors.transparent
                                   ? const Center(
                                       child: Icon(Icons.close, size: 8, color: Colors.grey))
+                                  : layer.fillMode == CompassFillMode.hatch
+                                      ? Center(
+                                          child: Icon(
+                                            Icons.texture,
+                                            size: 9,
+                                            color: layer.color.computeLuminance() > 0.5
+                                                ? Colors.black87
+                                                : Colors.white,
+                                          ),
+                                        )
                                   : null,
                             ),
                             Expanded(child: nameWidget),

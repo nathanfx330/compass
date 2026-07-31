@@ -309,6 +309,8 @@ class ShapeConverter {
       color: targetLayer.color,
       strokeColor: targetLayer.strokeColor,
       strokeWidth: targetLayer.strokeWidth,
+      fillMode: targetLayer.fillMode,
+      hatchPattern: targetLayer.hatchPattern.copyWith(),
     );
     meshLayer.shapes.add(mesh);
     meshLayer.isExpanded = true;
@@ -373,6 +375,8 @@ class ShapeConverter {
       color: layer.color,
       strokeColor: layer.strokeColor,
       strokeWidth: layer.strokeWidth,
+      fillMode: layer.fillMode,
+      hatchPattern: layer.hatchPattern.copyWith(),
     );
 
     // --- GRADIENT TO CARRY ONTO THE BAKE ---

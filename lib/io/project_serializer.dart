@@ -16,6 +16,7 @@ import '../models/geometry/mesh.dart';
 import '../models/geometry/image.dart';
 import '../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient
 import '../models/layer.dart';
+import '../models/fill_pattern.dart';
 
 class ProjectSerializer {
   // The optional per-shape STROKE token, appended as the LAST comma-field of a
@@ -261,7 +262,7 @@ class ProjectSerializer {
       // isLocked itself used. Legacy files simply lack them (parsed with
       // defaults = mirror off), and older code opening a new file ignores the
       // extra fields since it only reads up to the indices it knows.
-      buffer.writeln('LAYER,${layer.id},${layer.name},${layer.isVisible},${layer.isExpanded},${layer.color.value},${layer.strokeColor.value},${layer.strokeWidth},${layer.isLocked},${layer.mirrorEnabled},${layer.mirrorAxis.name},${layer.mirrorPosition}');
+      buffer.writeln('LAYER,${layer.id},${layer.name},${layer.isVisible},${layer.isExpanded},${layer.color.value},${layer.strokeColor.value},${layer.strokeWidth},${layer.isLocked},${layer.mirrorEnabled},${layer.mirrorAxis.name},${layer.mirrorPosition},FILL:${layer.fillMode.name},HATCH:${layer.hatchPattern.angleDegrees}:${layer.hatchPattern.spacing}:${layer.hatchPattern.strokeWidth}:${layer.hatchPattern.dashLength}:${layer.hatchPattern.gapLength}');
       for (var shape in layer.shapes) {
         // Computed once per shape; '' unless this shape has a stroke stack.
         final strk = _strokeToken(shape);
@@ -426,6 +427,32 @@ class ProjectSerializer {
         }
         if (parts.length >= 12) {
           layer.mirrorPosition = double.tryParse(parts[11]) ?? 0.0;
+        }
+
+        // Named trailing fill tokens keep the LAYER record extensible without
+        // disturbing the long-standing positional fields above. Legacy files
+        // simply have neither token and retain a solid fill with default hatch
+        // settings.
+        for (final rawToken in parts.skip(12)) {
+          final token = rawToken.trim();
+          if (token.startsWith('FILL:')) {
+            final modeName = token.substring('FILL:'.length);
+            layer.fillMode = CompassFillMode.values.firstWhere(
+              (mode) => mode.name == modeName,
+              orElse: () => CompassFillMode.solid,
+            );
+          } else if (token.startsWith('HATCH:')) {
+            final values = token.substring('HATCH:'.length).split(':');
+            if (values.length >= 5) {
+              layer.hatchPattern = CompassHatchPattern(
+                angleDegrees: double.tryParse(values[0]) ?? 45.0,
+                spacing: double.tryParse(values[1]) ?? 12.0,
+                strokeWidth: double.tryParse(values[2]) ?? 1.5,
+                dashLength: double.tryParse(values[3]) ?? 8.0,
+                gapLength: double.tryParse(values[4]) ?? 5.0,
+              );
+            }
+          }
         }
 
         layerMap[layer.id] = layer;

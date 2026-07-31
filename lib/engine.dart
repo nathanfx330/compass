@@ -18,6 +18,7 @@ import 'models/geometry/rectangle.dart';
 import 'models/geometry/mesh.dart';
 import 'models/geometry/image.dart';
 import 'models/layer.dart';
+import 'models/fill_pattern.dart';
 import 'models/reference_layer.dart';
 
 // --- CONSTRAINTS ---
@@ -1380,6 +1381,33 @@ class CompassEngine extends ChangeNotifier {
 
   void changeLayerColor(CompassLayer layer, Color newColor) {
     layer.color = newColor;
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  void changeLayerFillMode(CompassLayer layer, CompassFillMode mode) {
+    if (layer.fillMode == mode) return;
+    layer.fillMode = mode;
+    saveSnapshot();
+    notifyListeners();
+  }
+
+  void changeLayerHatchPattern(
+    CompassLayer layer, {
+    double? angleDegrees,
+    double? spacing,
+    double? strokeWidth,
+    double? dashLength,
+    double? gapLength,
+  }) {
+    final current = layer.hatchPattern;
+    layer.hatchPattern = current.copyWith(
+      angleDegrees: angleDegrees,
+      spacing: spacing,
+      strokeWidth: strokeWidth,
+      dashLength: dashLength,
+      gapLength: gapLength,
+    );
     saveSnapshot();
     notifyListeners();
   }

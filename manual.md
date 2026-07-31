@@ -421,7 +421,7 @@ stroke never carves its own fill.
 
 A layer paints in passes, in this order:
 
-1. **Flat fill** — the layer color over the resolved boolean silhouette
+1. **Layer fill** — solid color or dashed hatch over the resolved boolean silhouette
 2. **Self-painted fills** — gradients and IMG pixels, each clipped to its own
    boolean-carved region
 3. **Stroke area** — variable-width ribbons
@@ -434,6 +434,24 @@ Knowing this order explains most "why is my shape hidden" questions.
 
 Set **Fill Color** and **Stroke Color** in the Properties panel. Choose a preset,
 "none" (transparent), or **Custom…** for the built-in HSV picker with hex entry.
+
+### Dashed hatch fill
+
+In the Properties panel, switch **Fill Mode** from **Solid** to **Hatch**. The
+same fill swatches now choose the hatch ink color; the space between lines is
+transparent.
+
+The default is a classic rising-right 45° drafting hatch. Controls adjust
+**Angle**, **Spacing**, **Line Weight**, **Dash**, and **Gap**. All measurements
+live in document space rather than screen pixels, so the pattern stays anchored
+while you pan and zoom, continues across disconnected Boolean islands, and does
+not restart or fold at a Mirror Modifier seam.
+
+Hatch uses the layer's already-resolved fill silhouette. Add, Subtract,
+Intersect, inherited-color stroke rings, baking, PNG, SVG, ASCII, and Layer
+Appearance OBJ export therefore follow the same geometry as a solid layer fill.
+Per-shape gradients, IMG pixels, custom-colored stroke rings, stroke areas, and
+gradient meshes retain their later paint passes.
 
 ### Per-shape gradients
 
@@ -780,7 +798,7 @@ version-control-friendly.
 ```
 POINT,<id>,<x>,<y>
 ATTACH,<parentId>,<childId>
-LAYER,<id>,<name>,<visible>,<expanded>,<fill>,<stroke>,<width>,<locked>,<mirror…>
+LAYER,<id>,<name>,<visible>,<expanded>,<fill>,<stroke>,<width>,<locked>,<mirror…>[,FILL:…][,HATCH:…]
 SHAPE,<type>,<layerId>,<op>,<visible>,<definingPoints…>[,STROKE:…][,GRAD:…][,GRADTYPE:…]
 CONSTRAINT,<kind>,<riderId>,<hostPoints…>
 REF,<path>,<visible>,<locked>,<offset…>,<scale>,<rotation>

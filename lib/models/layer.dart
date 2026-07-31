@@ -12,6 +12,7 @@ import 'geometry/mesh.dart';
 import 'geometry/gradient.dart';
 import 'geometry/image.dart';
 import 'geometry/stroke_outline.dart';
+import 'fill_pattern.dart';
 
 extension _FastPathState on Path {
   /// Most live Boolean paths have non-zero bounds. In that overwhelmingly
@@ -91,6 +92,8 @@ class CompassLayer {
   Color color;
   Color strokeColor;
   double strokeWidth;
+  CompassFillMode fillMode;
+  CompassHatchPattern hatchPattern;
 
   // ==========================================================================
   // MIRROR MODIFIER (Blender-style, non-destructive)
@@ -142,8 +145,11 @@ class CompassLayer {
     this.color = const Color(0xFF222222),
     this.strokeColor = Colors.transparent,
     this.strokeWidth = 2.0,
+    this.fillMode = CompassFillMode.solid,
+    CompassHatchPattern? hatchPattern,
     String? id,
-  }) : id = id ?? UniqueKey().toString();
+  })  : hatchPattern = hatchPattern ?? CompassHatchPattern(),
+        id = id ?? UniqueKey().toString();
 
   int _pointSignature(CompassPoint point) => Object.hash(
         point.x.value,

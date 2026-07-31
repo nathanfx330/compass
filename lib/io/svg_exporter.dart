@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../engine.dart';
 import '../models/layer.dart';           
+import '../models/fill_pattern.dart';
 import '../models/geometry/shape.dart';
 import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
@@ -241,6 +242,9 @@ class SVGExporter {
       final strokeHex = toHex(layer.strokeColor);
       final sWidth = layer.strokeWidth;
       final cleanLayerId = sanitizeId(layer.id);
+      final usesHatch = layer.fillMode == CompassFillMode.hatch &&
+          layer.color.alpha != 0;
+      final hatchId = 'hatch_$cleanLayerId';
 
       // The id of THIS layer's rendered content group. The mirror <use> below
       // references it to reflect the whole layer as a unit.
@@ -274,9 +278,30 @@ class SVGExporter {
       // The defs block is needed if ANYTHING carves this layer (masks) OR if we have gradients.
       final bool needsMask = subShapes.isNotEmpty || strokeSubtractShapes.isNotEmpty;
 
-      if (needsMask || gradShapes.isNotEmpty) {
+      if (needsMask || gradShapes.isNotEmpty || usesHatch) {
         buffer.writeln('  <defs>');
         
+        if (usesHatch) {
+          final hatch = layer.hatchPattern;
+          final spacing = max(0.5, hatch.spacing.abs());
+          final lineWidth = max(0.05, hatch.strokeWidth.abs());
+          final dash = max(0.1, hatch.dashLength.abs());
+          final gap = max(0.0, hatch.gapLength);
+          final period = max(0.1, dash + gap);
+          // SVG's positive rotation follows its downward Y axis. Negating the
+          // authored angle matches the canvas convention where +45° rises right.
+          final rotation = -hatch.angleDegrees;
+          buffer.writeln(
+              '    <pattern id="$hatchId" patternUnits="userSpaceOnUse" width="$period" height="$spacing" patternTransform="rotate($rotation)">');
+          // Duplicate the seam line at y=height so the clipped halves from
+          // adjacent tiles join into one full-width world-space hatch line.
+          for (final y in <double>[0.0, spacing]) {
+            buffer.writeln(
+                '      <line x1="0" y1="$y" x2="$dash" y2="$y" stroke="$fillHex" stroke-width="$lineWidth" stroke-linecap="butt" />');
+          }
+          buffer.writeln('    </pattern>');
+        }
+
         // Output Subtract Masks
         if (needsMask) {
           final maskId = 'mask_$cleanLayerId';
@@ -353,6 +378,20 @@ class SVGExporter {
         buffer.writeln('  </defs>');
       }
       
+      // Hatch fill is emitted once from the already-resolved fill path rather
+      // than once per primitive. That keeps dash phase continuous across Boolean
+      // islands and across the Mirror Modifier seam. The ordinary shape fills
+      // inside the content group are suppressed below; strokes and self-painted
+      // fills still use their existing passes.
+      if (usesHatch) {
+        final hatchPath = layer.getLayerFillPath();
+        final hatchData = _pathToSvgData(hatchPath);
+        if (hatchData.isNotEmpty) {
+          buffer.writeln(
+              '  <path d="$hatchData" fill="url(#$hatchId)" fill-rule="evenodd" stroke="none" />');
+        }
+      }
+
       // Apply the layer-wide Mask if it exists. The content group is ID'd so the
       // mirror <use> below can instantiate (and reflect) the whole layer -- mask,
       // gradients, meshes and all -- in one shot.
@@ -364,7 +403,7 @@ class SVGExporter {
       }
 
       for (var shape in addShapes) {
-        String shapeFillHex = fillHex;
+        String shapeFillHex = usesHatch ? 'none' : fillHex;
         
         // Look up our Dynamic Fills (Gradient URL vs Base Hex Color)
         if (CompassLayer.hasLiftedGradientFill(shape)) {
@@ -440,6 +479,10 @@ class SVGExporter {
           );
           if (d.isEmpty) continue;
           final bandColor = band.region.color;
+          // Inherited-color ADD bands are already part of the resolved hatch
+          // path above. Custom-colored bands remain solid overpaints, matching
+          // the canvas paint order.
+          if (usesHatch && bandColor == null) continue;
           final bandFill = bandColor != null ? toHexOpaque(bandColor) : fillHex;
           buffer.writeln('    <path d="$d" fill="$bandFill" fill-rule="evenodd" stroke="none" />');
         }

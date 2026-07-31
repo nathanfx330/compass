@@ -12,6 +12,7 @@
 /// paint:
 ///
 ///   * a FLAT fill is a constant function of world position (one Kd, no UVs);
+///   * a HATCH fill is a repeating world-space basis (line direction / normal);
 ///   * a GRADIENT fill is `projectPosition(worldPoint)` -- already implemented
 ///     in gradient.dart, already branching linear (orthogonal projection onto
 ///     the axis) vs circular (radial distance / radius), already clamped to
@@ -64,12 +65,14 @@
 /// Async only because baking a ramp goes through PictureRecorder -> toImage.
 library;
 
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
 import '../models/layer.dart';
+import '../models/fill_pattern.dart';
 import '../models/geometry/gradient.dart';
 import '../models/geometry/image.dart';
 import '../models/geometry/mesh.dart';
@@ -78,6 +81,9 @@ import '../models/geometry/mesh.dart';
 enum ObjMaterialSource {
   /// Constant color. Emits Kd/d only -- no texture, no UVs.
   flat,
+
+  /// Layer drafting hatch, baked to a repeating transparent tile.
+  hatch,
 
   /// Per-shape gradient fill, baked to a 1-D ramp PNG sidecar.
   ramp,
@@ -270,6 +276,7 @@ class _MaterialInterner {
   final Map<String, ObjMaterial> _byKey = {};
   final String stem;
 
+  int _hatchCount = 0;
   int _rampCount = 0;
   int _imageCount = 0;
   int _meshCount = 0;
@@ -289,6 +296,40 @@ class _MaterialInterner {
       alpha: alpha,
     );
     _register(key, material);
+    return material;
+  }
+
+  /// Interns a repeating drafting-hatch tile. The geometry region owns the
+  /// world-space UV projection, so equal hatch appearances share one tiny PNG
+  /// even when used on differently positioned layers.
+  Future<ObjMaterial?> hatch(
+    CompassHatchPattern pattern,
+    Color color,
+  ) async {
+    final key = 'hatch:${color.value}:'
+        '${pattern.angleDegrees.toStringAsFixed(4)}:'
+        '${pattern.spacing.toStringAsFixed(4)}:'
+        '${pattern.strokeWidth.toStringAsFixed(4)}:'
+        '${pattern.dashLength.toStringAsFixed(4)}:'
+        '${pattern.gapLength.toStringAsFixed(4)}';
+    final existing = _byKey[key];
+    if (existing != null) return existing;
+
+    final bytes = await ObjMaterialCollector.bakeHatchPng(pattern, color);
+    if (bytes == null) return null;
+
+    final index = _hatchCount++;
+    final fileName = '${stem}_hatch$index.png';
+    final material = ObjMaterial(
+      name: '${stem}_hatch$index',
+      source: ObjMaterialSource.hatch,
+      diffuse: Colors.white,
+      alpha: 1.0,
+      textureFileName: fileName,
+      textureCarriesAlpha: true,
+    );
+    _register(key, material);
+    sidecars.add(ObjSidecarFile.data(fileName: fileName, bytes: bytes));
     return material;
   }
 
@@ -416,6 +457,8 @@ class ObjMaterialCollector {
   /// and we always sample v = 0.5.
   static const int rampWidth = 256;
   static const int rampHeight = 4;
+  static const int hatchTileWidth = 128;
+  static const int hatchTileHeight = 128;
 
   /// Baked mesh-patch resolution along the LONGEST bounding-box side. 512 is a
   /// deliberate middle: a Coons field is smooth by construction, so it survives
@@ -462,7 +505,7 @@ class ObjMaterialCollector {
   /// base filename (already sanitized by the caller).
   ///
   /// PAINT ORDER, matching CompassRenderer exactly:
-  ///   1a.  flat boolean fill            (layer.color)
+  ///   1a.  layer fill (solid or hatch)  (layer.color + fillMode)
   ///   1a'. self-painted fills           (gradients + IMG, in shape order)
   ///   1c.  variable-width stroke area   (layer.strokeColor)
   ///   1c'. colored stroke ADD bands     (own colors, in stack order)
@@ -499,7 +542,7 @@ class ObjMaterialCollector {
         'shapes=${layer.shapes.length} '
         'mirror=${layer.mirrorEnabled ? layer.mirrorAxis.name : "off"}');
 
-    // ---- 1a. Flat fill -----------------------------------------------------
+    // ---- 1a. Layer fill (solid or hatch) ----------------------------------
     // getLayerFillPath already excludes lifted self-painted shapes (the same
     // `continue` the renderer relies on), so flat and gradient/IMG regions are
     // disjoint by construction before the pass below ever runs.
@@ -514,6 +557,39 @@ class ObjMaterialCollector {
       // every OBJ path skips -- resolves to nothing here.
       log('flat fill: SKIPPED — getLayerFillPath() resolved EMPTY '
           '(layer color 0x${layer.color.value.toRadixString(16).padLeft(8, "0")})');
+    } else if (layer.fillMode == CompassFillMode.hatch) {
+      final material = await interner.hatch(layer.hatchPattern, layer.color);
+      if (material == null) {
+        log('hatch fill: texture bake FAILED; falling back to flat color');
+        warnings.add('The hatch texture could not be baked; OBJ used a flat fill.');
+        regions.add(ObjMaterialRegion(
+          label: 'fill',
+          path: fillPath,
+          material: interner.flat(layer.color),
+        ));
+      } else {
+        final hatch = layer.hatchPattern;
+        final radians = hatch.angleDegrees * pi / 180.0;
+        final direction = Offset(cos(radians), -sin(radians));
+        final normal = Offset(-direction.dy, direction.dx);
+        final period = max(0.1, hatch.dashLength.abs() + max(0.0, hatch.gapLength));
+        final spacing = max(0.5, hatch.spacing.abs());
+        double dot(Offset a, Offset b) => a.dx * b.dx + a.dy * b.dy;
+
+        log('hatch fill: region "fill" — material ${material.name} — '
+            '${describePath(fillPath)}');
+        regions.add(ObjMaterialRegion(
+          label: 'fill',
+          path: fillPath,
+          material: material,
+          // U repeats every dash period; V repeats every line spacing. The +0.5
+          // aligns world-normal multiples with the tile's centerline.
+          uv: (world) => Offset(
+            dot(world, direction) / period,
+            dot(world, normal) / spacing + 0.5,
+          ),
+        ));
+      }
     } else {
       log('flat fill: region "fill" — ${describePath(fillPath)}');
       regions.add(ObjMaterialRegion(
@@ -838,6 +914,50 @@ class ObjMaterialCollector {
     final reflected = clip.transform(layer.mirrorMatrix.storage);
     return Path.combine(PathOperation.union, clip, reflected)
       ..fillType = PathFillType.evenOdd;
+  }
+
+  /// Bakes one transparent repeating hatch tile. World-space scale and angle
+  /// live in the region UV projector; the tile only stores the dash/spacing
+  /// proportions and ink color.
+  static Future<Uint8List?> bakeHatchPng(
+    CompassHatchPattern pattern,
+    Color color,
+  ) async {
+    final spacing = max(0.5, pattern.spacing.abs());
+    final stroke = max(0.05, pattern.strokeWidth.abs());
+    final dash = max(0.1, pattern.dashLength.abs());
+    final gap = max(0.0, pattern.gapLength);
+    final period = max(0.1, dash + gap);
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final y = hatchTileHeight / 2.0;
+    final dashPixels = hatchTileWidth * (dash / period);
+    final strokePixels = max(0.5, hatchTileHeight * (stroke / spacing));
+
+    canvas.drawLine(
+      Offset(0.0, y),
+      Offset(dashPixels, y),
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokePixels
+        ..strokeCap = StrokeCap.butt
+        ..isAntiAlias = true,
+    );
+
+    final picture = recorder.endRecording();
+    try {
+      final image = await picture.toImage(hatchTileWidth, hatchTileHeight);
+      try {
+        final data = await image.toByteData(format: ui.ImageByteFormat.png);
+        return data?.buffer.asUint8List();
+      } finally {
+        image.dispose();
+      }
+    } finally {
+      picture.dispose();
+    }
   }
 
   /// Renders a gradient's resolved stops to a [rampWidth] x [rampHeight] PNG.

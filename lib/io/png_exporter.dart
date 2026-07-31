@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 
 import '../engine.dart';
 import '../models/layer.dart';    
+import '../models/fill_pattern.dart';
 import '../models/geometry/shape.dart';
 import '../models/geometry/line.dart';
 import '../models/geometry/circle.dart';
@@ -153,13 +154,14 @@ class PNGExporter {
       final strokeAreaPath = layer.getLayerStrokeAreaPath();
 
       // 1a. Fill Standard Geometry
-      if (layer.color != Colors.transparent) {
-        final fillPaint = Paint()
-          ..color = layer.color
-          ..style = PaintingStyle.fill
-          ..isAntiAlias = true;
-        canvas.drawPath(fillPath, fillPaint);
-      }
+      paintCompassLayerFill(
+        canvas,
+        fillPath,
+        color: layer.color,
+        mode: layer.fillMode,
+        hatch: layer.hatchPattern,
+        isAntiAlias: true,
+      );
 
       // 1a'. Per-shape LINEAR FILL GRADIENTS
       for (var shape in layer.shapes) {

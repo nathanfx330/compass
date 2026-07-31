@@ -14,6 +14,7 @@ import '../../models/geometry/mesh.dart';
 import '../../models/geometry/image.dart';
 import '../../models/geometry/gradient.dart'; // <--- NEW: per-shape linear fill gradient (stop dots + axis)
 import '../../models/layer.dart'; // <--- NEW: MirrorAxis + hasLiftedGradientFill predicate
+import '../../models/fill_pattern.dart';
 
 // Import CompassTool from the canvas controller
 import 'canvas_controller.dart';
@@ -187,13 +188,19 @@ class CompassRenderer extends CustomPainter {
           }
         }
 
-        // 1a. Fill Standard Geometry 
-        if (layer.color != Colors.transparent) {
-          final fillPaint = Paint()
-            ..color = layer.color
-            ..style = PaintingStyle.fill;
-          canvas.drawPath(fillPath, fillPaint);
-        }
+        // 1a. Fill Standard Geometry. Hatch mode replaces the old flat
+        // paint with a world-space dashed drafting pattern clipped to the same
+        // resolved Boolean silhouette.
+        paintCompassLayerFill(
+          canvas,
+          fillPath,
+          color: layer.color,
+          mode: layer.fillMode,
+          hatch: layer.hatchPattern,
+          visibleBounds: visibleWorldRect.inflate(
+            layer.hatchPattern.spacing + layer.hatchPattern.strokeWidth,
+          ),
+        );
 
         // 1a'. Per-shape LINEAR FILL GRADIENTS (their own self-painted,
         // boolean-clipped category -- the exact structure of the mesh pass at

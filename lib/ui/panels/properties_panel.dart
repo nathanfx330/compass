@@ -8,6 +8,7 @@ import '../../models/geometry/rectangle.dart';
 import '../../models/geometry/spline.dart';
 import '../../models/geometry/mesh.dart';
 import '../../models/geometry/image.dart';
+import '../../models/fill_pattern.dart';
 import '../widgets/compass_color_picker.dart';
 
 class PropertiesPanel extends StatefulWidget {
@@ -97,7 +98,43 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
               const SizedBox(height: 24),
               
               Text(
-                'Fill Color',
+                'Fill Mode',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  color: theme.textTheme.bodySmall?.color,
+                ),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<CompassFillMode>(
+                  segments: const [
+                    ButtonSegment<CompassFillMode>(
+                      value: CompassFillMode.solid,
+                      icon: Icon(Icons.format_color_fill, size: 17),
+                      label: Text('Solid'),
+                    ),
+                    ButtonSegment<CompassFillMode>(
+                      value: CompassFillMode.hatch,
+                      icon: Icon(Icons.texture, size: 17),
+                      label: Text('Hatch'),
+                    ),
+                  ],
+                  selected: <CompassFillMode>{activeLayer.fillMode},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (selection) {
+                    widget.engine.changeLayerFillMode(
+                      activeLayer,
+                      selection.first,
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              Text(
+                activeLayer.fillMode == CompassFillMode.hatch
+                    ? 'Hatch Color'
+                    : 'Fill Color',
                 style: theme.textTheme.titleSmall?.copyWith(color: theme.textTheme.bodySmall?.color),
               ),
               const SizedBox(height: 12),
@@ -130,6 +167,100 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
                 ],
               ),
               
+              if (activeLayer.fillMode == CompassFillMode.hatch) ...[
+                const SizedBox(height: 18),
+                Container(
+                  width: double.infinity,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: theme.dividerColor),
+                    borderRadius: BorderRadius.circular(8),
+                    color: theme.scaffoldBackgroundColor,
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: CustomPaint(
+                    painter: _HatchPreviewPainter(
+                      color: activeLayer.color,
+                      pattern: activeLayer.hatchPattern,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Transparent background · pattern stays fixed in document space.',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: theme.textTheme.bodySmall?.color?.withOpacity(0.75),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _buildPatternSlider(
+                  theme: theme,
+                  label: 'Angle',
+                  valueLabel: '${activeLayer.hatchPattern.angleDegrees.round()}°',
+                  value: activeLayer.hatchPattern.angleDegrees,
+                  min: 0,
+                  max: 180,
+                  divisions: 36,
+                  onChanged: (value) => widget.engine.changeLayerHatchPattern(
+                    activeLayer,
+                    angleDegrees: value,
+                  ),
+                ),
+                _buildPatternSlider(
+                  theme: theme,
+                  label: 'Spacing',
+                  valueLabel: activeLayer.hatchPattern.spacing.toStringAsFixed(1),
+                  value: activeLayer.hatchPattern.spacing.clamp(2.0, 40.0).toDouble(),
+                  min: 2,
+                  max: 40,
+                  divisions: 76,
+                  onChanged: (value) => widget.engine.changeLayerHatchPattern(
+                    activeLayer,
+                    spacing: value,
+                  ),
+                ),
+                _buildPatternSlider(
+                  theme: theme,
+                  label: 'Line Weight',
+                  valueLabel: activeLayer.hatchPattern.strokeWidth.toStringAsFixed(1),
+                  value: activeLayer.hatchPattern.strokeWidth.clamp(0.5, 8.0).toDouble(),
+                  min: 0.5,
+                  max: 8,
+                  divisions: 30,
+                  onChanged: (value) => widget.engine.changeLayerHatchPattern(
+                    activeLayer,
+                    strokeWidth: value,
+                  ),
+                ),
+                _buildPatternSlider(
+                  theme: theme,
+                  label: 'Dash',
+                  valueLabel: activeLayer.hatchPattern.dashLength.toStringAsFixed(1),
+                  value: activeLayer.hatchPattern.dashLength.clamp(1.0, 30.0).toDouble(),
+                  min: 1,
+                  max: 30,
+                  divisions: 58,
+                  onChanged: (value) => widget.engine.changeLayerHatchPattern(
+                    activeLayer,
+                    dashLength: value,
+                  ),
+                ),
+                _buildPatternSlider(
+                  theme: theme,
+                  label: 'Gap',
+                  valueLabel: activeLayer.hatchPattern.gapLength.toStringAsFixed(1),
+                  value: activeLayer.hatchPattern.gapLength.clamp(0.0, 30.0).toDouble(),
+                  min: 0,
+                  max: 30,
+                  divisions: 60,
+                  onChanged: (value) => widget.engine.changeLayerHatchPattern(
+                    activeLayer,
+                    gapLength: value,
+                  ),
+                ),
+              ],
+
               const SizedBox(height: 24),
               const Divider(),
               const SizedBox(height: 24),
@@ -582,6 +713,40 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
     );
   }
 
+  Widget _buildPatternSlider({
+    required ThemeData theme,
+    required String label,
+    required String valueLabel,
+    required double value,
+    required double min,
+    required double max,
+    required int divisions,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Text(label),
+            const Spacer(),
+            Text(
+              valueLabel,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        Slider(
+          value: value,
+          min: min,
+          max: max,
+          divisions: divisions,
+          activeColor: theme.colorScheme.primary,
+          onChanged: onChanged,
+        ),
+      ],
+    );
+  }
+
   Widget _buildColorSwatch({
     required Color color, 
     required bool isSelected, 
@@ -662,5 +827,36 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
         ),
       ),
     );
+  }
+}
+
+class _HatchPreviewPainter extends CustomPainter {
+  final Color color;
+  final CompassHatchPattern pattern;
+
+  const _HatchPreviewPainter({
+    required this.color,
+    required this.pattern,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()..addRect(Offset.zero & size);
+    paintCompassHatch(
+      canvas,
+      path,
+      color: color,
+      pattern: pattern,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _HatchPreviewPainter oldDelegate) {
+    return oldDelegate.color != color ||
+        oldDelegate.pattern.angleDegrees != pattern.angleDegrees ||
+        oldDelegate.pattern.spacing != pattern.spacing ||
+        oldDelegate.pattern.strokeWidth != pattern.strokeWidth ||
+        oldDelegate.pattern.dashLength != pattern.dashLength ||
+        oldDelegate.pattern.gapLength != pattern.gapLength;
   }
 }
