@@ -144,6 +144,7 @@ class CompassEngine extends ChangeNotifier {
         if (shape is CompassImage) shape.image?.dispose();
       }
     }
+    referenceLayer?.image?.dispose();
     _documentRepaintNotifier.dispose();
     super.dispose();
   }
@@ -339,26 +340,40 @@ class CompassEngine extends ChangeNotifier {
     }
   }
 
-  Future<void> loadReferenceImage(String path) async {
+  Future<bool> loadReferenceImage(String path) async {
+    ui.Codec? codec;
     try {
       final file = File(path);
+      if (!await file.exists()) return false;
+
       final bytes = await file.readAsBytes();
-      final codec = await ui.instantiateImageCodec(bytes);
+      codec = await ui.instantiateImageCodec(bytes);
       final frameInfo = await codec.getNextFrame();
-      
-      referenceLayer = CompassReferenceLayer(imagePath: path);
-      referenceLayer!.image = frameInfo.image;
-      
-      referenceLayer!.offset = Offset(-frameInfo.image.width / 2, -frameInfo.image.height / 2);
-      
+
+      final previousImage = referenceLayer?.image;
+      final nextReference = CompassReferenceLayer(imagePath: path)
+        ..image = frameInfo.image
+        ..offset = Offset(
+          -frameInfo.image.width / 2,
+          -frameInfo.image.height / 2,
+        );
+
+      referenceLayer = nextReference;
+      previousImage?.dispose();
+
       saveSnapshot();
       notifyListeners();
+      return true;
     } catch (e) {
       debugPrint('Failed to load reference image: $e');
+      return false;
+    } finally {
+      codec?.dispose();
     }
   }
 
   void removeReferenceLayer() {
+    referenceLayer?.image?.dispose();
     referenceLayer = null;
     saveSnapshot();
     notifyListeners();

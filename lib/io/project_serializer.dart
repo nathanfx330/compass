@@ -358,6 +358,7 @@ class ProjectSerializer {
     // discarded world -- the same zombie-listener debt as bare removeWhere.
     // Rebuilt from CONSTRAINT lines (and the circle/rectangle loaders) below.
     engine.unbindAllConstraints();
+    engine.referenceLayer?.image?.dispose();
     engine.referenceLayer = null;
     engine.activeLayer = null;
     engine.selectShape(null);
@@ -385,11 +386,14 @@ class ProjectSerializer {
       } 
       else if (type == 'REF' && parts.length >= 8) {
         final path = parts[1];
-        engine.loadReferenceImage(path).then((_) {
-          if (engine.referenceLayer != null) {
+        engine.loadReferenceImage(path).then((loaded) {
+          if (loaded && engine.referenceLayer != null) {
             engine.referenceLayer!.isVisible = parts[2] == 'true';
             engine.referenceLayer!.isLocked = parts[3] == 'true';
-            engine.referenceLayer!.offset = ui.Offset(double.tryParse(parts[4]) ?? 0, double.tryParse(parts[5]) ?? 0);
+            engine.referenceLayer!.offset = ui.Offset(
+              double.tryParse(parts[4]) ?? 0,
+              double.tryParse(parts[5]) ?? 0,
+            );
             engine.referenceLayer!.scale = double.tryParse(parts[6]) ?? 1.0;
             engine.referenceLayer!.rotation = double.tryParse(parts[7]) ?? 0.0;
             onUpdate();

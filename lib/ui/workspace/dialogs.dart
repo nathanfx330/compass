@@ -3,6 +3,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:file_selector/file_selector.dart';
 import '../../engine.dart';
 import '../../models/layer.dart';
 import '../../models/geometry/spline.dart';
@@ -1295,115 +1296,76 @@ class CompassDialogs {
     );
   }
 
-  static void showImportImageLayer(BuildContext context, CompassEngine engine) {
-    final TextEditingController filepathController = TextEditingController();
+  static const XTypeGroup _rasterImageTypeGroup = XTypeGroup(
+    label: 'Images',
+    extensions: <String>['png', 'jpg', 'jpeg'],
+  );
 
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Import IMG Layer'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Enter the absolute path to a PNG or JPG. The image becomes an '
-                'ordered layer object and can be carved by normal Boolean shapes.',
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: filepathController,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  labelText: 'Image File Path',
-                  hintText: '/home/user/Pictures/photo.png',
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton.icon(
-              icon: const Icon(Icons.add_photo_alternate_outlined),
-              label: const Text('Import IMG'),
-              onPressed: () async {
-                final path = filepathController.text.trim();
-                if (path.isEmpty) return;
-
-                Navigator.of(context).pop();
-                final image = await engine.importImageLayer(path);
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        image == null
-                            ? 'Could not import that PNG/JPG.'
-                            : 'Imported ${image.displayName} as an IMG layer.',
-                      ),
-                    ),
-                  );
-                }
-              },
-            ),
-          ],
-        );
-      },
+  static Future<XFile?> _pickRasterImage({
+    required String confirmButtonText,
+  }) {
+    return openFile(
+      acceptedTypeGroups: const <XTypeGroup>[_rasterImageTypeGroup],
+      confirmButtonText: confirmButtonText,
     );
   }
 
-  static void showLoadReferenceImage(BuildContext context, CompassEngine engine) {
-    final TextEditingController filepathController = TextEditingController();
+  static Future<void> showImportImageLayer(
+    BuildContext context,
+    CompassEngine engine,
+  ) async {
+    try {
+      final file = await _pickRasterImage(confirmButtonText: 'Import IMG');
+      if (file == null) return;
 
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Load Reference Image'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Enter the absolute file path to a local image (PNG/JPG):'),
-              const SizedBox(height: 12),
-              TextField(
-                controller: filepathController,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  labelText: 'Image File Path',
-                  hintText: '/home/user/Pictures/sketch.png',
-                ),
-              ),
-            ],
+      final image = await engine.importImageLayer(file.path);
+      if (!context.mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            image == null
+                ? 'Could not import that PNG/JPG.'
+                : 'Imported ${image.displayName} as an IMG layer.',
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton.icon(
-              icon: const Icon(Icons.image_search),
-              label: const Text('Load Image'),
-              onPressed: () async {
-                final path = filepathController.text;
-                if (path.isNotEmpty) {
-                  Navigator.of(context).pop();
-                  await engine.loadReferenceImage(path);
-                  if (engine.referenceLayer == null && context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Failed to load image at that path.')),
-                    );
-                  }
-                }
-              },
-            ),
-          ],
-        );
-      },
-    );
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open the image picker: $e')),
+      );
+    }
+  }
+
+  static Future<void> showLoadReferenceImage(
+    BuildContext context,
+    CompassEngine engine,
+  ) async {
+    try {
+      final file = await _pickRasterImage(
+        confirmButtonText: 'Use as Reference',
+      );
+      if (file == null) return;
+
+      final loaded = await engine.loadReferenceImage(file.path);
+      if (!context.mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            loaded
+                ? 'Loaded ${file.name} as the reference image.'
+                : 'Could not load that PNG/JPG.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open the image picker: $e')),
+      );
+    }
   }
 
   static void showFilletDialog(BuildContext context, CompassEngine engine, CompassXSpline spline, CompassSplineNode node) {

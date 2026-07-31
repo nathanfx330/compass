@@ -39,7 +39,7 @@ drive it.
 
 ## 1. Getting started
 
-Compass is built in Flutter with no external Dart dependencies.
+Compass is built in Flutter and uses Flutter's maintained `file_selector` plugin for native desktop file dialogs.
 
 ```bash
 flutter pub get
@@ -100,7 +100,7 @@ empty-canvas right-click menu:
 
 - **Show/Hide Scaffolding** — everything. Hiding it also disables point
   interaction, so this is your clean preview.
-- **Show/Hide Handles** — Bézier and width handle dots only.
+- **Show/Hide Handles** — Catmull–Rom tension boxes, Bézier handles, variable-width handles, and gradient-mesh tension boxes.
 - **Ghost Vertices** — hides the vertex *dots* while keeping every point fully
   live. Hover a bare wireframe and each invisible vertex lights up as you reach
   it. Points stay clickable, draggable, and box-selectable. Pair with
@@ -362,7 +362,7 @@ lifting a subtract above an add changes the resolved geometry.
 
 ### Reference image
 
-Pinned below the hierarchy. Load a PNG/JPG to trace over. It never exports.
+Pinned below the hierarchy. Click the folder button or choose **File → Load Reference Image…**, then select a PNG/JPG in the native system file picker. It never exports.
 Unlock it to move (drag) and scale (scroll) it; lock it to work over it.
 
 ---
@@ -533,7 +533,7 @@ palette, plus a Custom option.
 
 ## 16. IMG objects
 
-**File → Import IMG Layer…** and enter an absolute path to a PNG or JPG.
+**File → Import IMG Layer…**, then select a PNG or JPG in the native system file picker.
 
 An IMG is an ordinary ordered object, not a locked backdrop. Its position is an
 **affine frame of three real points**: an origin, an X-edge handle, and a Y-edge

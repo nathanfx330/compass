@@ -28,7 +28,7 @@ class CompassWorkspace extends StatefulWidget {
 class _CompassWorkspaceState extends State<CompassWorkspace> {
   late CompassEngine _engine;
   bool _showScaffolding = true;
-  bool _showHandles = true; // State for showing/hiding Bezier handles
+  bool _showHandles = true; // Global visibility for spline, width, and mesh editing handles
 
   // --- NEW: GHOST VERTICES ---
   // When true, the vertex DOTS (and tension boxes) are not painted, but hit

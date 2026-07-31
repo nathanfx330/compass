@@ -529,10 +529,10 @@ class CompassRenderer extends CustomPainter {
               }
 
               // --- Tension Handles for selected Mesh nodes ---
-              // Ghosted: these are per-node dot furniture, so they hide with the
-              // vertex dots. (The mesh LATTICE above still draws -- that's shape
-              // structure, not dot clutter.)
-              if (!ghostVertices) {
+              // These are editing handles, so both Hide Handles and Ghost
+              // Vertices suppress them. The mesh lattice above remains visible:
+              // it is shape structure rather than handle furniture.
+              if (showHandles && !ghostVertices) {
                 for (var node in shape.nodes) {
                   final pt = Offset(node.point.x.value, node.point.y.value);
                   
@@ -561,17 +561,18 @@ class CompassRenderer extends CustomPainter {
               }
             }
           } else if (shape is CompassXSpline) {
-             // NOTE: shape.paint draws the spline body PLUS its per-node tension
-             // boxes when selected. In ghost mode we suppress those boxes by
-             // passing isSelected:false to paint (the body still draws; the
-             // brighter selected wireframe paint is kept so selection still
-             // reads) -- the centroid box, pulleys, and vertex numbers below are
-             // handled individually.
+             // NOTE: shape.paint draws the spline body PLUS its per-node
+             // Catmull-Rom tension handles when selected. Pass isSelected:false
+             // when handles are hidden (or vertices are ghosted) so the curve
+             // still draws with the selected wireframe paint, while the tension
+             // rig does not leak through the global Hide Handles toggle. The
+             // centroid box, pulleys, and vertex numbers below are handled
+             // individually.
              shape.paint(
                canvas,
                isSelected ? selectedWireframePaint : wireframePaint,
                showScaffolding: true,
-               isSelected: isSelected && !ghostVertices,
+               isSelected: isSelected && showHandles && !ghostVertices,
              );
              
              // --- Draw Centroid Box for selected X-Spline ---
